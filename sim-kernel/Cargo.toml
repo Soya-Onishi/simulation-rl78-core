@@ -1,0 +1,8 @@
+[package]
+name = "sim-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Architecture-independent virtual-time simulation kernel"
+
+[dependencies]

@@ -1,0 +1,107 @@
+//! Virtual simulation clock.
+//!
+//! Milestone 1 uses a QEMU-icount style model: one retired instruction is one
+//! [`Tick`]. Cycle-accurate costing can replace the increment later without
+//! changing the kernel loop.
+
+use std::fmt;
+use std::ops::{Add, AddAssign, Sub};
+
+/// Monotonic virtual time unit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tick(pub u64);
+
+impl Tick {
+    pub const ZERO: Self = Self(0);
+    pub const MAX: Self = Self(u64::MAX);
+
+    #[must_use]
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    #[must_use]
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
+    }
+
+    #[must_use]
+    pub const fn min(self, other: Self) -> Self {
+        if self.0 <= other.0 { self } else { other }
+    }
+
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl Add for Tick {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        self.saturating_add(rhs)
+    }
+}
+
+impl AddAssign for Tick {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = self.saturating_add(rhs);
+    }
+}
+
+impl Sub for Tick {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.saturating_sub(rhs)
+    }
+}
+
+impl fmt::Display for Tick {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Simulation virtual clock. Only the simulation thread should advance it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VirtualClock {
+    now: Tick,
+}
+
+impl VirtualClock {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn now(&self) -> Tick {
+        self.now
+    }
+
+    pub fn advance(&mut self, delta: Tick) {
+        self.now += delta;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advances_monotonically() {
+        let mut clock = VirtualClock::new();
+        assert_eq!(clock.now(), Tick::ZERO);
+        clock.advance(Tick(3));
+        clock.advance(Tick(4));
+        assert_eq!(clock.now(), Tick(7));
+    }
+
+    #[test]
+    fn add_saturates() {
+        assert_eq!(Tick::MAX + Tick(1), Tick::MAX);
+        assert_eq!(Tick(2) - Tick(5), Tick::ZERO);
+    }
+}

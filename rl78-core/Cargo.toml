@@ -1,0 +1,9 @@
+[package]
+name = "rl78-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "RL78 core assembly: CPU wrapper, minimal memory map, Magic probe, ELF"
+
+[dependencies]
+sim-kernel = { path = "../sim-kernel" }
