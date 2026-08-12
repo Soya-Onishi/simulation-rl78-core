@@ -56,8 +56,36 @@ impl fmt::Display for Response {
             Self::Started => write!(f, "started"),
             Self::Stopped(reason) => write!(f, "stopped: {reason}"),
             Self::Quit => write!(f, "quit"),
-            Self::Inspect(result) => write!(f, "ok: {result:?}"),
-            Self::Error(err) => write!(f, "error: {err:?}"),
+            Self::Inspect(result) => write!(f, "{result}"),
+            Self::Error(err) => write!(f, "error: {err}"),
+        }
+    }
+}
+
+impl fmt::Display for InspectResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok => write!(f, "ok"),
+            Self::Reg { id, value } => write!(f, "reg {} = {value:#x}", id.0),
+            Self::Mem { addr, data } => {
+                write!(f, "mem {addr:#x} =")?;
+                for byte in data {
+                    write!(f, " {byte:02x}")?;
+                }
+                Ok(())
+            }
+            Self::Breakpoint { id } => write!(f, "breakpoint {}", id.0),
+        }
+    }
+}
+
+impl fmt::Display for SimError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => write!(f, "simulation is running"),
+            Self::UnknownRegister(id) => write!(f, "unknown register {}", id.0),
+            Self::UnknownBreakpoint(id) => write!(f, "unknown breakpoint {}", id.0),
+            Self::Bus(err) => write!(f, "{err}"),
         }
     }
 }

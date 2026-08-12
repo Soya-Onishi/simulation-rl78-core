@@ -1,7 +1,8 @@
-//! Test / mock CPU used to exercise the kernel without an architecture backend.
+//! Test / mock CPU used only by `sim_tests`.
 
 use std::collections::HashMap;
 
+use crate::breakpoint::Breakpoint;
 use crate::bus::{Addr, BusError, MemoryBus};
 use crate::clock::Tick;
 use crate::command::SimError;
@@ -21,10 +22,6 @@ pub enum ScriptOp {
         addr: Addr,
         data: Vec<u8>,
     },
-    Read {
-        addr: Addr,
-        len: usize,
-    },
     Halt,
     SetPc(Addr),
 }
@@ -36,6 +33,7 @@ pub struct ScriptedCpu {
     regs: HashMap<u32, u64>,
     ops: Vec<ScriptOp>,
     idx: usize,
+    breakpoints: Vec<Breakpoint>,
 }
 
 impl ScriptedCpu {
@@ -46,12 +44,20 @@ impl ScriptedCpu {
             regs: HashMap::new(),
             ops,
             idx: 0,
+            breakpoints: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn nops(count: usize) -> Self {
         Self::new(vec![ScriptOp::Nop; count])
+    }
+
+    fn hit_breakpoint(&self) -> Option<StopReason> {
+        self.breakpoints
+            .iter()
+            .find(|bp| bp.enabled && bp.addr == self.pc)
+            .map(|bp| StopReason::Breakpoint { id: bp.id })
     }
 }
 
@@ -80,12 +86,12 @@ impl Cpu for ScriptedCpu {
                 Some(ScriptOp::WriteIgnoreError { addr, data }) => {
                     let _ = bus.write(addr, &data);
                 }
-                Some(ScriptOp::Read { addr, len }) => {
-                    let mut buf = vec![0u8; len];
-                    if let Err(err) = bus.read(addr, &mut buf) {
-                        return unmapped_or_continue(ticks, err, false);
-                    }
-                }
+            }
+            if let Some(stop) = self.hit_breakpoint() {
+                return Quantum {
+                    ticks,
+                    stop: Some(stop),
+                };
             }
         }
         Quantum { ticks, stop: None }
@@ -116,6 +122,10 @@ impl Cpu for ScriptedCpu {
 
     fn set_pc(&mut self, pc: Addr) {
         self.pc = pc;
+    }
+
+    fn sync_breakpoints(&mut self, breakpoints: &[Breakpoint]) {
+        self.breakpoints = breakpoints.to_vec();
     }
 }
 

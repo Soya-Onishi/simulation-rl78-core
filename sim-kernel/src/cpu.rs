@@ -23,8 +23,14 @@ pub struct Quantum {
 pub trait Cpu: Send {
     /// Execute up to `max_ticks` of guest work (M1: one instruction per tick).
     ///
+    /// `bus` is the guest physical map for this quantum: tlib memory callbacks
+    /// (and mock CPUs) perform loads/stores through it while instructions run.
+    /// The kernel does not walk the bus itself during execute.
+    ///
     /// Implementations must either consume a non-zero number of ticks or return
     /// a stop reason. A zero-tick quantum with no stop is treated as [`StopReason::Halt`].
+    /// Breakpoints are reported via [`Quantum::stop`] (`StopReason::Breakpoint`);
+    /// the kernel does not re-scan the breakpoint table after each quantum.
     fn run_quantum(&mut self, bus: &mut MemoryBus, max_ticks: Tick) -> Quantum;
 
     fn read_reg(&self, id: RegId) -> Result<u64, SimError>;
@@ -33,6 +39,6 @@ pub trait Cpu: Send {
     fn pc(&self) -> Addr;
     fn set_pc(&mut self, pc: Addr);
 
-    /// Optional hook so backends can push the kernel breakpoint table into tlib.
+    /// Push the kernel breakpoint table into the backend (e.g. `tlib_add_breakpoint`).
     fn sync_breakpoints(&mut self, _breakpoints: &[Breakpoint]) {}
 }

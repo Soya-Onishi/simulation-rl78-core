@@ -8,48 +8,37 @@ mod elf;
 mod magic;
 mod map;
 
-pub use cpu::{REG_PC, REG_PSW, REG_SP, Rl78Cpu};
+pub use cpu::Rl78Cpu;
 pub use elf::{ElfLoad, LoadError, load_elf};
-pub use magic::{BufferSink, MagicProbe, ProbeSink, StdoutSink};
-pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, RAM_BASE, RAM_SIZE, ROM_BASE, ROM_SIZE};
+pub use magic::{MagicProbe, ProbeSink, StdoutSink};
+pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 
-use sim_kernel::{Machine, Ram, Rom};
+use sim_kernel::{Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy};
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MinimalMachineConfig {
-    pub rom_size: usize,
-    pub ram_size: usize,
+    /// Selects ROM/RAM windows for the target core / part.
+    pub device: Rl78Device,
+    /// Optional override; when `None`, [`Rl78Device::memory_layout`] is used.
+    pub layout: Option<MemoryLayout>,
+    pub unmapped: UnmappedPolicy,
 }
 
-impl Default for MinimalMachineConfig {
-    fn default() -> Self {
-        Self {
-            rom_size: ROM_SIZE,
-            ram_size: RAM_SIZE,
-        }
+impl MinimalMachineConfig {
+    #[must_use]
+    pub fn layout(&self) -> MemoryLayout {
+        self.layout.unwrap_or_else(|| self.device.memory_layout())
     }
 }
 
 /// Build the milestone-1 machine: ROM + RAM + Magic probe on one bus.
 ///
-/// Higher-level board crates are expected to take this `Machine` by value and
-/// map additional devices onto [`Machine::bus_mut`].
+/// The memory map is assembled as an immutable [`MemoryMapBuilder`] chain and
+/// handed to [`Machine::new`] in one step. Board crates can build their own
+/// map the same way and construct a `Machine` directly.
 pub fn minimal_machine(cfg: MinimalMachineConfig) -> Machine<Rl78Cpu> {
-    let mut machine = Machine::new(Rl78Cpu::new());
-    machine
-        .bus_mut()
-        .map(ROM_BASE, Box::new(Rom::new(cfg.rom_size)))
-        .expect("ROM mapping");
-    machine
-        .bus_mut()
-        .map(RAM_BASE, Box::new(Ram::new(cfg.ram_size)))
-        .expect("RAM mapping");
-    machine
-        .bus_mut()
-        .map(MAGIC_PROBE_BASE, Box::new(MagicProbe::new(StdoutSink)))
-        .expect("Magic probe mapping");
-    machine
+    minimal_machine_with_probe(cfg, StdoutSink)
 }
 
 /// Same as [`minimal_machine`] but the probe writes into `sink` (for tests).
@@ -57,26 +46,50 @@ pub fn minimal_machine_with_probe<S>(cfg: MinimalMachineConfig, sink: S) -> Mach
 where
     S: ProbeSink + 'static,
 {
-    let mut machine = Machine::new(Rl78Cpu::new());
-    machine
-        .bus_mut()
-        .map(ROM_BASE, Box::new(Rom::new(cfg.rom_size)))
-        .expect("ROM mapping");
-    machine
-        .bus_mut()
-        .map(RAM_BASE, Box::new(Ram::new(cfg.ram_size)))
-        .expect("RAM mapping");
-    machine
-        .bus_mut()
+    let bus = build_minimal_bus(&cfg, sink).expect("minimal memory map");
+    Machine::new(Rl78Cpu::new(), bus)
+}
+
+/// Assemble the M1 memory map without creating a [`Machine`].
+pub fn build_minimal_bus<S>(cfg: &MinimalMachineConfig, sink: S) -> Result<MemoryBus, MapError>
+where
+    S: ProbeSink + 'static,
+{
+    let layout = cfg.layout();
+    MemoryMapBuilder::new()
+        .policy(cfg.unmapped)
+        .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
+        .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
         .map(MAGIC_PROBE_BASE, Box::new(MagicProbe::new(sink)))
-        .expect("Magic probe mapping");
-    machine
+        .map(|b| b.build())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
-    use sim_kernel::{BusError, UnmappedPolicy};
+    use sim_kernel::BusError;
+
+    #[derive(Clone, Default)]
+    struct BufferSink {
+        buf: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl BufferSink {
+        fn buffer(&self) -> Arc<Mutex<Vec<u8>>> {
+            Arc::clone(&self.buf)
+        }
+    }
+
+    impl ProbeSink for BufferSink {
+        fn emit(&mut self, bytes: &[u8]) {
+            self.buf
+                .lock()
+                .expect("probe buffer")
+                .extend_from_slice(bytes);
+        }
+    }
 
     #[test]
     fn magic_probe_is_a_normal_mapped_device() {
@@ -90,10 +103,28 @@ mod tests {
     #[test]
     fn unmapped_access_is_logged() {
         let mut machine = minimal_machine(MinimalMachineConfig::default());
-        machine.bus_mut().set_policy(UnmappedPolicy::Log);
         let err = machine.bus_mut().read(0x80000, &mut [0u8; 1]).unwrap_err();
         assert!(matches!(err, BusError::Unmapped { addr: 0x80000, .. }));
         assert_eq!(machine.bus_mut().take_unmapped_log().len(), 1);
+    }
+
+    #[test]
+    fn device_layout_is_selectable() {
+        let layout = Rl78Device::Generic64k.memory_layout();
+        assert_eq!(layout.rom_size, 64 * 1024);
+        assert_eq!(layout.ram_size, 32 * 1024);
+        let custom = MemoryLayout {
+            rom_base: 0,
+            rom_size: 8 * 1024,
+            ram_base: 0xF8000,
+            ram_size: 4 * 1024,
+        };
+        let cfg = MinimalMachineConfig {
+            layout: Some(custom),
+            ..MinimalMachineConfig::default()
+        };
+        assert_eq!(cfg.layout().ram_size, 4 * 1024);
+        let _ = minimal_machine(cfg);
     }
 
     #[test]

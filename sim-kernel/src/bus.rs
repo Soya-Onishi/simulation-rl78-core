@@ -75,7 +75,7 @@ struct MappedRegion {
     device: Box<dyn MemoryMapped>,
 }
 
-/// Flat physical bus. Configuration is by `map`, not string properties.
+/// Flat physical bus. Built via [`MemoryMapBuilder`]; runtime only serves accesses.
 #[derive(Default)]
 pub struct MemoryBus {
     regions: Vec<MappedRegion>,
@@ -91,36 +91,8 @@ impl MemoryBus {
     }
 
     #[must_use]
-    pub fn with_policy(policy: UnmappedPolicy) -> Self {
-        Self {
-            policy,
-            ..Self::default()
-        }
-    }
-
-    pub fn set_policy(&mut self, policy: UnmappedPolicy) {
-        self.policy = policy;
-    }
-
-    #[must_use]
     pub fn policy(&self) -> UnmappedPolicy {
         self.policy
-    }
-
-    pub fn map(&mut self, base: Addr, device: Box<dyn MemoryMapped>) -> Result<(), MapError> {
-        let size = device.len();
-        if size == 0 {
-            return Err(MapError::EmptyDevice);
-        }
-        if self
-            .regions
-            .iter()
-            .any(|r| overlaps(r.base, r.size, base, size))
-        {
-            return Err(MapError::Overlap { base, size });
-        }
-        self.regions.push(MappedRegion { base, size, device });
-        Ok(())
     }
 
     pub fn read(&mut self, addr: Addr, buf: &mut [u8]) -> Result<(), BusError> {
@@ -177,6 +149,56 @@ impl MemoryBus {
 
 fn overlaps(a_base: Addr, a_size: u64, b_base: Addr, b_size: u64) -> bool {
     a_base < b_base.saturating_add(b_size) && b_base < a_base.saturating_add(a_size)
+}
+
+/// Immutable-style memory map construction.
+///
+/// Each [`MemoryMapBuilder::map`] / [`MemoryMapBuilder::policy`] takes `self` by
+/// value and returns the updated builder. The finished map is passed into
+/// [`crate::Machine::new`] — callers do not mutate a live bus region-by-region.
+#[derive(Default)]
+pub struct MemoryMapBuilder {
+    regions: Vec<MappedRegion>,
+    policy: UnmappedPolicy,
+}
+
+impl MemoryMapBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn policy(mut self, policy: UnmappedPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn map(mut self, base: Addr, device: Box<dyn MemoryMapped>) -> Result<Self, MapError> {
+        let size = device.len();
+        if size == 0 {
+            return Err(MapError::EmptyDevice);
+        }
+        if self
+            .regions
+            .iter()
+            .any(|r| overlaps(r.base, r.size, base, size))
+        {
+            return Err(MapError::Overlap { base, size });
+        }
+        self.regions.push(MappedRegion { base, size, device });
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn build(self) -> MemoryBus {
+        MemoryBus {
+            regions: self.regions,
+            policy: self.policy,
+            unmapped_log: Vec::new(),
+            trap: None,
+        }
+    }
 }
 
 /// Writable RAM region.
@@ -298,8 +320,10 @@ mod tests {
 
     #[test]
     fn ram_roundtrip() {
-        let mut bus = MemoryBus::new();
-        bus.map(0x1000, Box::new(Ram::new(16))).unwrap();
+        let mut bus = MemoryMapBuilder::new()
+            .map(0x1000, Box::new(Ram::new(16)))
+            .unwrap()
+            .build();
         bus.write(0x1004, &[1, 2, 3, 4]).unwrap();
         let mut buf = [0u8; 4];
         bus.read(0x1004, &mut buf).unwrap();
@@ -308,9 +332,10 @@ mod tests {
 
     #[test]
     fn rom_rejects_writes() {
-        let mut bus = MemoryBus::new();
-        bus.map(0, Box::new(Rom::from_bytes(vec![0xAA, 0xBB])))
-            .unwrap();
+        let mut bus = MemoryMapBuilder::new()
+            .map(0, Box::new(Rom::from_bytes(vec![0xAA, 0xBB])))
+            .unwrap()
+            .build();
         assert!(matches!(
             bus.write(0, &[0x00]),
             Err(BusError::ReadOnly { .. })
@@ -333,7 +358,7 @@ mod tests {
 
     #[test]
     fn unmapped_trap_policy() {
-        let mut bus = MemoryBus::with_policy(UnmappedPolicy::Trap);
+        let mut bus = MemoryMapBuilder::new().policy(UnmappedPolicy::Trap).build();
         let _ = bus.write(0x10, &[0xFF]);
         let trap = bus.take_trap().unwrap();
         assert!(trap.write);
@@ -342,10 +367,11 @@ mod tests {
 
     #[test]
     fn overlap_is_rejected() {
-        let mut bus = MemoryBus::new();
-        bus.map(0x100, Box::new(Ram::new(32))).unwrap();
+        let builder = MemoryMapBuilder::new()
+            .map(0x100, Box::new(Ram::new(32)))
+            .unwrap();
         assert!(matches!(
-            bus.map(0x110, Box::new(Ram::new(16))),
+            builder.map(0x110, Box::new(Ram::new(16))),
             Err(MapError::Overlap { .. })
         ));
     }

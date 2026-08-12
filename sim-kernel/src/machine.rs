@@ -8,6 +8,9 @@ use crate::cpu::{Cpu, RegId};
 use crate::event::EventQueue;
 
 /// Concrete machine owned exclusively by the simulation thread.
+///
+/// The memory map is finished before construction: pass a [`MemoryBus`] built
+/// with [`crate::MemoryMapBuilder`], rather than mutating regions afterward.
 pub struct Machine<C: Cpu> {
     cpu: C,
     bus: MemoryBus,
@@ -18,10 +21,10 @@ pub struct Machine<C: Cpu> {
 
 impl<C: Cpu> Machine<C> {
     #[must_use]
-    pub fn new(cpu: C) -> Self {
+    pub fn new(cpu: C, bus: MemoryBus) -> Self {
         Self {
             cpu,
-            bus: MemoryBus::new(),
+            bus,
             clock: VirtualClock::new(),
             events: EventQueue::new(),
             breakpoints: BreakpointStore::new(),

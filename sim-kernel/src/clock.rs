@@ -5,7 +5,7 @@
 //! changing the kernel loop.
 
 use std::fmt;
-use std::ops::{Add, AddAssign, Sub};
+use std::ops::{Add, AddAssign};
 
 /// Monotonic virtual time unit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -20,6 +20,7 @@ impl Tick {
         Self(self.0.saturating_add(other.0))
     }
 
+    /// Remaining time until a deadline (used by the quantum loop).
     #[must_use]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
@@ -47,14 +48,6 @@ impl Add for Tick {
 impl AddAssign for Tick {
     fn add_assign(&mut self, rhs: Self) {
         *self = self.saturating_add(rhs);
-    }
-}
-
-impl Sub for Tick {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        self.saturating_sub(rhs)
     }
 }
 
@@ -100,8 +93,10 @@ mod tests {
     }
 
     #[test]
-    fn add_saturates() {
+    fn add_and_sub_saturate() {
         assert_eq!(Tick::MAX + Tick(1), Tick::MAX);
-        assert_eq!(Tick(2) - Tick(5), Tick::ZERO);
+        assert_eq!(Tick(2).saturating_sub(Tick(5)), Tick::ZERO);
+        assert_eq!(Tick(10).min(Tick(3)), Tick(3));
+        assert!(Tick::ZERO.is_zero());
     }
 }

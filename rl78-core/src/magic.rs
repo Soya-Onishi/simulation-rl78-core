@@ -1,13 +1,12 @@
 //! Magic probe: a normal [`sim_kernel::MemoryMapped`] logger device.
 
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
 
 use sim_kernel::{BusError, MemoryMapped};
 
 use crate::map::MAGIC_PROBE_SIZE;
 
-/// Destination for probe bytes. Tests inject a buffer; the CLI uses stdout.
+/// Destination for probe bytes (stdout in the CLI; tests inject their own sink).
 pub trait ProbeSink: Send {
     fn emit(&mut self, bytes: &[u8]);
 }
@@ -21,28 +20,6 @@ impl ProbeSink for StdoutSink {
         let mut out = io::stdout().lock();
         let _ = out.write_all(bytes);
         let _ = out.flush();
-    }
-}
-
-/// Shared byte buffer for tests.
-#[derive(Clone, Debug, Default)]
-pub struct BufferSink {
-    buf: Arc<Mutex<Vec<u8>>>,
-}
-
-impl BufferSink {
-    #[must_use]
-    pub fn buffer(&self) -> Arc<Mutex<Vec<u8>>> {
-        Arc::clone(&self.buf)
-    }
-}
-
-impl ProbeSink for BufferSink {
-    fn emit(&mut self, bytes: &[u8]) {
-        self.buf
-            .lock()
-            .expect("probe buffer")
-            .extend_from_slice(bytes);
     }
 }
 

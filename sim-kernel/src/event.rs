@@ -1,4 +1,14 @@
 //! Virtual-time event queue.
+//!
+//! The kernel advances the guest only until the next scheduled deadline, then
+//! fires due events. Intended users:
+//!
+//! - peripheral timers / compare-match (M2+)
+//! - watchdogs and other stop conditions on the same clock as the CPU
+//! - host-scheduled work that must stay synchronized with virtual time
+//!
+//! The CPU quantum size is `min(max_quantum, next_deadline - now)`, so events
+//! and instruction retirement share one timeline.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};

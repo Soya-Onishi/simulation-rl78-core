@@ -137,12 +137,6 @@ impl<C: Cpu> Simulator<C> {
             return Some(Response::Stopped(stop));
         }
 
-        let pc = self.machine.cpu().pc();
-        if let Some(id) = self.machine.breakpoints().hit_at(pc) {
-            self.state = SimState::Stopped;
-            return Some(Response::Stopped(StopReason::Breakpoint { id }));
-        }
-
         None
     }
 

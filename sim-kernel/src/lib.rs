@@ -14,11 +14,14 @@ mod event;
 mod machine;
 mod sim;
 mod stop;
+
+#[cfg(test)]
 mod testing;
 
 pub use breakpoint::{Breakpoint, BreakpointId, BreakpointStore};
 pub use bus::{
-    Addr, BusError, MapError, MemoryBus, MemoryMapped, Ram, Rom, UnmappedAccess, UnmappedPolicy,
+    Addr, BusError, MapError, MemoryBus, MemoryMapBuilder, MemoryMapped, Ram, Rom, UnmappedAccess,
+    UnmappedPolicy,
 };
 pub use clock::{Tick, VirtualClock};
 pub use command::{Command, InspectResult, Response, SimError};
@@ -27,8 +30,6 @@ pub use event::{EventCtx, EventId, EventQueue, SimEvent};
 pub use machine::Machine;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
 pub use stop::StopReason;
-
-pub use testing::ScriptedCpu;
 
 #[cfg(test)]
 mod sim_tests;
