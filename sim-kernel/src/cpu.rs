@@ -18,13 +18,31 @@ pub struct Quantum {
     pub stop: Option<StopReason>,
 }
 
-/// Latch for stops requested from *callbacks* during execute (MMIO trap helpers,
-/// watchpoint hooks, etc.).
+/// Latch for stops requested from *host callbacks* during `tlib_execute`
+/// (MMIO helpers, custom hooks, …).
 ///
-/// Software breakpoints from `tlib_add_breakpoint` are **not** the primary use:
-/// those make `tlib_execute` return `EXCP_DEBUG` (see [`map_tlib_exit`]). Use this
-/// latch when a host callback must force a stop that is not already expressed as
-/// a tlib exception index.
+/// # Not the software-breakpoint path
+///
+/// `tlib_add_breakpoint` hits exit as `EXCP_DEBUG` from `tlib_execute` itself.
+/// That path uses [`map_tlib_exit`], not this latch.
+///
+/// # How a callback stop actually leaves `tlib_execute`
+///
+/// Setting the latch alone does **nothing** to TCG. The callback must also ask
+/// tlib to return, then the wrapper reads the latch after `tlib_execute` returns:
+///
+/// ```text
+/// [inside memory/debug CB]
+///   pending.request(reason)           // remember why we want to stop
+///   tlib_set_return_request()         // or tlib_request_translation_block_interrupt
+///                                     // → cpu_exec exits (EXCP_INTERRUPT / EXCP_RETURN_REQUEST)
+/// [after tlib_execute returns]
+///   stop = pending.take()             // prefer latch over map_tlib_exit(exit)
+///        ?? map_tlib_exit(exit, …)
+///   → Quantum { instructions, stop }
+/// ```
+///
+/// See [`resolve_after_tlib_execute`].
 #[derive(Clone, Debug, Default)]
 pub struct PendingStop {
     reason: Option<StopReason>,
@@ -36,6 +54,8 @@ impl PendingStop {
         Self::default()
     }
 
+    /// Record a stop reason. Does **not** abort `tlib_execute`; call
+    /// `tlib_set_return_request` (or equivalent) from the same callback.
     pub fn request(&mut self, reason: StopReason) {
         if self.reason.is_none() {
             self.reason = Some(reason);
@@ -100,6 +120,22 @@ pub fn map_tlib_exit(exit: i32, breakpoint_at_pc: Option<BreakpointId>) -> Optio
     }
 }
 
+/// Build [`Quantum::stop`] after `tlib_execute` returns.
+///
+/// Prefers a [`PendingStop`] latched from a callback (which must have also
+/// called `tlib_set_return_request`). Otherwise maps the exit code with
+/// [`map_tlib_exit`] (`EXCP_DEBUG` → breakpoint).
+#[must_use]
+pub fn resolve_after_tlib_execute(
+    pending: &mut PendingStop,
+    exit: i32,
+    breakpoint_at_pc: Option<BreakpointId>,
+) -> Option<StopReason> {
+    pending
+        .take()
+        .or_else(|| map_tlib_exit(exit, breakpoint_at_pc))
+}
+
 /// Architecture CPU. All mutation happens on the simulation thread.
 pub trait Cpu: Send {
     /// Install the guest memory map used by load/store callbacks.
@@ -146,5 +182,36 @@ mod tests {
     #[test]
     fn excp_interrupt_is_not_a_stop() {
         assert_eq!(map_tlib_exit(TlibExit::Interrupt as i32, None), None);
+    }
+
+    #[test]
+    fn pending_stop_wins_over_interrupt_exit() {
+        let mut pending = PendingStop::new();
+        pending.request(StopReason::Unmapped {
+            addr: 0x10,
+            write: true,
+        });
+        let stop = resolve_after_tlib_execute(&mut pending, TlibExit::ReturnRequest as i32, None);
+        assert_eq!(
+            stop,
+            Some(StopReason::Unmapped {
+                addr: 0x10,
+                write: true
+            })
+        );
+        assert!(pending.take().is_none());
+    }
+
+    #[test]
+    fn without_pending_excp_debug_still_maps() {
+        let mut pending = PendingStop::new();
+        let stop =
+            resolve_after_tlib_execute(&mut pending, TlibExit::Debug as i32, Some(BreakpointId(3)));
+        assert_eq!(
+            stop,
+            Some(StopReason::Breakpoint {
+                id: BreakpointId(3)
+            })
+        );
     }
 }

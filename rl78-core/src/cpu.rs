@@ -3,17 +3,32 @@
 //! Architectural register state lives in tlib once phase C links it. This type
 //! is only an idle stand-in so the kernel loop and CLI can run before that.
 //!
-//! # Breakpoints (phase C)
+//! # Stopping after `tlib_execute` (phase C)
 //!
-//! `tlib_add_breakpoint` installs a GDB BP. When hit, `cpu_exec` sets
-//! `exception_index = EXCP_DEBUG` and `tlib_execute` **returns that code**.
-//! The wrapper maps it with [`sim_kernel::map_tlib_exit`]:
+//! ## Software breakpoint (`tlib_add_breakpoint`)
+//!
+//! Hits set `exception_index = EXCP_DEBUG`. `tlib_execute` returns that code;
+//! no [`sim_kernel::PendingStop`] involved:
 //!
 //! ```ignore
 //! let exit = unsafe { tlib_execute(max_instructions as i32) };
 //! let instructions = unsafe { tlib_get_executed_instructions() };
-//! let stop = map_tlib_exit(exit, self.breakpoint_id_at(self.pc()));
-//! // PendingStop is only for CB-forced stops that are not EXCP_* exits.
+//! let stop = resolve_after_tlib_execute(
+//!     &mut self.pending,
+//!     exit,
+//!     self.breakpoint_id_at(self.pc()),
+//! );
+//! ```
+//!
+//! ## Callback-forced stop (`PendingStop`)
+//!
+//! The latch alone does not leave TCG. The CB must also request a return:
+//!
+//! ```ignore
+//! // inside MMIO / host CB while tlib_execute is on the stack:
+//! self.pending.request(StopReason::Unmapped { addr, write: true });
+//! unsafe { tlib_set_return_request() }; // → EXCP_INTERRUPT / EXCP_RETURN_REQUEST
+//! // after tlib_execute returns, resolve_after_tlib_execute prefers pending.take()
 //! ```
 
 use sim_kernel::{Addr, Cpu, MemoryBus, Quantum, SimError};
@@ -40,7 +55,7 @@ impl Cpu for Rl78Cpu {
     }
 
     fn run_quantum(&mut self, max_instructions: u64) -> Quantum {
-        // Idle nops. Phase C: `tlib_execute` + `map_tlib_exit` (EXCP_DEBUG → BP).
+        // Idle nops. Phase C: tlib_execute + resolve_after_tlib_execute.
         self.stub_pc = self.stub_pc.wrapping_add(max_instructions);
         Quantum {
             instructions: max_instructions,
