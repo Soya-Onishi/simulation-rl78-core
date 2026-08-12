@@ -104,6 +104,10 @@ fn code_window_ptr() -> *mut u8 {
 fn ensure_default_memory_mapped() {
     // TODO(phase D): delete this helper. `bind_memory` will map `Rom`/`Ram`
     // backing stores from `MemoryBus` instead of this process-wide NOP window.
+    //
+    // Does not call `tlib_reset` — reset runs on each CPU instance in
+    // [`Rl78Cpu::new`] (not on first map only; see Bugbot "CPU recreate skips
+    // tlib reset").
     let ptr = code_window_ptr();
     unsafe {
         callbacks::map_host_region(0, DEFAULT_CODE_WINDOW as u64, ptr);
@@ -144,6 +148,10 @@ impl Rl78Cpu {
         ensure_tlib_initialized();
         set_io_handler(None);
         ensure_default_memory_mapped();
+        // TODO: if construction paths beyond `new` are added (e.g. `from_elf`,
+        // reinit), consolidate `tlib_reset` and related CPU-state init into
+        // `init_tlib_cpu_state()` and call it from every entry point instead of
+        // duplicating reset logic here.
         #[cfg(test)]
         if UNIT_TEST_RESET_TLIB_ON_NEXT_NEW.swap(false, Ordering::AcqRel) {
             unsafe { ffi::tlib_reset() };
