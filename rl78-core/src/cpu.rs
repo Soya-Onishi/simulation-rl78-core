@@ -3,7 +3,7 @@
 //! Architectural register state lives in tlib once phase C links it. This type
 //! is only an idle stand-in so the kernel loop and CLI can run before that.
 
-use sim_kernel::{Addr, Cpu, MemoryBus, Quantum, SimError, Tick};
+use sim_kernel::{Addr, Cpu, MemoryBus, Quantum, SimError};
 
 /// Placeholder CPU. Phase C replaces the body with `tlib_init` / `tlib_execute`
 /// and routes [`Cpu::read_reg`] / [`Cpu::write_reg`] to tlib — do not keep a
@@ -22,12 +22,16 @@ impl Rl78Cpu {
 }
 
 impl Cpu for Rl78Cpu {
-    fn run_quantum(&mut self, _bus: &mut MemoryBus, max_ticks: Tick) -> Quantum {
-        // Idle nops: time advances, no memory traffic. A later tlib backend
-        // will call `tlib_execute(max_ticks)` and report retired instructions.
-        self.stub_pc = self.stub_pc.wrapping_add(max_ticks.0);
+    fn bind_memory(&mut self, _bus: &mut MemoryBus) {
+        // Phase C: install bus for tlib memory callbacks around `tlib_execute`.
+    }
+
+    fn run_quantum(&mut self, max_instructions: u64) -> Quantum {
+        // Idle nops. A later tlib backend calls `tlib_execute(max_instructions)`
+        // and reports retired instructions / pending stop from breakpoints.
+        self.stub_pc = self.stub_pc.wrapping_add(max_instructions);
         Quantum {
-            ticks: max_ticks,
+            instructions: max_instructions,
             stop: None,
         }
     }

@@ -4,12 +4,11 @@ use std::collections::HashMap;
 
 use crate::breakpoint::Breakpoint;
 use crate::bus::{Addr, BusError, MemoryBus};
-use crate::clock::Tick;
 use crate::command::SimError;
 use crate::cpu::{Cpu, Quantum, RegId};
 use crate::stop::StopReason;
 
-/// One scripted guest action. Each operation consumes one tick.
+/// One scripted guest action. Each operation retires one instruction.
 #[derive(Clone, Debug)]
 pub enum ScriptOp {
     Nop,
@@ -27,13 +26,15 @@ pub enum ScriptOp {
 }
 
 /// Deterministic CPU for kernel unit tests.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct ScriptedCpu {
     pc: Addr,
     regs: HashMap<u32, u64>,
     ops: Vec<ScriptOp>,
     idx: usize,
     breakpoints: Vec<Breakpoint>,
+    /// Address of the bus bound for this quantum (`bind_memory`). Sim-thread only.
+    bus_addr: usize,
 }
 
 impl ScriptedCpu {
@@ -45,6 +46,7 @@ impl ScriptedCpu {
             ops,
             idx: 0,
             breakpoints: Vec::new(),
+            bus_addr: 0,
         }
     }
 
@@ -59,42 +61,57 @@ impl ScriptedCpu {
             .find(|bp| bp.enabled && bp.addr == self.pc)
             .map(|bp| StopReason::Breakpoint { id: bp.id })
     }
+
+    fn bus_mut(&mut self) -> &mut MemoryBus {
+        assert!(
+            self.bus_addr != 0,
+            "bind_memory must be called before run_quantum"
+        );
+        unsafe { &mut *(self.bus_addr as *mut MemoryBus) }
+    }
 }
 
 impl Cpu for ScriptedCpu {
-    fn run_quantum(&mut self, bus: &mut MemoryBus, max_ticks: Tick) -> Quantum {
-        let mut ticks = Tick::ZERO;
-        while ticks < max_ticks {
+    fn bind_memory(&mut self, bus: &mut MemoryBus) {
+        self.bus_addr = bus as *mut MemoryBus as usize;
+    }
+
+    fn run_quantum(&mut self, max_instructions: u64) -> Quantum {
+        let mut instructions = 0u64;
+        while instructions < max_instructions {
             let op = self.ops.get(self.idx).cloned();
             self.idx = self.idx.saturating_add(1);
-            ticks += Tick(1);
+            instructions += 1;
             self.pc = self.pc.wrapping_add(1);
             match op {
                 None | Some(ScriptOp::Halt) => {
                     return Quantum {
-                        ticks,
+                        instructions,
                         stop: Some(StopReason::Halt),
                     };
                 }
                 Some(ScriptOp::Nop) => {}
                 Some(ScriptOp::SetPc(pc)) => self.pc = pc,
                 Some(ScriptOp::Write { addr, data }) => {
-                    if let Err(err) = bus.write(addr, &data) {
-                        return unmapped_or_continue(ticks, err, true);
+                    if let Err(err) = self.bus_mut().write(addr, &data) {
+                        return unmapped_or_continue(instructions, err, true);
                     }
                 }
                 Some(ScriptOp::WriteIgnoreError { addr, data }) => {
-                    let _ = bus.write(addr, &data);
+                    let _ = self.bus_mut().write(addr, &data);
                 }
             }
             if let Some(stop) = self.hit_breakpoint() {
                 return Quantum {
-                    ticks,
+                    instructions,
                     stop: Some(stop),
                 };
             }
         }
-        Quantum { ticks, stop: None }
+        Quantum {
+            instructions,
+            stop: None,
+        }
     }
 
     fn read_reg(&self, id: RegId) -> Result<u64, SimError> {
@@ -129,12 +146,15 @@ impl Cpu for ScriptedCpu {
     }
 }
 
-fn unmapped_or_continue(ticks: Tick, err: BusError, write: bool) -> Quantum {
+fn unmapped_or_continue(instructions: u64, err: BusError, write: bool) -> Quantum {
     match err {
         BusError::Unmapped { addr, .. } => Quantum {
-            ticks,
+            instructions,
             stop: Some(StopReason::Unmapped { addr, write }),
         },
-        _ => Quantum { ticks, stop: None },
+        _ => Quantum {
+            instructions,
+            stop: None,
+        },
     }
 }

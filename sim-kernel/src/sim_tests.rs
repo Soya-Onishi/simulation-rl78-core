@@ -110,6 +110,7 @@ fn quantum_does_not_pass_next_event() {
         machine,
         SimConfig {
             max_quantum: Tick(50),
+            ..SimConfig::default()
         },
     );
     sim.command(Command::Start);
@@ -185,6 +186,7 @@ fn breakpoint_reported_by_cpu_stop_reason() {
         empty_machine(ScriptedCpu::new(vec![ScriptOp::SetPc(0x100)])),
         SimConfig {
             max_quantum: Tick(1),
+            ..SimConfig::default()
         },
     );
     let Response::Inspect(InspectResult::Breakpoint { id }) =
@@ -199,11 +201,33 @@ fn breakpoint_reported_by_cpu_stop_reason() {
 }
 
 #[test]
+fn ns_per_instruction_scales_virtual_time() {
+    let mut sim = Simulator::new(
+        empty_machine(ScriptedCpu::new(vec![
+            ScriptOp::Nop,
+            ScriptOp::Nop,
+            ScriptOp::Halt,
+        ])),
+        SimConfig {
+            ns_per_instruction: 10,
+            ..SimConfig::default()
+        },
+    );
+    assert_eq!(
+        run_until_stop(&mut sim),
+        Response::Stopped(StopReason::Halt)
+    );
+    // 3 instructions × 10 ns
+    assert_eq!(sim.machine().clock().now(), Tick(30));
+}
+
+#[test]
 fn spawn_start_stop_quit() {
     let (ctrl, events) = spawn(
         empty_machine(ScriptedCpu::nops(1_000_000)),
         SimConfig {
             max_quantum: Tick(64),
+            ..SimConfig::default()
         },
     );
     ctrl.start().unwrap();

@@ -25,7 +25,7 @@ pub use bus::{
 };
 pub use clock::{Tick, VirtualClock};
 pub use command::{Command, InspectResult, Response, SimError};
-pub use cpu::{Cpu, Quantum, RegId};
+pub use cpu::{Cpu, PendingStop, Quantum, RegId};
 pub use event::{EventCtx, EventId, EventQueue, SimEvent};
 pub use machine::Machine;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};

@@ -12,18 +12,26 @@ use crate::machine::Machine;
 use crate::stop::StopReason;
 
 /// How far a single CPU quantum may run before the kernel re-checks commands.
+/// Unit: virtual nanoseconds.
 pub const DEFAULT_MAX_QUANTUM: Tick = Tick(10_000);
 
 /// Kernel run configuration.
 #[derive(Clone, Debug)]
 pub struct SimConfig {
+    /// Cap on virtual time advanced per [`Simulator::poll`], in nanoseconds.
     pub max_quantum: Tick,
+    /// Virtual nanoseconds charged per retired instruction (icount scaling).
+    ///
+    /// Milestone 1 defaults to `1` (1 insn = 1 ns). Real MCU timing models can
+    /// raise this without changing the event/timer API.
+    pub ns_per_instruction: u64,
 }
 
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
             max_quantum: DEFAULT_MAX_QUANTUM,
+            ns_per_instruction: 1,
         }
     }
 }
@@ -99,30 +107,33 @@ impl<C: Cpu> Simulator<C> {
             return Some(response);
         }
 
-        let max_quantum = self.cfg.max_quantum;
-        let quantum = {
+        let ns_per_insn = self.cfg.ns_per_instruction.max(1);
+        let budget_ns = {
             let (_, _, clock, events, _) = self.machine.parts_mut();
             let now = clock.now();
             events
                 .next_deadline()
                 .unwrap_or(Tick::MAX)
                 .saturating_sub(now)
-                .min(max_quantum)
+                .min(self.cfg.max_quantum)
         };
-        if quantum.is_zero() {
-            // An event is due at `now` but was not consumed; avoid a spin.
+        let max_instructions = budget_ns.0 / ns_per_insn;
+        if max_instructions == 0 {
+            // An event is due within less than one instruction's worth of time.
             return None;
         }
 
         let result = {
             let (cpu, bus, _, _, _) = self.machine.parts_mut();
-            cpu.run_quantum(bus, quantum)
+            cpu.bind_memory(bus);
+            cpu.run_quantum(max_instructions)
         };
-        if result.ticks.is_zero() && result.stop.is_none() {
+        if result.instructions == 0 && result.stop.is_none() {
             self.state = SimState::Stopped;
             return Some(Response::Stopped(StopReason::Halt));
         }
-        self.machine.clock_mut().advance(result.ticks);
+        let elapsed = Tick(result.instructions.saturating_mul(ns_per_insn));
+        self.machine.clock_mut().advance(elapsed);
 
         if let Some(access) = self.machine.bus_mut().take_trap() {
             self.state = SimState::Stopped;

@@ -1,14 +1,16 @@
 //! Virtual-time event queue.
 //!
-//! The kernel advances the guest only until the next scheduled deadline, then
-//! fires due events. Intended users:
+//! Same role as QEMU virtual timers (`timer_init_ns` and friends): schedule work
+//! on the nanosecond virtual clock, then run the CPU only until the next
+//! deadline. Intended users:
 //!
-//! - peripheral timers / compare-match (M2+)
+//! - peripheral timers / compare-match / timer IRQs (M2+)
 //! - watchdogs and other stop conditions on the same clock as the CPU
 //! - host-scheduled work that must stay synchronized with virtual time
 //!
-//! The CPU quantum size is `min(max_quantum, next_deadline - now)`, so events
-//! and instruction retirement share one timeline.
+//! Deadlines are [`Tick`] nanoseconds. CPU quanta are sized as
+//! `min(max_quantum_ns, next_deadline - now)` and converted to an instruction
+//! budget with [`crate::SimConfig::ns_per_instruction`].
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};

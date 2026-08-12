@@ -1,13 +1,14 @@
-//! Virtual simulation clock.
+//! Virtual simulation clock in nanoseconds.
 //!
-//! Milestone 1 uses a QEMU-icount style model: one retired instruction is one
-//! [`Tick`]. Cycle-accurate costing can replace the increment later without
-//! changing the kernel loop.
+//! Same role as QEMU's virtual clock: peripheral timers and other deadline work
+//! schedule against it (cf. `timer_init_ns`). CPU progress is converted with
+//! [`crate::SimConfig::ns_per_instruction`] so instruction retirement and
+//! nanosecond timers share one timeline.
 
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
-/// Monotonic virtual time unit.
+/// Monotonic virtual time in nanoseconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tick(pub u64);
 
@@ -53,7 +54,7 @@ impl AddAssign for Tick {
 
 impl fmt::Display for Tick {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}ns", self.0)
     }
 }
 
