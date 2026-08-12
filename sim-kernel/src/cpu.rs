@@ -151,12 +151,13 @@ pub trait Cpu: Send {
 
     /// Execute up to `max_instructions` guest instructions.
     ///
-    /// Mirrors `tlib_execute(max_insns)`. On return, map the exit code with
+    /// `u32` matches `tlib_execute(max_insns)`. The kernel clamps the virtual-time
+    /// budget to `u32::MAX` before calling this. On return, map the exit code with
     /// [`map_tlib_exit`]: breakpoint → `EXCP_DEBUG` → [`StopReason::Breakpoint`].
     /// Implementations must either retire a non-zero number of instructions or
     /// return a stop reason. A zero-instruction quantum with no stop is treated
     /// as [`StopReason::Halt`].
-    fn run_quantum(&mut self, max_instructions: u64) -> Quantum;
+    fn run_quantum(&mut self, max_instructions: u32) -> Quantum;
 
     fn read_reg(&self, id: RegId) -> Result<u64, SimError>;
     fn write_reg(&mut self, id: RegId, value: u64) -> Result<(), SimError>;

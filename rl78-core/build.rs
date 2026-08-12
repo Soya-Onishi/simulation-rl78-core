@@ -46,8 +46,6 @@ fn main() {
 fn host_arch() -> &'static str {
     match env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
         "x86_64" | "x86" => "i386",
-        "aarch64" => "aarch64",
-        "arm" => "arm",
-        other => panic!("unsupported host arch for tlib: {other}"),
+        other => panic!("unsupported host arch for tlib: {other} (x86 / x86_64 only)"),
     }
 }

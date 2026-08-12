@@ -62,7 +62,11 @@ fn state() -> &'static Mutex<CallbackState> {
 /// Register a host-backed guest window for TCG direct access.
 ///
 /// # Safety
-/// `host` must remain valid and uniquely used for the lifetime of the mapping.
+/// `host` must remain valid, uniquely used, and not move for the lifetime of
+/// the mapping. tlib's TCG path calls [`rl78_host_guest_offset_to_host_ptr`]
+/// and then **dereferences the returned pointer** during `tlib_execute` (it
+/// does not go through [`sim_kernel::MemoryBus`]). A dangling or aliased
+/// pointer is therefore undefined behavior in both Rust and tlib.
 pub unsafe fn map_host_region(guest_base: u64, size: u64, host: *mut u8) {
     let mut guard = state().lock().expect("tlib callback state");
     guard.regions.retain(|r| {
