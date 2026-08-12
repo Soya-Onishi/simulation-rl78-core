@@ -127,9 +127,6 @@ pub struct Rl78Cpu {
     /// Kernel breakpoint table (id + addr). tlib only stores addresses, not
     /// [`BreakpointId`], so `EXCP_DEBUG` is mapped back to an id via PC lookup.
     breakpoints: Vec<Breakpoint>,
-    /// Addresses currently registered in tlib. tlib has add/remove-by-address
-    /// only (no list-all), so this set is required to remove stale entries.
-    tlib_breakpoint_addrs: Vec<Addr>,
     /// Unit-test only: true after this instance ran `tlib_execute`. See
     /// [`UNIT_TEST_RESET_TLIB_ON_NEXT_NEW`].
     #[cfg(test)]
@@ -165,7 +162,6 @@ impl Rl78Cpu {
             _seat: seat,
             pending: PendingStop::new(),
             breakpoints: Vec::new(),
-            tlib_breakpoint_addrs: Vec::new(),
             #[cfg(test)]
             unit_test_guest_executed: false,
         }
@@ -259,6 +255,14 @@ impl Rl78Cpu {
     }
 }
 
+fn list_tlib_breakpoints() -> Vec<Addr> {
+    let count = unsafe { ffi::tlib_breakpoint_count() };
+    let mut addrs = vec![0u64; count];
+    let written = unsafe { ffi::tlib_list_breakpoints(addrs.as_mut_ptr(), count) };
+    addrs.truncate(written);
+    addrs
+}
+
 impl Default for Rl78Cpu {
     fn default() -> Self {
         Self::new()
@@ -267,7 +271,7 @@ impl Default for Rl78Cpu {
 
 impl Drop for Rl78Cpu {
     fn drop(&mut self) {
-        for addr in self.tlib_breakpoint_addrs.drain(..) {
+        for addr in list_tlib_breakpoints() {
             unsafe { ffi::tlib_remove_breakpoint(addr) };
         }
         #[cfg(test)]
@@ -331,17 +335,16 @@ impl Cpu for Rl78Cpu {
             .map(|bp| bp.addr)
             .collect();
 
-        for addr in self.tlib_breakpoint_addrs.clone() {
-            if !desired.contains(&addr) {
-                unsafe { ffi::tlib_remove_breakpoint(addr) };
+        let current = list_tlib_breakpoints();
+        for addr in &current {
+            if !desired.contains(addr) {
+                unsafe { ffi::tlib_remove_breakpoint(*addr) };
             }
         }
-        self.tlib_breakpoint_addrs.retain(|addr| desired.contains(addr));
 
-        for addr in desired {
-            if !self.tlib_breakpoint_addrs.contains(&addr) {
-                unsafe { ffi::tlib_add_breakpoint(addr) };
-                self.tlib_breakpoint_addrs.push(addr);
+        for addr in &desired {
+            if !current.contains(addr) {
+                unsafe { ffi::tlib_add_breakpoint(*addr) };
             }
         }
     }
@@ -404,14 +407,16 @@ mod tests {
                 enabled: true,
             },
         ]);
-        assert_eq!(cpu.tlib_breakpoint_addrs, vec![0x100, 0x200]);
+        let mut registered = list_tlib_breakpoints();
+        registered.sort_unstable();
+        assert_eq!(registered, vec![0x100, 0x200]);
 
         cpu.sync_breakpoints(&[Breakpoint {
             id: BreakpointId(2),
             addr: 0x200,
             enabled: true,
         }]);
-        assert_eq!(cpu.tlib_breakpoint_addrs, vec![0x200]);
+        assert_eq!(list_tlib_breakpoints(), vec![0x200]);
     }
 
     #[test]
