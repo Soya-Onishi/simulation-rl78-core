@@ -122,6 +122,10 @@ pub fn map_tlib_exit(exit: i32, breakpoint_at_pc: Option<BreakpointId>) -> Optio
 
 /// Build [`Quantum::stop`] after `tlib_execute` returns.
 ///
+/// Call this from the architecture [`Cpu::run_quantum`] implementation (e.g.
+/// `Rl78Cpu`), **not** from [`crate::Simulator::poll`]. The kernel is
+/// arch-agnostic and only consumes the resulting [`Quantum::stop`].
+///
 /// Prefers a [`PendingStop`] latched from a callback (which must have also
 /// called `tlib_set_return_request`). Otherwise maps the exit code with
 /// [`map_tlib_exit`] (`EXCP_DEBUG` → breakpoint).
