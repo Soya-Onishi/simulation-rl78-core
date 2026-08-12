@@ -124,8 +124,7 @@ impl<C: Cpu> Simulator<C> {
         }
 
         let result = {
-            let (cpu, bus, _, _, _) = self.machine.parts_mut();
-            cpu.bind_memory(bus);
+            let (cpu, _, _, _, _) = self.machine.parts_mut();
             cpu.run_quantum(max_instructions)
         };
         if result.instructions == 0 && result.stop.is_none() {

@@ -11,9 +11,11 @@ use crate::event::EventQueue;
 ///
 /// The memory map is finished before construction: pass a [`MemoryBus`] built
 /// with [`crate::MemoryMapBuilder`], rather than mutating regions afterward.
+/// The bus is heap-allocated so its address stays stable across `Machine` moves
+/// after the one-time [`Cpu::bind_memory`] at construction.
 pub struct Machine<C: Cpu> {
     cpu: C,
-    bus: MemoryBus,
+    bus: Box<MemoryBus>,
     clock: VirtualClock,
     events: EventQueue,
     breakpoints: BreakpointStore,
@@ -21,7 +23,9 @@ pub struct Machine<C: Cpu> {
 
 impl<C: Cpu> Machine<C> {
     #[must_use]
-    pub fn new(cpu: C, bus: MemoryBus) -> Self {
+    pub fn new(mut cpu: C, bus: MemoryBus) -> Self {
+        let mut bus = Box::new(bus);
+        cpu.bind_memory(bus.as_mut());
         Self {
             cpu,
             bus,

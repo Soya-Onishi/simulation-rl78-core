@@ -2,6 +2,19 @@
 //!
 //! Architectural register state lives in tlib once phase C links it. This type
 //! is only an idle stand-in so the kernel loop and CLI can run before that.
+//!
+//! # Breakpoints (phase C)
+//!
+//! `tlib_add_breakpoint` installs a GDB BP. When hit, `cpu_exec` sets
+//! `exception_index = EXCP_DEBUG` and `tlib_execute` **returns that code**.
+//! The wrapper maps it with [`sim_kernel::map_tlib_exit`]:
+//!
+//! ```ignore
+//! let exit = unsafe { tlib_execute(max_instructions as i32) };
+//! let instructions = unsafe { tlib_get_executed_instructions() };
+//! let stop = map_tlib_exit(exit, self.breakpoint_id_at(self.pc()));
+//! // PendingStop is only for CB-forced stops that are not EXCP_* exits.
+//! ```
 
 use sim_kernel::{Addr, Cpu, MemoryBus, Quantum, SimError};
 
@@ -23,12 +36,11 @@ impl Rl78Cpu {
 
 impl Cpu for Rl78Cpu {
     fn bind_memory(&mut self, _bus: &mut MemoryBus) {
-        // Phase C: install bus for tlib memory callbacks around `tlib_execute`.
+        // Once at Machine::new: install bus for tlib memory callbacks.
     }
 
     fn run_quantum(&mut self, max_instructions: u64) -> Quantum {
-        // Idle nops. A later tlib backend calls `tlib_execute(max_instructions)`
-        // and reports retired instructions / pending stop from breakpoints.
+        // Idle nops. Phase C: `tlib_execute` + `map_tlib_exit` (EXCP_DEBUG → BP).
         self.stub_pc = self.stub_pc.wrapping_add(max_instructions);
         Quantum {
             instructions: max_instructions,
