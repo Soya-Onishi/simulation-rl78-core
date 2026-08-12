@@ -120,6 +120,24 @@ fn quantum_does_not_pass_next_event() {
 }
 
 #[test]
+fn sub_instruction_remainder_advances_to_event() {
+    // Event at 5ns with 10ns/insn: first poll cannot retire an instruction, but
+    // must still advance to the deadline so the event fires (no spin).
+    let mut machine = empty_machine(ScriptedCpu::nops(100));
+    machine.events_mut().schedule(Tick(5), Box::new(HaltAtFire));
+    let mut sim = Simulator::new(
+        machine,
+        SimConfig {
+            ns_per_instruction: 10,
+            ..SimConfig::default()
+        },
+    );
+    sim.command(Command::Start);
+    assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Halt)));
+    assert_eq!(sim.machine().clock().now(), Tick(5));
+}
+
+#[test]
 fn mmio_write_reaches_ram() {
     let bus = MemoryMapBuilder::new()
         .map(0x8000, Box::new(Ram::new(8)))

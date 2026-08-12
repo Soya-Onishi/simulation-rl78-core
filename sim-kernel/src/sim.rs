@@ -119,8 +119,14 @@ impl<C: Cpu> Simulator<C> {
         };
         let max_instructions = budget_ns.0 / ns_per_insn;
         if max_instructions == 0 {
-            // An event is due within less than one instruction's worth of time.
-            return None;
+            // Less than one instruction remains before the next deadline (or the
+            // quantum cap). Advancing by that remainder lets due events fire;
+            // returning without advancing would spin forever while Running.
+            if budget_ns.is_zero() {
+                return None;
+            }
+            self.machine.clock_mut().advance(budget_ns);
+            return self.fire_due_events();
         }
 
         let result = {

@@ -105,7 +105,10 @@ impl MemoryBus {
         if offset.saturating_add(len as u64) > region.size {
             return Err(BusError::OutOfRange { addr, offset, len });
         }
-        region.device.read(offset, buf)
+        region
+            .device
+            .read(offset, buf)
+            .map_err(|err| rewrite_bus_error(err, addr))
     }
 
     pub fn write(&mut self, addr: Addr, buf: &[u8]) -> Result<(), BusError> {
@@ -118,7 +121,10 @@ impl MemoryBus {
         if offset.saturating_add(len as u64) > region.size {
             return Err(BusError::OutOfRange { addr, offset, len });
         }
-        region.device.write(offset, buf)
+        region
+            .device
+            .write(offset, buf)
+            .map_err(|err| rewrite_bus_error(err, addr))
     }
 
     #[must_use]
@@ -149,6 +155,15 @@ impl MemoryBus {
 
 fn overlaps(a_base: Addr, a_size: u64, b_base: Addr, b_size: u64) -> bool {
     a_base < b_base.saturating_add(b_size) && b_base < a_base.saturating_add(a_size)
+}
+
+/// Devices report offsets; rewrite to the guest bus address for callers.
+fn rewrite_bus_error(err: BusError, addr: Addr) -> BusError {
+    match err {
+        BusError::ReadOnly { .. } => BusError::ReadOnly { addr },
+        BusError::OutOfRange { offset, len, .. } => BusError::OutOfRange { addr, offset, len },
+        BusError::Unmapped { len, .. } => BusError::Unmapped { addr, len },
+    }
 }
 
 /// Immutable-style memory map construction.
@@ -268,9 +283,9 @@ impl MemoryMapped for Rom {
     }
 
     fn write(&mut self, offset: u64, _buf: &[u8]) -> Result<(), BusError> {
-        Err(BusError::ReadOnly {
-            addr: offset, // caller sees bus address via wrapper if needed
-        })
+        // `addr` is the device-local offset; [`MemoryBus`] rewrites it to the
+        // guest address before returning to callers.
+        Err(BusError::ReadOnly { addr: offset })
     }
 }
 
@@ -343,6 +358,18 @@ mod tests {
         let mut buf = [0u8; 1];
         bus.read(0, &mut buf).unwrap();
         assert_eq!(buf[0], 0xAA);
+    }
+
+    #[test]
+    fn rom_readonly_error_uses_guest_address() {
+        let mut bus = MemoryMapBuilder::new()
+            .map(0x8000, Box::new(Rom::from_bytes(vec![0; 16])))
+            .unwrap()
+            .build();
+        assert_eq!(
+            bus.write(0x8004, &[0xFF]),
+            Err(BusError::ReadOnly { addr: 0x8004 })
+        );
     }
 
     #[test]
