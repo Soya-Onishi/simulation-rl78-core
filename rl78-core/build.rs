@@ -13,9 +13,8 @@ fn main() {
         );
     }
 
-    println!("cargo:rerun-if-changed={}", tlib_src.join("CMakeLists.txt").display());
-    println!("cargo:rerun-if-changed={}", tlib_src.join("exports.c").display());
-    println!("cargo:rerun-if-changed={}", tlib_src.join("callbacks.c").display());
+    // Track the whole submodule tree so arch/rl78/ etc. edits re-run cmake.
+    println!("cargo:rerun-if-changed={}", tlib_src.display());
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/host_callbacks.c").display()
