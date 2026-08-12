@@ -1,6 +1,19 @@
-[package]
-name = "simulation-rl78-core"
+[workspace]
+members = ["sim-kernel", "rl78-core"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+
+[package]
+name = "simulation-rl78-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Thin CLI wrapper around the RL78 simulation core"
 
 [dependencies]
+rl78-core = { path = "rl78-core" }
+sim-kernel = { path = "sim-kernel" }
