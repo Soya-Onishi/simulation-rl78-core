@@ -78,6 +78,10 @@ pub unsafe fn map_host_region(guest_base: u64, size: u64, host: *mut u8) {
 }
 
 /// Drop all host region registrations (does not call `tlib_unmap_range`).
+///
+/// Prefer scoped tests that do not touch process-wide callback state. After
+/// clearing, the next [`crate::cpu::Rl78Cpu::new`] re-registers the default
+/// NOP window host pointer.
 pub fn clear_host_regions() {
     state().lock().expect("tlib callback state").regions.clear();
 }
@@ -227,6 +231,7 @@ mod tests {
         assert!(!p.is_null());
         assert_eq!(p as usize, buf.as_mut_ptr() as usize + 4);
         assert!(rl78_host_guest_offset_to_host_ptr(0x2000).is_null());
-        clear_host_regions();
+        // Do not call clear_host_regions() here: it wipes process-wide state and
+        // races with parallel Rl78Cpu tests that rely on the default NOP window.
     }
 }

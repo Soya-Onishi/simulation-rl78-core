@@ -36,6 +36,7 @@ unsafe impl Sync for CodeWindow {}
 
 static CODE_WINDOW: OnceLock<CodeWindow> = OnceLock::new();
 static CODE_MAPPED: AtomicBool = AtomicBool::new(false);
+static NEEDS_TLIB_RESET: AtomicBool = AtomicBool::new(true);
 
 /// Process-wide tlib ownership token (`Send`, unlike `MutexGuard`).
 struct TlibSeat;
@@ -83,15 +84,13 @@ fn code_window_ptr() -> *mut u8 {
 }
 
 fn ensure_default_memory_mapped() {
-    if CODE_MAPPED.swap(true, Ordering::AcqRel) {
-        return;
-    }
     let ptr = code_window_ptr();
     unsafe {
-        std::ptr::write_bytes(ptr, 0, DEFAULT_CODE_WINDOW);
         callbacks::map_host_region(0, DEFAULT_CODE_WINDOW as u64, ptr);
-        ffi::tlib_map_range(0, DEFAULT_CODE_WINDOW as u64);
-        ffi::tlib_reset();
+        if !CODE_MAPPED.swap(true, Ordering::AcqRel) {
+            std::ptr::write_bytes(ptr, 0, DEFAULT_CODE_WINDOW);
+            ffi::tlib_map_range(0, DEFAULT_CODE_WINDOW as u64);
+        }
     }
 }
 
@@ -101,6 +100,12 @@ pub struct Rl78Cpu {
     _seat: TlibSeat,
     /// Callback-forced stops; see [`PendingStop`].
     pending: PendingStop,
+    /// Mirror of the kernel breakpoint table (updated by [`Cpu::sync_breakpoints`]).
+    breakpoints: Vec<Breakpoint>,
+    /// Guest addresses currently registered in tlib via `tlib_add_breakpoint`.
+    tlib_breakpoint_addrs: Vec<Addr>,
+    /// Set after `run_quantum` retires instructions; `tlib_reset` is unsafe immediately after.
+    ran_guest_code: bool,
 }
 
 impl Rl78Cpu {
@@ -115,10 +120,16 @@ impl Rl78Cpu {
         ensure_tlib_initialized();
         set_io_handler(None);
         ensure_default_memory_mapped();
+        if NEEDS_TLIB_RESET.swap(false, Ordering::AcqRel) {
+            unsafe { ffi::tlib_reset() };
+        }
 
         Self {
             _seat: seat,
             pending: PendingStop::new(),
+            breakpoints: Vec::new(),
+            tlib_breakpoint_addrs: Vec::new(),
+            ran_guest_code: false,
         }
     }
 
@@ -189,6 +200,13 @@ impl Rl78Cpu {
             _ => None,
         }
     }
+
+    fn breakpoint_id_at_pc(&self, pc: Addr) -> Option<BreakpointId> {
+        self.breakpoints
+            .iter()
+            .find(|bp| bp.enabled && bp.addr == pc)
+            .map(|bp| bp.id)
+    }
 }
 
 impl Default for Rl78Cpu {
@@ -199,9 +217,12 @@ impl Default for Rl78Cpu {
 
 impl Drop for Rl78Cpu {
     fn drop(&mut self) {
-        // Leave host regions and the shared code window in place so TCG TLB/TB
-        // entries remain valid until the next owner remaps. Clear only the IO
-        // handler (which may hold borrowed Rust state).
+        for addr in self.tlib_breakpoint_addrs.drain(..) {
+            unsafe { ffi::tlib_remove_breakpoint(addr) };
+        }
+        if !self.ran_guest_code {
+            NEEDS_TLIB_RESET.store(true, Ordering::Release);
+        }
         set_io_handler(None);
     }
 }
@@ -216,7 +237,11 @@ impl Cpu for Rl78Cpu {
         let step = u32::try_from(max_instructions).unwrap_or(u32::MAX);
         let exit = unsafe { ffi::tlib_execute(step) };
         let instructions = unsafe { ffi::tlib_get_executed_instructions() };
-        self.finish_tlib_quantum(instructions, exit, None)
+        if instructions > 0 {
+            self.ran_guest_code = true;
+        }
+        let pc = self.pc();
+        self.finish_tlib_quantum(instructions, exit, self.breakpoint_id_at_pc(pc))
     }
 
     fn read_reg(&self, id: RegId) -> Result<u64, SimError> {
@@ -239,8 +264,25 @@ impl Cpu for Rl78Cpu {
     }
 
     fn sync_breakpoints(&mut self, breakpoints: &[Breakpoint]) {
-        for bp in breakpoints {
-            unsafe { ffi::tlib_add_breakpoint(bp.addr) };
+        self.breakpoints = breakpoints.to_vec();
+        let desired: Vec<Addr> = breakpoints
+            .iter()
+            .filter(|bp| bp.enabled)
+            .map(|bp| bp.addr)
+            .collect();
+
+        for addr in self.tlib_breakpoint_addrs.clone() {
+            if !desired.contains(&addr) {
+                unsafe { ffi::tlib_remove_breakpoint(addr) };
+            }
+        }
+        self.tlib_breakpoint_addrs.retain(|addr| desired.contains(addr));
+
+        for addr in desired {
+            if !self.tlib_breakpoint_addrs.contains(&addr) {
+                unsafe { ffi::tlib_add_breakpoint(addr) };
+                self.tlib_breakpoint_addrs.push(addr);
+            }
         }
     }
 }
@@ -288,11 +330,50 @@ mod tests {
     }
 
     #[test]
-    fn tlib_execute_runs_default_nop_window() {
+    fn sync_breakpoints_removes_stale_tlib_entries() {
         let mut cpu = Rl78Cpu::new();
-        let q = cpu.run_quantum(16);
-        assert!(q.instructions > 0, "expected guest instructions, got {q:?}");
-        assert!(q.stop.is_none());
+        cpu.sync_breakpoints(&[
+            Breakpoint {
+                id: BreakpointId(1),
+                addr: 0x100,
+                enabled: true,
+            },
+            Breakpoint {
+                id: BreakpointId(2),
+                addr: 0x200,
+                enabled: true,
+            },
+        ]);
+        assert_eq!(cpu.tlib_breakpoint_addrs, vec![0x100, 0x200]);
+
+        cpu.sync_breakpoints(&[Breakpoint {
+            id: BreakpointId(2),
+            addr: 0x200,
+            enabled: true,
+        }]);
+        assert_eq!(cpu.tlib_breakpoint_addrs, vec![0x200]);
+    }
+
+    #[test]
+    fn breakpoint_id_at_pc_matches_kernel_table() {
+        let mut cpu = Rl78Cpu::new();
+        cpu.sync_breakpoints(&[Breakpoint {
+            id: BreakpointId(7),
+            addr: 0x42,
+            enabled: true,
+        }]);
+        cpu.set_pc(0x42);
+        assert_eq!(cpu.breakpoint_id_at_pc(0x42), Some(BreakpointId(7)));
+        assert_eq!(cpu.breakpoint_id_at_pc(0x43), None);
+    }
+
+    #[test]
+    fn new_resets_cpu_state_between_instances() {
+        let mut cpu = Rl78Cpu::new();
+        cpu.set_pc(0x1234);
+        drop(cpu);
+        let cpu2 = Rl78Cpu::new();
+        assert_ne!(cpu2.pc(), 0x1234);
     }
 }
 
