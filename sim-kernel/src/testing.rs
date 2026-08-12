@@ -76,9 +76,9 @@ impl Cpu for ScriptedCpu {
         self.bus_addr = bus as *mut MemoryBus as usize;
     }
 
-    fn run_quantum(&mut self, max_instructions: u64) -> Quantum {
+    fn run_quantum(&mut self, max_instructions: u32) -> Quantum {
         let mut instructions = 0u64;
-        while instructions < max_instructions {
+        while instructions < u64::from(max_instructions) {
             let op = self.ops.get(self.idx).cloned();
             self.idx = self.idx.saturating_add(1);
             instructions += 1;

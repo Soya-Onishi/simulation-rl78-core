@@ -1,2 +1,4 @@
 /target
 **/*.rs.bk
+# CMake / tlib build trees if created in-tree by hand
+**/cmake-build-*/

@@ -1,15 +1,20 @@
 //! RL78 core assembly: CPU wrapper, minimal map, Magic probe, ELF hook.
 //!
-//! tlib is not linked in this crate yet (issue #1 phase C). The [`Rl78Cpu`]
-//! type and [`minimal_machine`] builder are the stable surface later PRs fill in.
+//! tlib (`rl78` branch) is built from the `tlib/` submodule via `build.rs` and
+//! linked statically. [`Rl78Cpu`] owns the tlib session; memory callbacks are
+//! scaffolded in [`callbacks`] (bus wiring is phase D).
 
+mod callbacks;
 mod cpu;
 mod elf;
+mod ffi;
 mod magic;
 mod map;
 
+pub use callbacks::{HostRegion, IoHandler, clear_host_regions, map_host_region, set_io_handler};
 pub use cpu::Rl78Cpu;
 pub use elf::{ElfLoad, LoadError, load_elf};
+pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 

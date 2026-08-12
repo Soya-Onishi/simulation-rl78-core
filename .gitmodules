@@ -1,0 +1,4 @@
+[submodule "rl78-core/tlib"]
+	path = rl78-core/tlib
+	url = https://github.com/Soya-Onishi/tlib.git
+	branch = rl78

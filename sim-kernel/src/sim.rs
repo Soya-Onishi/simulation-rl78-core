@@ -117,7 +117,7 @@ impl<C: Cpu> Simulator<C> {
                 .saturating_sub(now)
                 .min(self.cfg.max_quantum)
         };
-        let max_instructions = budget_ns.0 / ns_per_insn;
+        let max_instructions = (budget_ns.0 / ns_per_insn).min(u64::from(u32::MAX)) as u32;
         if max_instructions == 0 {
             // Less than one instruction remains before the next deadline (or the
             // quantum cap). Advancing by that remainder lets due events fire;

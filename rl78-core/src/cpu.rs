@@ -1,34 +1,174 @@
-//! RL78 CPU wrapper.
-//!
-//! Architectural register state lives in tlib once phase C links it. This type
-//! is only an idle stand-in so the kernel loop and CLI can run before that.
+//! RL78 CPU wrapper over statically linked tlib.
 //!
 //! # Where `resolve_after_tlib_execute` runs
 //!
 //! [`Simulator::poll`][sim_kernel::Simulator] never calls it. Mapping tlib exit
 //! codes / [`PendingStop`] into [`Quantum::stop`] happens inside this CPU's
-//! [`Cpu::run_quantum`] via [`Rl78Cpu::finish_tlib_quantum`] (phase C will call
-//! that right after `tlib_execute`).
+//! [`Cpu::run_quantum`] via [`Rl78Cpu::finish_tlib_quantum`] right after
+//! `tlib_execute`.
+//!
+//! Memory callbacks live in [`crate::callbacks`]. Phase D will route IO pages
+//! into [`MemoryBus`]; until then a small host-backed NOP window keeps
+//! `run_quantum` safe for the CLI lifecycle tests.
+
+use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, Once, OnceLock};
 
 use sim_kernel::{
-    Addr, BreakpointId, Cpu, MemoryBus, PendingStop, Quantum, SimError, resolve_after_tlib_execute,
+    Addr, Breakpoint, BreakpointId, Cpu, MemoryBus, PendingStop, Quantum, RegId, SimError,
+    resolve_after_tlib_execute,
 };
 
-/// Placeholder CPU. Phase C replaces the body with `tlib_init` / `tlib_execute`
-/// and routes [`Cpu::read_reg`] / [`Cpu::write_reg`] to tlib — do not keep a
-/// parallel GPR bank here.
-#[derive(Clone, Debug, Default)]
+use crate::callbacks::{self, set_io_handler};
+use crate::ffi::{self, Rl78Reg};
+
+/// Default fetch window (all `0x00` = RL78 NOP).
+///
+/// TODO(phase D): replace this stand-in with pointers into `MemoryBus`
+/// `MappedRegion` devices (`Rom` / `Ram` `Vec<u8>`). `bind_memory` will walk
+/// the bus, register each RAM/ROM window via `map_host_region` + `tlib_map_range`,
+/// and mark MMIO pages (`MagicProbe`, unmapped SFR, …) with `tlib_set_page_io_accessed`
+/// plus an `IoHandler` that forwards to `MemoryBus::read` / `write`. Until then
+/// this buffer is **not** the machine map — only a fetchable window at guest
+/// address 0 so `tlib_execute` / reset-vector reads do not abort.
+const DEFAULT_CODE_WINDOW: usize = 4096;
+
+static SEAT: Mutex<bool> = Mutex::new(false);
+static TLIB_INIT: Once = Once::new();
+struct CodeWindow(*mut u8);
+// Safety: access is gated by `TlibSeat` (single owner).
+unsafe impl Send for CodeWindow {}
+unsafe impl Sync for CodeWindow {}
+
+static CODE_WINDOW: OnceLock<CodeWindow> = OnceLock::new();
+static CODE_MAPPED: AtomicBool = AtomicBool::new(false);
+
+/// Unit-test only: after a CPU that never ran `tlib_execute` is dropped, the
+/// next `Rl78Cpu::new` should call `tlib_reset` so leftover PC/regs do not leak
+/// between tests. Production holds one CPU for the process lifetime and does
+/// not use this flag. `tlib_reset` after a real `tlib_execute` can SIGSEGV
+/// (stale TCG/TLB), so tests that executed guest code skip the next reset.
+#[cfg(test)]
+static UNIT_TEST_RESET_TLIB_ON_NEXT_NEW: AtomicBool = AtomicBool::new(true);
+
+/// Process-wide tlib ownership token (`Send`, unlike `MutexGuard`).
+///
+/// Production never releases the seat until process exit (one `Rl78Cpu`).
+/// A second `acquire` while the seat is held is a programming error.
+/// Sequential unit tests drop the previous CPU first, which frees the seat.
+struct TlibSeat;
+
+impl TlibSeat {
+    fn acquire() -> Self {
+        let mut taken = SEAT.lock().unwrap_or_else(|e| e.into_inner());
+        if *taken {
+            drop(taken);
+            panic!("Rl78Cpu: tlib seat already held (only one live instance is allowed)");
+        }
+        *taken = true;
+        Self
+    }
+}
+
+impl Drop for TlibSeat {
+    fn drop(&mut self) {
+        let mut taken = SEAT.lock().unwrap_or_else(|e| e.into_inner());
+        *taken = false;
+    }
+}
+
+fn ensure_tlib_initialized() {
+    TLIB_INIT.call_once(|| {
+        // Pull host_callbacks.o (strong tlib_* overrides) from its static archive.
+        unsafe extern "C" {
+            fn rl78_tlib_callbacks_anchor();
+        }
+        unsafe { rl78_tlib_callbacks_anchor() };
+
+        let name = CString::new("rl78").expect("cpu name");
+        let rc = unsafe { ffi::tlib_init(name.as_ptr().cast_mut()) };
+        assert_eq!(rc, 0, "tlib_init failed ({rc})");
+    });
+}
+
+fn code_window_ptr() -> *mut u8 {
+    CODE_WINDOW
+        .get_or_init(|| {
+            let boxed = vec![0u8; DEFAULT_CODE_WINDOW].into_boxed_slice();
+            CodeWindow(Box::into_raw(boxed) as *mut u8)
+        })
+        .0
+}
+
+fn ensure_default_memory_mapped() {
+    // TODO(phase D): delete this helper. `bind_memory` will map `Rom`/`Ram`
+    // backing stores from `MemoryBus` instead of this process-wide NOP window.
+    //
+    // Does not call `tlib_reset` — reset runs on each CPU instance in
+    // [`Rl78Cpu::new`] (not on first map only; see Bugbot "CPU recreate skips
+    // tlib reset").
+    let ptr = code_window_ptr();
+    unsafe {
+        callbacks::map_host_region(0, DEFAULT_CODE_WINDOW as u64, ptr);
+        if !CODE_MAPPED.swap(true, Ordering::AcqRel) {
+            std::ptr::write_bytes(ptr, 0, DEFAULT_CODE_WINDOW);
+            ffi::tlib_map_range(0, DEFAULT_CODE_WINDOW as u64);
+        }
+    }
+}
+
+/// RL78 CPU backed by tlib. At most one live instance may exist (tlib singleton).
 pub struct Rl78Cpu {
-    /// Host-only PC for the idle nop loop. Discarded when tlib owns the CPU.
-    stub_pc: Addr,
+    /// Held for the CPU lifetime. A second live `Rl78Cpu` panics in `TlibSeat::acquire`.
+    _seat: TlibSeat,
     /// Callback-forced stops; see [`PendingStop`].
     pending: PendingStop,
+    /// Kernel breakpoint table (id + addr). tlib only stores addresses, not
+    /// [`BreakpointId`], so `EXCP_DEBUG` is mapped back to an id via PC lookup.
+    breakpoints: Vec<Breakpoint>,
+    /// Addresses currently registered in tlib. tlib has add/remove-by-address
+    /// only (no list-all), so this set is required to remove stale entries.
+    tlib_breakpoint_addrs: Vec<Addr>,
+    /// Unit-test only: true after this instance ran `tlib_execute`. See
+    /// [`UNIT_TEST_RESET_TLIB_ON_NEXT_NEW`].
+    #[cfg(test)]
+    unit_test_guest_executed: bool,
 }
 
 impl Rl78Cpu {
+    /// Initialize (once per process) and take the tlib seat for the `rl78` CPU.
+    ///
+    /// Panics if another [`Rl78Cpu`] is still alive. tlib is not disposed between
+    /// sequential test instances — only reset — because dispose/re-init is
+    /// fragile once host callbacks are overridden.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let seat = TlibSeat::acquire();
+        ensure_tlib_initialized();
+        set_io_handler(None);
+        ensure_default_memory_mapped();
+        // TODO: if construction paths beyond `new` are added (e.g. `from_elf`,
+        // reinit), consolidate `tlib_reset` and related CPU-state init into
+        // `init_tlib_cpu_state()` and call it from every entry point instead of
+        // duplicating reset logic here.
+        #[cfg(test)]
+        if UNIT_TEST_RESET_TLIB_ON_NEXT_NEW.swap(false, Ordering::AcqRel) {
+            unsafe { ffi::tlib_reset() };
+        }
+        #[cfg(not(test))]
+        unsafe {
+            ffi::tlib_reset();
+        }
+
+        Self {
+            _seat: seat,
+            pending: PendingStop::new(),
+            breakpoints: Vec::new(),
+            tlib_breakpoint_addrs: Vec::new(),
+            #[cfg(test)]
+            unit_test_guest_executed: false,
+        }
     }
 
     /// Access the callback stop latch (MMIO CB installs reasons here).
@@ -36,14 +176,36 @@ impl Rl78Cpu {
         &mut self.pending
     }
 
-    /// Production call site for tlib exit → [`Quantum`] (used after `tlib_execute`).
+    /// Map a guest physical range into tlib and register the host pointer for
+    /// TCG direct access.
     ///
-    /// Phase C `run_quantum` will look like:
-    /// ```ignore
-    /// let exit = unsafe { tlib_execute(max_instructions as i32) };
-    /// let instructions = unsafe { tlib_get_executed_instructions() };
-    /// self.finish_tlib_quantum(instructions, exit, self.breakpoint_id_at(pc))
-    /// ```
+    /// TODO(phase D): `Cpu::bind_memory` becomes the only production caller.
+    /// Planned flow:
+    /// 1. `Machine::new` builds an immutable `MemoryBus` (`Rom` / `Ram` /
+    ///    `MagicProbe` as `MappedRegion`s) and calls `bind_memory`.
+    /// 2. `bind_memory` walks those regions (downcast or a bus helper that
+    ///    exposes RAM/ROM backing `*mut u8` + guest base/size).
+    /// 3. RAM/ROM → this method (`map_host_region` + `tlib_map_range`) so TCG
+    ///    uses the **same** `Vec<u8>` as `MemoryBus`.
+    /// 4. MMIO (`MagicProbe`, unmapped SFR, …) → [`Self::set_io_page`] +
+    ///    `IoHandler` forwarding to `MemoryBus::read` / `write`.
+    ///
+    /// # Safety
+    /// `host` must remain valid for as long as the range stays mapped (the
+    /// `Rom`/`Ram` allocation on the bus).
+    pub unsafe fn map_memory(&mut self, guest_base: u64, length: u64, host: *mut u8) {
+        unsafe {
+            callbacks::map_host_region(guest_base, length, host);
+            ffi::tlib_map_range(guest_base, length);
+        }
+    }
+
+    /// Mark a page as IO-accessed so loads/stores call the host IO callbacks.
+    pub fn set_io_page(&mut self, page_addr: u64) {
+        unsafe { ffi::tlib_set_page_io_accessed(page_addr) };
+    }
+
+    /// Production call site for tlib exit → [`Quantum`] (used after `tlib_execute`).
     #[must_use]
     pub fn finish_tlib_quantum(
         &mut self,
@@ -56,37 +218,132 @@ impl Rl78Cpu {
             stop: resolve_after_tlib_execute(&mut self.pending, tlib_exit, breakpoint_at_pc),
         }
     }
+
+    fn reg32(&self, reg: Rl78Reg) -> u32 {
+        unsafe { ffi::tlib_get_register_value_32(reg as i32) }
+    }
+
+    fn set_reg32(&mut self, reg: Rl78Reg, value: u32) {
+        unsafe { ffi::tlib_set_register_value_32(reg as i32, value) };
+    }
+
+    fn map_reg_id(id: RegId) -> Option<Rl78Reg> {
+        match id.0 {
+            0 => Some(Rl78Reg::X),
+            1 => Some(Rl78Reg::A),
+            2 => Some(Rl78Reg::C),
+            3 => Some(Rl78Reg::B),
+            4 => Some(Rl78Reg::E),
+            5 => Some(Rl78Reg::D),
+            6 => Some(Rl78Reg::L),
+            7 => Some(Rl78Reg::H),
+            8 => Some(Rl78Reg::Pc),
+            9 => Some(Rl78Reg::Sp),
+            10 => Some(Rl78Reg::Es),
+            11 => Some(Rl78Reg::Cs),
+            12 => Some(Rl78Reg::PswCy),
+            13 => Some(Rl78Reg::PswIsp),
+            14 => Some(Rl78Reg::PswRbs),
+            15 => Some(Rl78Reg::PswAc),
+            16 => Some(Rl78Reg::PswZ),
+            17 => Some(Rl78Reg::PswIe),
+            _ => None,
+        }
+    }
+
+    fn breakpoint_id_at_pc(&self, pc: Addr) -> Option<BreakpointId> {
+        self.breakpoints
+            .iter()
+            .find(|bp| bp.enabled && bp.addr == pc)
+            .map(|bp| bp.id)
+    }
+}
+
+impl Default for Rl78Cpu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for Rl78Cpu {
+    fn drop(&mut self) {
+        for addr in self.tlib_breakpoint_addrs.drain(..) {
+            unsafe { ffi::tlib_remove_breakpoint(addr) };
+        }
+        #[cfg(test)]
+        if !self.unit_test_guest_executed {
+            UNIT_TEST_RESET_TLIB_ON_NEXT_NEW.store(true, Ordering::Release);
+        }
+        set_io_handler(None);
+    }
 }
 
 impl Cpu for Rl78Cpu {
     fn bind_memory(&mut self, _bus: &mut MemoryBus) {
-        // Once at Machine::new: install bus for tlib memory callbacks.
+        // TODO(phase D): walk `bus` MappedRegions — RAM/ROM → `map_memory` with
+        // the device `Vec<u8>` pointer; MMIO → `set_io_page` + IoHandler → bus.
     }
 
-    fn run_quantum(&mut self, max_instructions: u64) -> Quantum {
-        // Idle nops until tlib is linked. Phase C replaces this body with
-        // tlib_execute + finish_tlib_quantum (not Simulator::poll).
-        self.stub_pc = self.stub_pc.wrapping_add(max_instructions);
-        Quantum {
-            instructions: max_instructions,
-            stop: None,
+    fn run_quantum(&mut self, max_instructions: u32) -> Quantum {
+        let exit = unsafe { ffi::tlib_execute(max_instructions) };
+        let instructions = unsafe { ffi::tlib_get_executed_instructions() };
+        #[cfg(test)]
+        if instructions > 0 {
+            self.unit_test_guest_executed = true;
         }
+        let pc = self.pc();
+        self.finish_tlib_quantum(instructions, exit, self.breakpoint_id_at_pc(pc))
     }
 
-    fn read_reg(&self, id: sim_kernel::RegId) -> Result<u64, SimError> {
-        Err(SimError::UnknownRegister(id))
+    /// Inspect API for the control plane (`Command::ReadReg`): future CLI peek
+    /// and GDB RSP. Peripherals must not use this; they talk to tlib/SFR via
+    /// memory callbacks, not `RegId`.
+    fn read_reg(&self, id: RegId) -> Result<u64, SimError> {
+        let reg = Self::map_reg_id(id).ok_or(SimError::UnknownRegister(id))?;
+        Ok(u64::from(self.reg32(reg)))
     }
 
-    fn write_reg(&mut self, id: sim_kernel::RegId, _value: u64) -> Result<(), SimError> {
-        Err(SimError::UnknownRegister(id))
+    fn write_reg(&mut self, id: RegId, value: u64) -> Result<(), SimError> {
+        let reg = Self::map_reg_id(id).ok_or(SimError::UnknownRegister(id))?;
+        self.set_reg32(reg, value as u32);
+        Ok(())
     }
 
     fn pc(&self) -> Addr {
-        self.stub_pc
+        u64::from(self.reg32(Rl78Reg::Pc))
     }
 
     fn set_pc(&mut self, pc: Addr) {
-        self.stub_pc = pc;
+        self.set_reg32(Rl78Reg::Pc, pc as u32);
+    }
+
+    /// Push the kernel breakpoint table into tlib.
+    ///
+    /// TODO: production call site is `Simulator` after `Command::AddBreakpoint`
+    /// / `RemoveBreakpoint` (inspect path, stopped). M1 CLI does not expose
+    /// those commands yet; GDB RSP will send the same `Command`s. Until then
+    /// only unit tests call this directly.
+    fn sync_breakpoints(&mut self, breakpoints: &[Breakpoint]) {
+        self.breakpoints = breakpoints.to_vec();
+        let desired: Vec<Addr> = breakpoints
+            .iter()
+            .filter(|bp| bp.enabled)
+            .map(|bp| bp.addr)
+            .collect();
+
+        for addr in self.tlib_breakpoint_addrs.clone() {
+            if !desired.contains(&addr) {
+                unsafe { ffi::tlib_remove_breakpoint(addr) };
+            }
+        }
+        self.tlib_breakpoint_addrs.retain(|addr| desired.contains(addr));
+
+        for addr in desired {
+            if !self.tlib_breakpoint_addrs.contains(&addr) {
+                unsafe { ffi::tlib_add_breakpoint(addr) };
+                self.tlib_breakpoint_addrs.push(addr);
+            }
+        }
     }
 }
 
@@ -123,5 +380,82 @@ mod tests {
                 write: false
             })
         );
+    }
+
+    #[test]
+    fn tlib_init_reports_rl78_arch() {
+        let _cpu = Rl78Cpu::new();
+        let arch = unsafe { std::ffi::CStr::from_ptr(ffi::tlib_get_arch()) };
+        assert_eq!(arch.to_string_lossy(), "rl78");
+    }
+
+    #[test]
+    fn sync_breakpoints_removes_stale_tlib_entries() {
+        let mut cpu = Rl78Cpu::new();
+        cpu.sync_breakpoints(&[
+            Breakpoint {
+                id: BreakpointId(1),
+                addr: 0x100,
+                enabled: true,
+            },
+            Breakpoint {
+                id: BreakpointId(2),
+                addr: 0x200,
+                enabled: true,
+            },
+        ]);
+        assert_eq!(cpu.tlib_breakpoint_addrs, vec![0x100, 0x200]);
+
+        cpu.sync_breakpoints(&[Breakpoint {
+            id: BreakpointId(2),
+            addr: 0x200,
+            enabled: true,
+        }]);
+        assert_eq!(cpu.tlib_breakpoint_addrs, vec![0x200]);
+    }
+
+    #[test]
+    fn breakpoint_id_at_pc_matches_kernel_table() {
+        let mut cpu = Rl78Cpu::new();
+        cpu.sync_breakpoints(&[Breakpoint {
+            id: BreakpointId(7),
+            addr: 0x42,
+            enabled: true,
+        }]);
+        cpu.set_pc(0x42);
+        assert_eq!(cpu.breakpoint_id_at_pc(0x42), Some(BreakpointId(7)));
+        assert_eq!(cpu.breakpoint_id_at_pc(0x43), None);
+    }
+
+    #[test]
+    fn second_live_cpu_panics() {
+        let _cpu = Rl78Cpu::new();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Rl78Cpu::new();
+        }));
+        assert!(panicked.is_err());
+    }
+
+    #[test]
+    fn new_resets_cpu_state_between_instances() {
+        let mut cpu = Rl78Cpu::new();
+        cpu.set_pc(0x1234);
+        drop(cpu);
+        let cpu2 = Rl78Cpu::new();
+        assert_ne!(cpu2.pc(), 0x1234);
+    }
+}
+
+#[cfg(test)]
+mod map_probe {
+    use super::*;
+    #[test]
+    fn map_range_is_visible() {
+        let mut cpu = Rl78Cpu::new();
+        let mapped = unsafe { ffi::tlib_is_range_mapped(0, 1) };
+        assert_ne!(mapped, 0, "expected range 0 mapped after Rl78Cpu::new");
+        let p = crate::callbacks::rl78_host_guest_offset_to_host_ptr(0);
+        assert!(!p.is_null(), "host ptr for 0");
+        let _ = &mut cpu;
     }
 }
