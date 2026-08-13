@@ -56,6 +56,8 @@ unsafe extern "C" {
     pub fn tlib_clear_page_io_accessed(address: u64);
     pub fn tlib_add_breakpoint(address: u64);
     pub fn tlib_remove_breakpoint(address: u64);
+    pub fn tlib_breakpoint_count() -> usize;
+    pub fn tlib_list_breakpoints(addrs: *mut u64, capacity: usize) -> usize;
     pub fn tlib_get_arch() -> *mut c_char;
     pub fn tlib_get_register_value_32(reg_number: c_int) -> u32;
     pub fn tlib_set_register_value_32(reg_number: c_int, value: u32);
