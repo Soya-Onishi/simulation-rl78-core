@@ -1,0 +1,13 @@
+schemaVersion: "2"
+kind: mixin
+name: cursor-rs
+requires:
+  agent: cursor
+setup:
+  install:
+    - command: "/home/agent/install-root.sh"
+      user: "0"
+    - command: "/home/agent/install-user.sh"
+      user: "1000"
+    - command: "echo 'export PATH=$PATH:/usr/local/cmake/bin' >> /etc/sandbox-persistent.sh"
+

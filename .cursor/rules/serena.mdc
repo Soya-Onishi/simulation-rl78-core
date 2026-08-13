@@ -1,0 +1,23 @@
+---
+description: Mandatory Serena MCP activation and memory workflow for every session
+alwaysApply: true
+---
+
+# Serena (required)
+
+Before any coding, exploration, or editing in this repository, complete this checklist.
+Do not skip it because the chat was cleared or a prior turn already used Serena.
+
+1. **Activate the project** via Serena MCP `activate_project` with project name
+   `simulation-rl78-core` or the workspace root path. If activation reports the
+   project is already active, continue.
+2. **Load instructions** with Serena `initial_instructions` once per session if
+   not already loaded in this conversation.
+3. **Use memories**: start from `mem:core`, then follow `mem:` references as needed
+   (`mem:tech_stack`, `mem:conventions`, `mem:suggested_commands`,
+   `mem:task_completion`, `mem:sim-kernel/core`, `mem:rl78-core/core`).
+4. **Prefer Serena** symbolic/search tools over reading whole source files when
+   exploring or editing code.
+5. **Do not re-run** `onboarding` — memories already exist under `.serena/memories/`.
+
+If Serena MCP is unavailable, say so briefly and continue with normal tools.
