@@ -326,13 +326,13 @@ impl Drop for Rl78Cpu {
 
 impl Cpu for Rl78Cpu {
     fn bind_memory(&mut self, bus: &mut MemoryBus) {
-        if self.memory_bound {
-            self.unbind_memory();
-        } else {
-            unmap_default_code_window();
-            callbacks::clear_host_regions();
-            let _ = take_callback_stop();
-        }
+        assert!(
+            !self.memory_bound,
+            "Rl78Cpu::bind_memory: memory already bound"
+        );
+        unmap_default_code_window();
+        callbacks::clear_host_regions();
+        let _ = take_callback_stop();
 
         let mut host_regions = Vec::new();
         let mut io_regions = Vec::new();

@@ -16,10 +16,7 @@ pub use callbacks::{
     remove_host_region, set_io_handler, take_callback_stop,
 };
 pub use cpu::Rl78Cpu;
-pub use elf::{
-    EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine, magic_probe_guest_code,
-    write_minimal_elf32,
-};
+pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
@@ -141,18 +138,5 @@ mod tests {
         };
         assert_eq!(cfg.layout().ram_size, 4 * 1024);
         let _ = minimal_machine(cfg);
-    }
-
-    #[serial]
-    #[test]
-    fn load_elf_roundtrips_via_minimal_machine() {
-        let code = magic_probe_guest_code(b"x");
-        let image = write_minimal_elf32(0x100, 0x100, &code);
-        let mut machine = minimal_machine(MinimalMachineConfig::default());
-        let loaded = load_elf_into_machine(&image, &mut machine).unwrap();
-        assert_eq!(loaded.entry, 0x100);
-        let mut buf = [0u8; 1];
-        machine.bus_mut().read(0x100, &mut buf).unwrap();
-        assert_eq!(buf[0], 0xcf);
     }
 }

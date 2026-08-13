@@ -120,6 +120,12 @@ fn latch_bus_error(_addr: Addr, write: bool, err: &BusError) {
         BusError::OutOfRange { addr, .. } => {
             request_callback_stop(StopReason::Unmapped { addr: *addr, write });
         }
+        BusError::NotLoadable { addr } => {
+            request_callback_stop(StopReason::Unmapped {
+                addr: *addr,
+                write: true,
+            });
+        }
     }
 }
 

@@ -1,4 +1,6 @@
 //! ELF loader for guest images (ELF only; no bin/mot).
+//!
+//! Parsing uses the [`object`] crate (`PT_LOAD` segments).
 
 use object::{Endianness, Object, ObjectSegment};
 use sim_kernel::{Cpu, Machine, MemoryBus};
@@ -38,17 +40,17 @@ impl std::error::Error for LoadError {}
 
 /// Load a guest ELF into `bus` (PT_LOAD segments only).
 pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError> {
-    if image.len() < 52 || &image[0..4] != b"\x7fELF" {
-        return Err(LoadError::NotElf);
+    let file = object::File::parse(image).map_err(|_| {
+        if image.len() < 4 || &image[0..4] != b"\x7fELF" {
+            LoadError::NotElf
+        } else {
+            LoadError::Truncated
+        }
+    })?;
+    match file {
+        object::File::Elf32(_) => {}
+        _ => return Err(LoadError::Unsupported("only ELF32 is supported")),
     }
-    if image[4] != 1 {
-        return Err(LoadError::Unsupported("only ELF32 is supported"));
-    }
-    if image[5] != 1 {
-        return Err(LoadError::Unsupported("ELF must be little-endian"));
-    }
-
-    let file = object::File::parse(image).map_err(|_| LoadError::Truncated)?;
     if file.endianness() != Endianness::Little {
         return Err(LoadError::Unsupported("ELF must be little-endian"));
     }
@@ -62,11 +64,11 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
             continue;
         }
         if !data.is_empty() {
-            bus.write_load(addr, data).map_err(LoadError::Bus)?;
+            bus.load(addr, data).map_err(LoadError::Bus)?;
         }
         if mem_size > data.len() {
             let zeros = vec![0u8; mem_size - data.len()];
-            bus.write_load(addr + data.len() as u64, &zeros)
+            bus.load(addr + data.len() as u64, &zeros)
                 .map_err(LoadError::Bus)?;
         }
         loaded = true;
@@ -93,64 +95,46 @@ pub fn load_elf_into_machine(
     Ok(loaded)
 }
 
-/// Build a minimal little-endian ELF32 (ET_EXEC) with one PT_LOAD segment.
-///
-/// Used by tests / smoke fixtures so we do not need an RL78 toolchain.
-pub fn write_minimal_elf32(load_addr: u32, entry: u32, payload: &[u8]) -> Vec<u8> {
-    const EH_SIZE: usize = 52;
-    const PH_SIZE: usize = 32;
-    let mut out = vec![0u8; EH_SIZE + PH_SIZE + payload.len()];
-
-    out[0..4].copy_from_slice(b"\x7fELF");
-    out[4] = 1; // ELFCLASS32
-    out[5] = 1; // ELFDATA2LSB
-    out[6] = 1; // EV_CURRENT
-
-    out[16..18].copy_from_slice(&1u16.to_le_bytes()); // ET_EXEC
-    out[18..20].copy_from_slice(&EM_RL78.to_le_bytes());
-    out[20..24].copy_from_slice(&1u32.to_le_bytes());
-    out[24..28].copy_from_slice(&entry.to_le_bytes());
-    out[28..32].copy_from_slice(&(EH_SIZE as u32).to_le_bytes());
-    out[40..42].copy_from_slice(&(EH_SIZE as u16).to_le_bytes());
-    out[42..44].copy_from_slice(&(PH_SIZE as u16).to_le_bytes());
-    out[44..46].copy_from_slice(&1u16.to_le_bytes());
-
-    let ph = &mut out[EH_SIZE..EH_SIZE + PH_SIZE];
-    ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
-    ph[4..8].copy_from_slice(&((EH_SIZE + PH_SIZE) as u32).to_le_bytes());
-    ph[8..12].copy_from_slice(&load_addr.to_le_bytes());
-    ph[12..16].copy_from_slice(&load_addr.to_le_bytes());
-    let sz = payload.len() as u32;
-    ph[16..20].copy_from_slice(&sz.to_le_bytes());
-    ph[20..24].copy_from_slice(&sz.to_le_bytes());
-    ph[24..28].copy_from_slice(&7u32.to_le_bytes()); // RWX
-    ph[28..32].copy_from_slice(&1u32.to_le_bytes());
-
-    out[EH_SIZE + PH_SIZE..].copy_from_slice(payload);
-    out
-}
-
-/// RL78 guest bytes: write `msg` to Magic probe via `MOV !addr16, #imm`, then `BR $`.
-///
-/// Without an ES prefix, ABS16 stores go to `addr16 | 0xF0000` (see tlib translate).
-pub fn magic_probe_guest_code(msg: &[u8]) -> Vec<u8> {
-    let mut code = Vec::with_capacity(msg.len() * 4 + 2);
-    for (i, byte) in msg.iter().enumerate() {
-        let addr = i as u16;
-        code.push(0xcf); // MOV ABS16, IMM8
-        code.extend_from_slice(&addr.to_le_bytes());
-        code.push(*byte);
-    }
-    code.push(0xef); // BR REL8
-    code.push(0xfe); // rel = -2 → branch to self
-    code
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{MinimalMachineConfig, minimal_machine};
     use serial_test::serial;
+
+    /// Build a minimal little-endian ELF32 (ET_EXEC) with one PT_LOAD segment.
+    fn write_minimal_elf32(load_addr: u32, entry: u32, payload: &[u8]) -> Vec<u8> {
+        const EH_SIZE: usize = 52;
+        const PH_SIZE: usize = 32;
+        let mut out = vec![0u8; EH_SIZE + PH_SIZE + payload.len()];
+
+        out[0..4].copy_from_slice(b"\x7fELF");
+        out[4] = 1; // ELFCLASS32
+        out[5] = 1; // ELFDATA2LSB
+        out[6] = 1; // EV_CURRENT
+
+        out[16..18].copy_from_slice(&1u16.to_le_bytes()); // ET_EXEC
+        out[18..20].copy_from_slice(&EM_RL78.to_le_bytes());
+        out[20..24].copy_from_slice(&1u32.to_le_bytes());
+        out[24..28].copy_from_slice(&entry.to_le_bytes());
+        out[28..32].copy_from_slice(&(EH_SIZE as u32).to_le_bytes());
+        out[40..42].copy_from_slice(&(EH_SIZE as u16).to_le_bytes());
+        out[42..44].copy_from_slice(&(PH_SIZE as u16).to_le_bytes());
+        out[44..46].copy_from_slice(&1u16.to_le_bytes());
+
+        let ph = &mut out[EH_SIZE..EH_SIZE + PH_SIZE];
+        ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        ph[4..8].copy_from_slice(&((EH_SIZE + PH_SIZE) as u32).to_le_bytes());
+        ph[8..12].copy_from_slice(&load_addr.to_le_bytes());
+        ph[12..16].copy_from_slice(&load_addr.to_le_bytes());
+        let sz = payload.len() as u32;
+        ph[16..20].copy_from_slice(&sz.to_le_bytes());
+        ph[20..24].copy_from_slice(&sz.to_le_bytes());
+        ph[24..28].copy_from_slice(&7u32.to_le_bytes()); // RWX
+        ph[28..32].copy_from_slice(&1u32.to_le_bytes());
+
+        out[EH_SIZE + PH_SIZE..].copy_from_slice(payload);
+        out
+    }
 
     #[serial]
     #[test]

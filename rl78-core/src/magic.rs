@@ -63,4 +63,12 @@ impl<S: ProbeSink> MemoryMapped for MagicProbe<S> {
         self.sink.emit(buf);
         Ok(())
     }
+
+    fn host_ptr(&mut self) -> Option<*mut u8> {
+        None
+    }
+
+    fn load(&mut self, offset: u64, _buf: &[u8]) -> Result<(), BusError> {
+        Err(BusError::NotLoadable { addr: offset })
+    }
 }

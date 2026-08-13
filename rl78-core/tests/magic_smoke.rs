@@ -1,10 +1,12 @@
 //! Guest Magic probe smoke (own process — tlib is unsafe after guest execute).
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 
+use common::{magic_probe_guest_code, write_minimal_elf32};
 use rl78_core::{
-    MinimalMachineConfig, ProbeSink, load_elf_into_machine, magic_probe_guest_code,
-    minimal_machine_with_probe, write_minimal_elf32,
+    MinimalMachineConfig, ProbeSink, load_elf_into_machine, minimal_machine_with_probe,
 };
 use sim_kernel::Cpu;
 
