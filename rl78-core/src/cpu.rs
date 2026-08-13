@@ -12,8 +12,9 @@
 //! [`MemoryBus`] (via [`callbacks::set_io_bus`]).
 
 use std::ffi::CString;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Mutex, Once};
 
 use sim_kernel::{
     Addr, Breakpoint, BreakpointId, Cpu, MemoryBus, PendingStop, Quantum, RegId, SimError,
@@ -23,20 +24,8 @@ use sim_kernel::{
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
 use crate::ffi::{self, Rl78Reg};
 
-/// Default fetch window (all `0x00` = RL78 NOP) used only when no
-/// [`Cpu::bind_memory`] has run yet (unit tests that construct `Rl78Cpu`
-/// without a `Machine`).
-const DEFAULT_CODE_WINDOW: usize = 4096;
-
 static SEAT: Mutex<bool> = Mutex::new(false);
 static TLIB_INIT: Once = Once::new();
-struct CodeWindow(*mut u8);
-// Safety: access is gated by `TlibSeat` (single owner).
-unsafe impl Send for CodeWindow {}
-unsafe impl Sync for CodeWindow {}
-
-static CODE_WINDOW: OnceLock<CodeWindow> = OnceLock::new();
-static CODE_MAPPED: AtomicBool = AtomicBool::new(false);
 
 /// Unit-test only: after a CPU that never ran `tlib_execute` is dropped, the
 /// next `Rl78Cpu::new` should call `tlib_reset` so leftover PC/regs do not leak
@@ -86,36 +75,6 @@ fn ensure_tlib_initialized() {
     });
 }
 
-fn code_window_ptr() -> *mut u8 {
-    CODE_WINDOW
-        .get_or_init(|| {
-            let boxed = vec![0u8; DEFAULT_CODE_WINDOW].into_boxed_slice();
-            CodeWindow(Box::into_raw(boxed) as *mut u8)
-        })
-        .0
-}
-
-fn ensure_default_memory_mapped() {
-    // Stand-in for unit tests that never call `bind_memory`. Production
-    // `Machine::new` replaces this via [`Rl78Cpu::bind_memory`].
-    let ptr = code_window_ptr();
-    unsafe {
-        callbacks::map_host_region(0, DEFAULT_CODE_WINDOW as u64, ptr);
-        if !CODE_MAPPED.swap(true, Ordering::AcqRel) {
-            std::ptr::write_bytes(ptr, 0, DEFAULT_CODE_WINDOW);
-            ffi::tlib_map_range(0, DEFAULT_CODE_WINDOW as u64);
-        }
-    }
-}
-
-fn unmap_default_code_window() {
-    if CODE_MAPPED.swap(false, Ordering::AcqRel) {
-        let end = (DEFAULT_CODE_WINDOW as u64).saturating_sub(1);
-        unsafe { ffi::tlib_unmap_range(0, end) };
-        callbacks::remove_host_region(0, DEFAULT_CODE_WINDOW as u64);
-    }
-}
-
 /// RL78 CPU backed by tlib. At most one live instance may exist (tlib singleton).
 pub struct Rl78Cpu {
     /// Held for the CPU lifetime. A second live `Rl78Cpu` panics in `TlibSeat::acquire`.
@@ -125,7 +84,7 @@ pub struct Rl78Cpu {
     /// Kernel breakpoint table (id + addr). tlib only stores addresses, not
     /// [`BreakpointId`], so `EXCP_DEBUG` is mapped back to an id via PC lookup.
     breakpoints: Vec<Breakpoint>,
-    /// True after [`Cpu::bind_memory`] replaced the default NOP window.
+    /// True after [`Cpu::bind_memory`] has mapped the attached [`MemoryBus`].
     memory_bound: bool,
     /// Guest ranges passed to `tlib_map_range` while bound (unmapped on Drop).
     mapped_ranges: Vec<(u64, u64)>,
@@ -149,7 +108,6 @@ impl Rl78Cpu {
         ensure_tlib_initialized();
         clear_io_bus();
         let _ = take_callback_stop();
-        ensure_default_memory_mapped();
         // TODO: if construction paths beyond `new` are added (e.g. `from_elf`,
         // reinit), consolidate `tlib_reset` and related CPU-state init into
         // `init_tlib_cpu_state()` and call it from every entry point instead of
@@ -330,7 +288,6 @@ impl Cpu for Rl78Cpu {
             !self.memory_bound,
             "Rl78Cpu::bind_memory: memory already bound"
         );
-        unmap_default_code_window();
         callbacks::clear_host_regions();
         let _ = take_callback_stop();
 
@@ -546,17 +503,6 @@ mod map_probe {
     use serial_test::serial;
     use sim_kernel::{Cpu, MemoryMapBuilder, Ram, Rom, StopReason, UnmappedPolicy};
     use std::sync::{Arc, Mutex};
-
-    #[serial]
-    #[test]
-    fn map_range_is_visible() {
-        let mut cpu = Rl78Cpu::new();
-        let mapped = unsafe { ffi::tlib_is_range_mapped(0, 1) };
-        assert_ne!(mapped, 0, "expected range 0 mapped after Rl78Cpu::new");
-        let p = crate::callbacks::rl78_host_guest_offset_to_host_ptr(0);
-        assert!(!p.is_null(), "host ptr for 0");
-        let _ = &mut cpu;
-    }
 
     #[serial]
     #[test]
