@@ -8,8 +8,8 @@
 //! `tlib_execute`.
 //!
 //! Memory callbacks live in [`crate::callbacks`]. [`Cpu::bind_memory`] maps
-//! `Rom`/`Ram` host buffers into tlib and routes MMIO pages through
-//! [`BusIoHandler`] into [`MemoryBus`].
+//! `Rom`/`Ram` host buffers into tlib and routes MMIO pages through the bound
+//! [`MemoryBus`] (via [`callbacks::set_io_bus`]).
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +20,7 @@ use sim_kernel::{
     resolve_after_tlib_execute,
 };
 
-use crate::callbacks::{self, BusIoHandler, TLIB_PAGE_SIZE, set_io_handler, take_callback_stop};
+use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
 use crate::ffi::{self, Rl78Reg};
 
 /// Default fetch window (all `0x00` = RL78 NOP) used only when no
@@ -147,7 +147,7 @@ impl Rl78Cpu {
     pub fn new() -> Self {
         let seat = TlibSeat::acquire();
         ensure_tlib_initialized();
-        set_io_handler(None);
+        clear_io_bus();
         let _ = take_callback_stop();
         ensure_default_memory_mapped();
         // TODO: if construction paths beyond `new` are added (e.g. `from_elf`,
@@ -217,7 +217,7 @@ impl Rl78Cpu {
     /// dangling host pointers or stale `tlib_map_range` windows after the bus
     /// is freed (CPU is dropped before the boxed bus).
     fn unbind_memory(&mut self) {
-        set_io_handler(None);
+        clear_io_bus();
         let _ = take_callback_stop();
         for page in self.io_pages.drain(..) {
             unsafe { ffi::tlib_clear_page_io_accessed(page) };
@@ -318,7 +318,7 @@ impl Drop for Rl78Cpu {
         if self.memory_bound {
             self.unbind_memory();
         } else {
-            set_io_handler(None);
+            clear_io_bus();
             let _ = take_callback_stop();
         }
     }
@@ -356,13 +356,12 @@ impl Cpu for Rl78Cpu {
             // Leave MMIO physically unassigned so ABS16 stores (`rl78_write_byte` →
             // `stb_phys`) take the IO_MEM_UNASSIGNED path into host write
             // callbacks. Mapping as RAM would require a host pointer and would
-            // bypass [`BusIoHandler`] / MagicProbe.
+            // bypass MagicProbe.
             self.set_io_pages(base, size);
         }
 
         // Safety: `Machine` boxes the bus before bind and keeps it pinned.
-        let handler = unsafe { BusIoHandler::new(bus as *mut MemoryBus) };
-        set_io_handler(Some(Box::new(handler)));
+        unsafe { set_io_bus(bus as *mut MemoryBus) };
         self.memory_bound = true;
     }
 
@@ -607,16 +606,11 @@ mod map_probe {
         assert_eq!(&captured.lock().unwrap()[..], b"via-bus");
         captured.lock().unwrap().clear();
 
-        // Drive BusIoHandler without `tlib_set_return_request`.
-        {
-            use crate::callbacks::IoHandler;
-            let bus = machine.bus_mut() as *mut _;
-            let mut handler = unsafe { crate::callbacks::BusIoHandler::new(bus) };
-            handler.write(MAGIC_PROBE_BASE, u64::from(b'h'), 1).unwrap();
-            handler
-                .write(MAGIC_PROBE_BASE + 1, u64::from(b'i'), 1)
-                .unwrap();
-        }
+        // IO path installed by bind_memory → set_io_bus (no tlib_set_return_request).
+        assert!(crate::callbacks::rl78_host_write_byte_for_test(MAGIC_PROBE_BASE, b'h').is_ok());
+        assert!(
+            crate::callbacks::rl78_host_write_byte_for_test(MAGIC_PROBE_BASE + 1, b'i').is_ok()
+        );
         assert_eq!(&captured.lock().unwrap()[..], b"hi");
     }
 
@@ -630,12 +624,7 @@ mod map_probe {
             },
             BufferSink::default(),
         );
-        {
-            use crate::callbacks::IoHandler;
-            let bus = machine.bus_mut() as *mut _;
-            let mut handler = unsafe { crate::callbacks::BusIoHandler::new(bus) };
-            assert!(handler.write(0x80000, 0xAA, 1).is_err());
-        }
+        assert!(crate::callbacks::rl78_host_write_byte_for_test(0x80000, 0xAA).is_err());
         let reason = take_callback_stop();
         assert_eq!(
             reason,

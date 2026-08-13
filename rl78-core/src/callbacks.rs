@@ -2,8 +2,8 @@
 //!
 //! C shims in `host_callbacks.c` (whole-archived) override the weak stubs inside
 //! `libtlib.a` and forward here. Direct-mapped guest regions use
-//! [`map_host_region`]. IO-page accesses go through [`IoHandler`] into
-//! [`sim_kernel::MemoryBus`].
+//! [`map_host_region`]. IO-page accesses go straight to a bound
+//! [`sim_kernel::MemoryBus`] (width packing lives in this module).
 
 use std::os::raw::c_char;
 use std::ptr;
@@ -28,82 +28,6 @@ pub struct HostRegion {
 // and host pointers outlive the mapping (CPU / backing store lifetime).
 unsafe impl Send for HostRegion {}
 unsafe impl Sync for HostRegion {}
-
-/// IO-page load/store hook. Return `Err(())` to request `tlib_set_return_request`.
-pub trait IoHandler: Send {
-    #[allow(clippy::result_unit_err)]
-    fn read(&mut self, addr: u64, width: u8) -> Result<u64, ()>;
-    #[allow(clippy::result_unit_err)]
-    fn write(&mut self, addr: u64, value: u64, width: u8) -> Result<(), ()>;
-}
-
-/// Forwards IO-page accesses to a [`MemoryBus`] owned by [`sim_kernel::Machine`].
-///
-/// The bus pointer stays valid because `Machine` heap-allocates the bus before
-/// [`crate::Cpu::bind_memory`] and does not move it afterward. Do **not** store
-/// pointers into the `Cpu` itself here — `Machine::new` moves the CPU after bind.
-pub struct BusIoHandler {
-    bus: *mut MemoryBus,
-}
-
-// Safety: used only on the simulation thread while the `Machine` (and thus the
-// bus) is alive.
-unsafe impl Send for BusIoHandler {}
-
-impl BusIoHandler {
-    /// # Safety
-    /// `bus` must remain valid and uniquely used for the lifetime of this handler.
-    #[must_use]
-    pub unsafe fn new(bus: *mut MemoryBus) -> Self {
-        Self { bus }
-    }
-
-    fn bus_mut(&mut self) -> &mut MemoryBus {
-        unsafe { &mut *self.bus }
-    }
-}
-
-impl IoHandler for BusIoHandler {
-    fn read(&mut self, addr: u64, width: u8) -> Result<u64, ()> {
-        let mut buf = [0u8; 8];
-        let len = width_len(width)?;
-        match self.bus_mut().read(addr, &mut buf[..len]) {
-            Ok(()) => Ok(u64::from_le_bytes(buf) & width_mask(width)),
-            Err(err) => {
-                latch_bus_error(addr, false, &err);
-                Err(())
-            }
-        }
-    }
-
-    fn write(&mut self, addr: u64, value: u64, width: u8) -> Result<(), ()> {
-        let len = width_len(width)?;
-        let bytes = value.to_le_bytes();
-        match self.bus_mut().write(addr, &bytes[..len]) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                latch_bus_error(addr, true, &err);
-                Err(())
-            }
-        }
-    }
-}
-
-fn width_len(width: u8) -> Result<usize, ()> {
-    match width {
-        1 | 2 | 4 | 8 => Ok(usize::from(width)),
-        _ => Err(()),
-    }
-}
-
-fn width_mask(width: u8) -> u64 {
-    match width {
-        1 => 0xff,
-        2 => 0xffff,
-        4 => 0xffff_ffff,
-        _ => u64::MAX,
-    }
-}
 
 fn latch_bus_error(_addr: Addr, write: bool, err: &BusError) {
     match err {
@@ -131,14 +55,19 @@ fn latch_bus_error(_addr: Addr, write: bool, err: &BusError) {
 
 struct CallbackState {
     regions: Vec<HostRegion>,
-    io: Option<Box<dyn IoHandler>>,
+    /// Bound by [`set_io_bus`] from [`crate::Cpu::bind_memory`].
+    /// `Machine` boxes the bus before bind and does not move it afterward.
+    io_bus: Option<*mut MemoryBus>,
 }
+
+// Safety: `io_bus` is only used on the sim thread while the `Machine` lives.
+unsafe impl Send for CallbackState {}
 
 impl CallbackState {
     fn new() -> Self {
         Self {
             regions: Vec::new(),
-            io: None,
+            io_bus: None,
         }
     }
 
@@ -158,8 +87,8 @@ fn state() -> &'static Mutex<CallbackState> {
     STATE.get_or_init(|| Mutex::new(CallbackState::new()))
 }
 
-/// Separate from [`state`] so [`BusIoHandler`] can latch a stop while `io_read` /
-/// `io_write` already hold the region/handler mutex (avoids re-entrant deadlock).
+/// Separate from [`state`] so IO helpers can latch a stop without re-locking
+/// the region/bus mutex.
 fn stop_latch() -> &'static Mutex<Option<StopReason>> {
     static STOP: OnceLock<Mutex<Option<StopReason>>> = OnceLock::new();
     STOP.get_or_init(|| Mutex::new(None))
@@ -213,35 +142,81 @@ pub fn clear_host_regions() {
     state().lock().expect("tlib callback state").regions.clear();
 }
 
-/// Install / replace the IO-page handler. Pass `None` to clear.
-pub fn set_io_handler(handler: Option<Box<dyn IoHandler>>) {
-    state().lock().expect("tlib callback state").io = handler;
+/// Bind the [`MemoryBus`] used for IO-page callbacks.
+///
+/// # Safety
+/// `bus` must remain valid and uniquely used until [`clear_io_bus`] (`Machine`
+/// boxes the bus before [`crate::Cpu::bind_memory`]).
+pub unsafe fn set_io_bus(bus: *mut MemoryBus) {
+    state().lock().expect("tlib callback state").io_bus = Some(bus);
 }
 
-fn io_read(addr: u64, width: u8) -> Result<u64, ()> {
-    let mut guard = state().lock().expect("tlib callback state");
-    match guard.io.as_mut() {
-        Some(io) => io.read(addr, width),
-        None => {
-            // Mapped RAM should be served by guest_offset; IO without a handler
-            // returns 0 (matches tlib reset-vector behavior before mapping).
-            let _ = (addr, width);
-            Ok(0)
-        }
+/// Clear the IO-page bus pointer.
+pub fn clear_io_bus() {
+    state().lock().expect("tlib callback state").io_bus = None;
+}
+
+fn width_len(width: u8) -> Result<usize, ()> {
+    match width {
+        1 | 2 | 4 | 8 => Ok(usize::from(width)),
+        _ => Err(()),
     }
 }
 
-fn io_write(addr: u64, value: u64, width: u8) -> Result<(), ()> {
-    let mut guard = state().lock().expect("tlib callback state");
-    match guard.io.as_mut() {
-        Some(io) => io.write(addr, value, width),
-        None => {
-            eprintln!(
-                "rl78-core: unhandled IO write addr={addr:#x} value={value:#x} width={width}"
-            );
+fn width_mask(width: u8) -> u64 {
+    match width {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
+fn io_bus_ptr() -> Option<*mut MemoryBus> {
+    state().lock().expect("tlib callback state").io_bus
+}
+
+#[allow(clippy::result_unit_err)]
+fn io_read(addr: u64, width: u8) -> Result<u64, ()> {
+    let Some(bus) = io_bus_ptr() else {
+        // Mapped RAM should be served by guest_offset; IO before bind returns 0.
+        return Ok(0);
+    };
+    let bus = unsafe { &mut *bus };
+    let mut buf = [0u8; 8];
+    let len = width_len(width)?;
+    match bus.read(addr, &mut buf[..len]) {
+        Ok(()) => Ok(u64::from_le_bytes(buf) & width_mask(width)),
+        Err(err) => {
+            latch_bus_error(addr, false, &err);
             Err(())
         }
     }
+}
+
+#[allow(clippy::result_unit_err)]
+fn io_write(addr: u64, value: u64, width: u8) -> Result<(), ()> {
+    let Some(bus) = io_bus_ptr() else {
+        eprintln!("rl78-core: unhandled IO write addr={addr:#x} value={value:#x} width={width}");
+        return Err(());
+    };
+    let bus = unsafe { &mut *bus };
+    let len = width_len(width)?;
+    let bytes = value.to_le_bytes();
+    match bus.write(addr, &bytes[..len]) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            latch_bus_error(addr, true, &err);
+            Err(())
+        }
+    }
+}
+
+/// Test helper: IO-page write without calling `tlib_set_return_request`.
+#[cfg(test)]
+#[allow(clippy::result_unit_err)]
+pub(crate) fn rl78_host_write_byte_for_test(address: u64, value: u8) -> Result<(), ()> {
+    io_write(address, u64::from(value), 1)
 }
 
 #[unsafe(no_mangle)]

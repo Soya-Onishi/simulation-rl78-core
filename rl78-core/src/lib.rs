@@ -12,8 +12,8 @@ mod magic;
 mod map;
 
 pub use callbacks::{
-    BusIoHandler, HostRegion, IoHandler, TLIB_PAGE_SIZE, clear_host_regions, map_host_region,
-    remove_host_region, set_io_handler, take_callback_stop,
+    HostRegion, TLIB_PAGE_SIZE, clear_host_regions, clear_io_bus, map_host_region,
+    remove_host_region, set_io_bus, take_callback_stop,
 };
 pub use cpu::Rl78Cpu;
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
