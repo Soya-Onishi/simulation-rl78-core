@@ -127,6 +127,10 @@ pub struct Rl78Cpu {
     breakpoints: Vec<Breakpoint>,
     /// True after [`Cpu::bind_memory`] replaced the default NOP window.
     memory_bound: bool,
+    /// Guest ranges passed to `tlib_map_range` while bound (unmapped on Drop).
+    mapped_ranges: Vec<(u64, u64)>,
+    /// Pages marked IO via `tlib_set_page_io_accessed` (cleared on Drop).
+    io_pages: Vec<u64>,
     /// Unit-test only: true after this instance ran `tlib_execute`. See
     /// [`UNIT_TEST_RESET_TLIB_ON_NEXT_NEW`].
     #[cfg(test)]
@@ -164,6 +168,8 @@ impl Rl78Cpu {
             pending: PendingStop::new(),
             breakpoints: Vec::new(),
             memory_bound: false,
+            mapped_ranges: Vec::new(),
+            io_pages: Vec::new(),
             #[cfg(test)]
             unit_test_guest_executed: false,
         }
@@ -185,6 +191,7 @@ impl Rl78Cpu {
             callbacks::map_host_region(guest_base, length, host);
             ffi::tlib_map_range(guest_base, length);
         }
+        self.mapped_ranges.push((guest_base, length));
     }
 
     /// Mark every tlib page covering `[guest_base, guest_base + length)` as IO.
@@ -196,11 +203,34 @@ impl Rl78Cpu {
         let mut page = guest_base & !(TLIB_PAGE_SIZE - 1);
         while page < end {
             unsafe { ffi::tlib_set_page_io_accessed(page) };
+            self.io_pages.push(page);
             page = page.saturating_add(TLIB_PAGE_SIZE);
             if page == 0 {
                 break;
             }
         }
+    }
+
+    /// Tear down host/tlib mappings installed by [`Cpu::bind_memory`].
+    ///
+    /// Called from [`Drop`] so sequential unit-test Machines do not leave
+    /// dangling host pointers or stale `tlib_map_range` windows after the bus
+    /// is freed (CPU is dropped before the boxed bus).
+    fn unbind_memory(&mut self) {
+        set_io_handler(None);
+        let _ = take_callback_stop();
+        for page in self.io_pages.drain(..) {
+            unsafe { ffi::tlib_clear_page_io_accessed(page) };
+        }
+        for (base, size) in self.mapped_ranges.drain(..) {
+            if size == 0 {
+                continue;
+            }
+            let end = base.saturating_add(size).saturating_sub(1);
+            unsafe { ffi::tlib_unmap_range(base, end) };
+        }
+        callbacks::clear_host_regions();
+        self.memory_bound = false;
     }
 
     /// Mark a page as IO-accessed so loads/stores call the host IO callbacks.
@@ -285,35 +315,48 @@ impl Drop for Rl78Cpu {
         if !self.unit_test_guest_executed {
             UNIT_TEST_RESET_TLIB_ON_NEXT_NEW.store(true, Ordering::Release);
         }
-        set_io_handler(None);
-        let _ = take_callback_stop();
+        if self.memory_bound {
+            self.unbind_memory();
+        } else {
+            set_io_handler(None);
+            let _ = take_callback_stop();
+        }
     }
 }
 
 impl Cpu for Rl78Cpu {
     fn bind_memory(&mut self, bus: &mut MemoryBus) {
-        unmap_default_code_window();
-        callbacks::clear_host_regions();
-        let _ = take_callback_stop();
+        if self.memory_bound {
+            self.unbind_memory();
+        } else {
+            unmap_default_code_window();
+            callbacks::clear_host_regions();
+            let _ = take_callback_stop();
+        }
 
+        let mut host_regions = Vec::new();
         let mut io_regions = Vec::new();
         bus.for_each_region(|base, size, host| {
             if let Some(ptr) = host {
-                unsafe {
-                    callbacks::map_host_region(base, size, ptr);
-                    ffi::tlib_map_range(base, size);
-                }
+                host_regions.push((base, size, ptr));
             } else {
                 io_regions.push((base, size));
             }
         });
+
+        for (base, size, ptr) in host_regions {
+            unsafe {
+                callbacks::map_host_region(base, size, ptr);
+                ffi::tlib_map_range(base, size);
+            }
+            self.mapped_ranges.push((base, size));
+        }
 
         for (base, size) in io_regions {
             // Leave MMIO physically unassigned so ABS16 stores (`rl78_write_byte` →
             // `stb_phys`) take the IO_MEM_UNASSIGNED path into host write
             // callbacks. Mapping as RAM would require a host pointer and would
             // bypass [`BusIoHandler`] / MagicProbe.
-            let _ = (base, size);
             self.set_io_pages(base, size);
         }
 
@@ -602,5 +645,26 @@ mod map_probe {
             })
         );
         assert!(machine.bus_mut().take_trap().is_some());
+    }
+
+    #[serial]
+    #[test]
+    fn drop_clears_bound_host_mappings() {
+        let mut bus = MemoryMapBuilder::new()
+            .map(0, Box::new(Rom::from_bytes(vec![0u8; 4096])))
+            .unwrap()
+            .map(0xF0100, Box::new(Ram::new(1024)))
+            .unwrap()
+            .build();
+        let mut cpu = Rl78Cpu::new();
+        cpu.bind_memory(&mut bus);
+        assert!(!crate::callbacks::rl78_host_guest_offset_to_host_ptr(0).is_null());
+        drop(cpu);
+        assert!(
+            crate::callbacks::rl78_host_guest_offset_to_host_ptr(0).is_null(),
+            "host regions must be cleared on Drop before the bus is freed"
+        );
+        let mapped = unsafe { ffi::tlib_is_range_mapped(0, 1) };
+        assert_eq!(mapped, 0, "tlib map for ROM must be unmapped on Drop");
     }
 }
