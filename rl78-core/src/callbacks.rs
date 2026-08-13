@@ -1,15 +1,20 @@
-//! Host-side tlib callbacks (phase C scaffolding).
+//! Host-side tlib callbacks.
 //!
 //! C shims in `host_callbacks.c` (whole-archived) override the weak stubs inside
 //! `libtlib.a` and forward here. Direct-mapped guest regions use
-//! [`map_host_region`]. IO-page accesses go through [`IoHandler`] (phase D will
-//! route these into [`sim_kernel::MemoryBus`]).
+//! [`map_host_region`]. IO-page accesses go through [`IoHandler`] into
+//! [`sim_kernel::MemoryBus`].
 
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
+use sim_kernel::{Addr, BusError, MemoryBus, StopReason};
+
 use crate::ffi;
+
+/// RL78 tlib page size (`TARGET_PAGE_BITS = 8`).
+pub const TLIB_PAGE_SIZE: u64 = 256;
 
 /// One contiguous guest physical window backed by a host buffer.
 #[derive(Clone, Copy, Debug)]
@@ -26,8 +31,96 @@ unsafe impl Sync for HostRegion {}
 
 /// IO-page load/store hook. Return `Err(())` to request `tlib_set_return_request`.
 pub trait IoHandler: Send {
+    #[allow(clippy::result_unit_err)]
     fn read(&mut self, addr: u64, width: u8) -> Result<u64, ()>;
+    #[allow(clippy::result_unit_err)]
     fn write(&mut self, addr: u64, value: u64, width: u8) -> Result<(), ()>;
+}
+
+/// Forwards IO-page accesses to a [`MemoryBus`] owned by [`sim_kernel::Machine`].
+///
+/// The bus pointer stays valid because `Machine` heap-allocates the bus before
+/// [`crate::Cpu::bind_memory`] and does not move it afterward. Do **not** store
+/// pointers into the `Cpu` itself here — `Machine::new` moves the CPU after bind.
+pub struct BusIoHandler {
+    bus: *mut MemoryBus,
+}
+
+// Safety: used only on the simulation thread while the `Machine` (and thus the
+// bus) is alive.
+unsafe impl Send for BusIoHandler {}
+
+impl BusIoHandler {
+    /// # Safety
+    /// `bus` must remain valid and uniquely used for the lifetime of this handler.
+    #[must_use]
+    pub unsafe fn new(bus: *mut MemoryBus) -> Self {
+        Self { bus }
+    }
+
+    fn bus_mut(&mut self) -> &mut MemoryBus {
+        unsafe { &mut *self.bus }
+    }
+}
+
+impl IoHandler for BusIoHandler {
+    fn read(&mut self, addr: u64, width: u8) -> Result<u64, ()> {
+        let mut buf = [0u8; 8];
+        let len = width_len(width)?;
+        match self.bus_mut().read(addr, &mut buf[..len]) {
+            Ok(()) => Ok(u64::from_le_bytes(buf) & width_mask(width)),
+            Err(err) => {
+                latch_bus_error(addr, false, &err);
+                Err(())
+            }
+        }
+    }
+
+    fn write(&mut self, addr: u64, value: u64, width: u8) -> Result<(), ()> {
+        let len = width_len(width)?;
+        let bytes = value.to_le_bytes();
+        match self.bus_mut().write(addr, &bytes[..len]) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                latch_bus_error(addr, true, &err);
+                Err(())
+            }
+        }
+    }
+}
+
+fn width_len(width: u8) -> Result<usize, ()> {
+    match width {
+        1 | 2 | 4 | 8 => Ok(usize::from(width)),
+        _ => Err(()),
+    }
+}
+
+fn width_mask(width: u8) -> u64 {
+    match width {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
+fn latch_bus_error(_addr: Addr, write: bool, err: &BusError) {
+    match err {
+        BusError::Unmapped { addr, .. } => {
+            request_callback_stop(StopReason::Unmapped { addr: *addr, write });
+        }
+        BusError::ReadOnly { addr } => {
+            // Treat ROM/MMIO reject as an unmapped-style guest fault for M1.
+            request_callback_stop(StopReason::Unmapped {
+                addr: *addr,
+                write: true,
+            });
+        }
+        BusError::OutOfRange { addr, .. } => {
+            request_callback_stop(StopReason::Unmapped { addr: *addr, write });
+        }
+    }
 }
 
 struct CallbackState {
@@ -59,6 +152,26 @@ fn state() -> &'static Mutex<CallbackState> {
     STATE.get_or_init(|| Mutex::new(CallbackState::new()))
 }
 
+/// Separate from [`state`] so [`BusIoHandler`] can latch a stop while `io_read` /
+/// `io_write` already hold the region/handler mutex (avoids re-entrant deadlock).
+fn stop_latch() -> &'static Mutex<Option<StopReason>> {
+    static STOP: OnceLock<Mutex<Option<StopReason>>> = OnceLock::new();
+    STOP.get_or_init(|| Mutex::new(None))
+}
+
+/// Record a stop from an IO callback (merged into [`sim_kernel::PendingStop`] after execute).
+pub fn request_callback_stop(reason: StopReason) {
+    let mut guard = stop_latch().lock().expect("callback stop latch");
+    if guard.is_none() {
+        *guard = Some(reason);
+    }
+}
+
+/// Take a stop latched by an IO callback, if any.
+pub fn take_callback_stop() -> Option<StopReason> {
+    stop_latch().lock().expect("callback stop latch").take()
+}
+
 /// Register a host-backed guest window for TCG direct access.
 ///
 /// # Safety
@@ -82,16 +195,14 @@ pub unsafe fn map_host_region(guest_base: u64, size: u64, host: *mut u8) {
 }
 
 /// Remove a previously registered host-backed guest window.
-#[allow(dead_code)] // phase D unmap; used in unit tests
 pub fn remove_host_region(guest_base: u64, size: u64) {
     let mut guard = state().lock().expect("tlib callback state");
-    guard.regions.retain(|r| r.guest_base != guest_base || r.size != size);
+    guard
+        .regions
+        .retain(|r| r.guest_base != guest_base || r.size != size);
 }
 
 /// Drop all host region registrations (does not call `tlib_unmap_range`).
-///
-/// Prefer [`remove_host_region`] in tests. After clearing everything, the next
-/// [`crate::cpu::Rl78Cpu::new`] re-registers the default NOP window host pointer.
 pub fn clear_host_regions() {
     state().lock().expect("tlib callback state").regions.clear();
 }
@@ -119,7 +230,9 @@ fn io_write(addr: u64, value: u64, width: u8) -> Result<(), ()> {
     match guard.io.as_mut() {
         Some(io) => io.write(addr, value, width),
         None => {
-            eprintln!("rl78-core: unhandled IO write addr={addr:#x} value={value:#x} width={width}");
+            eprintln!(
+                "rl78-core: unhandled IO write addr={addr:#x} value={value:#x} width={width}"
+            );
             Err(())
         }
     }
@@ -127,7 +240,11 @@ fn io_write(addr: u64, value: u64, width: u8) -> Result<(), ()> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rl78_host_guest_offset_to_host_ptr(offset: u64) -> *mut std::os::raw::c_void {
-    match state().lock().expect("tlib callback state").find_host(offset) {
+    match state()
+        .lock()
+        .expect("tlib callback state")
+        .find_host(offset)
+    {
         Some(p) => p.cast(),
         None => ptr::null_mut(),
     }

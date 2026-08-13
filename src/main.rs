@@ -3,14 +3,29 @@
 //! The process owns two threads: this REPL and the simulation thread. The CLI
 //! only parses `start` / `stop` / `quit` and prints responses.
 
+use std::env;
+use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::thread;
 
-use rl78_core::{MinimalMachineConfig, minimal_machine};
+use rl78_core::{MinimalMachineConfig, load_elf_into_machine, minimal_machine};
 use sim_kernel::{Command, spawn};
 
 fn main() {
-    let machine = minimal_machine(MinimalMachineConfig::default());
+    let mut machine = minimal_machine(MinimalMachineConfig::default());
+    if let Some(path) = env::args().nth(1) {
+        let image = fs::read(Path::new(&path)).unwrap_or_else(|err| {
+            eprintln!("failed to read ELF {path}: {err}");
+            std::process::exit(1);
+        });
+        if let Err(err) = load_elf_into_machine(&image, &mut machine) {
+            eprintln!("failed to load ELF {path}: {err}");
+            std::process::exit(1);
+        }
+        println!("loaded {path}");
+    }
+
     let (ctrl, events) = spawn(machine, sim_kernel::SimConfig::default());
 
     let printer = thread::Builder::new()

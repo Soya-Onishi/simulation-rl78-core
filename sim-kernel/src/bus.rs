@@ -49,6 +49,21 @@ pub trait MemoryMapped: Send {
 
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), BusError>;
     fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError>;
+
+    /// Host pointer for TCG direct mapping. `None` means MMIO (IO callbacks).
+    ///
+    /// The pointer must stay valid for the lifetime of the mapping (the device
+    /// `Vec<u8>` owned by the bus). Architecture CPUs call this from
+    /// [`crate::Cpu::bind_memory`].
+    fn host_ptr(&mut self) -> Option<*mut u8> {
+        None
+    }
+
+    /// Loader / flash-programming path. Defaults to [`Self::write`]; [`Rom`]
+    /// accepts bytes here while still rejecting guest/runtime writes.
+    fn write_load(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError> {
+        self.write(offset, buf)
+    }
 }
 
 /// How the bus treats accesses that hit no region.
@@ -127,6 +142,23 @@ impl MemoryBus {
             .map_err(|err| rewrite_bus_error(err, addr))
     }
 
+    /// Write through [`MemoryMapped::write_load`] (ELF / image load into ROM).
+    pub fn write_load(&mut self, addr: Addr, buf: &[u8]) -> Result<(), BusError> {
+        let len = buf.len();
+        let Some(index) = self.find_region(addr) else {
+            return self.unmapped(addr, len, true);
+        };
+        let region = &mut self.regions[index];
+        let offset = addr - region.base;
+        if offset.saturating_add(len as u64) > region.size {
+            return Err(BusError::OutOfRange { addr, offset, len });
+        }
+        region
+            .device
+            .write_load(offset, buf)
+            .map_err(|err| rewrite_bus_error(err, addr))
+    }
+
     #[must_use]
     pub fn take_unmapped_log(&mut self) -> Vec<UnmappedAccess> {
         std::mem::take(&mut self.unmapped_log)
@@ -135,6 +167,14 @@ impl MemoryBus {
     #[must_use]
     pub fn take_trap(&mut self) -> Option<UnmappedAccess> {
         self.trap.take()
+    }
+
+    /// Walk mapped regions for CPU bind (`host_ptr` is `Some` for RAM/ROM).
+    pub fn for_each_region(&mut self, mut f: impl FnMut(Addr, u64, Option<*mut u8>)) {
+        for region in &mut self.regions {
+            let host = region.device.host_ptr();
+            f(region.base, region.size, host);
+        }
     }
 
     fn find_region(&self, addr: Addr) -> Option<usize> {
@@ -252,6 +292,10 @@ impl MemoryMapped for Ram {
     fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError> {
         copy_into(&mut self.data, offset, buf)
     }
+
+    fn host_ptr(&mut self) -> Option<*mut u8> {
+        Some(self.data.as_mut_ptr())
+    }
 }
 
 /// Read-only memory region.
@@ -286,6 +330,16 @@ impl MemoryMapped for Rom {
         // `addr` is the device-local offset; [`MemoryBus`] rewrites it to the
         // guest address before returning to callers.
         Err(BusError::ReadOnly { addr: offset })
+    }
+
+    fn host_ptr(&mut self) -> Option<*mut u8> {
+        // TCG fetches from the same buffer; guest stores via the bus API still
+        // hit [`BusError::ReadOnly`]. Direct TCG stores are out of M1 scope.
+        Some(self.data.as_mut_ptr())
+    }
+
+    fn write_load(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError> {
+        copy_into(&mut self.data, offset, buf)
     }
 }
 

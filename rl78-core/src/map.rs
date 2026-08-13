@@ -30,7 +30,8 @@ impl Rl78Device {
             Self::Generic64k => MemoryLayout {
                 rom_base: 0x00000,
                 rom_size: 64 * 1024,
-                ram_base: 0xF0000,
+                // Leave 0xF0000–0xF00FF for [`MAGIC_PROBE_BASE`] (ABS16 mirror).
+                ram_base: 0xF0100,
                 ram_size: 32 * 1024,
             },
         }
@@ -38,6 +39,8 @@ impl Rl78Device {
 }
 
 /// Dummy logger peripheral. Guest stores here become host stdout.
-/// Shared across devices for M1; move into layout if a part needs another address.
-pub const MAGIC_PROBE_BASE: Addr = 0xFFF00;
-pub const MAGIC_PROBE_SIZE: usize = 16;
+///
+/// Placed at `0xF0000` so RL78 `MOV !addr16, #imm` (phys = `addr16 | 0xF0000`)
+/// can reach it without an ES prefix — same idea as tlib's harness MMIO page.
+pub const MAGIC_PROBE_BASE: Addr = 0xF0000;
+pub const MAGIC_PROBE_SIZE: usize = 256;
