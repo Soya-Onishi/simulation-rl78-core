@@ -1,15 +1,20 @@
-//! Host-side tlib callbacks (phase C scaffolding).
+//! Host-side tlib callbacks.
 //!
 //! C shims in `host_callbacks.c` (whole-archived) override the weak stubs inside
 //! `libtlib.a` and forward here. Direct-mapped guest regions use
-//! [`map_host_region`]. IO-page accesses go through [`IoHandler`] (phase D will
-//! route these into [`sim_kernel::MemoryBus`]).
+//! [`map_host_region`]. IO-page accesses go straight to a bound
+//! [`sim_kernel::MemoryBus`] (width packing lives in this module).
 
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
+use sim_kernel::{Addr, BusError, MemoryBus, StopReason};
+
 use crate::ffi;
+
+/// RL78 tlib page size (`TARGET_PAGE_BITS = 8`).
+pub const TLIB_PAGE_SIZE: u64 = 256;
 
 /// One contiguous guest physical window backed by a host buffer.
 #[derive(Clone, Copy, Debug)]
@@ -24,22 +29,45 @@ pub struct HostRegion {
 unsafe impl Send for HostRegion {}
 unsafe impl Sync for HostRegion {}
 
-/// IO-page load/store hook. Return `Err(())` to request `tlib_set_return_request`.
-pub trait IoHandler: Send {
-    fn read(&mut self, addr: u64, width: u8) -> Result<u64, ()>;
-    fn write(&mut self, addr: u64, value: u64, width: u8) -> Result<(), ()>;
+fn latch_bus_error(_addr: Addr, write: bool, err: &BusError) {
+    match err {
+        BusError::Unmapped { addr, .. } => {
+            request_callback_stop(StopReason::Unmapped { addr: *addr, write });
+        }
+        BusError::ReadOnly { addr } => {
+            // Treat ROM/MMIO reject as an unmapped-style guest fault for M1.
+            request_callback_stop(StopReason::Unmapped {
+                addr: *addr,
+                write: true,
+            });
+        }
+        BusError::OutOfRange { addr, .. } => {
+            request_callback_stop(StopReason::Unmapped { addr: *addr, write });
+        }
+        BusError::NotLoadable { addr } => {
+            request_callback_stop(StopReason::Unmapped {
+                addr: *addr,
+                write: true,
+            });
+        }
+    }
 }
 
 struct CallbackState {
     regions: Vec<HostRegion>,
-    io: Option<Box<dyn IoHandler>>,
+    /// Bound by [`set_io_bus`] from [`crate::Cpu::bind_memory`].
+    /// `Machine` boxes the bus before bind and does not move it afterward.
+    io_bus: Option<*mut MemoryBus>,
 }
+
+// Safety: `io_bus` is only used on the sim thread while the `Machine` lives.
+unsafe impl Send for CallbackState {}
 
 impl CallbackState {
     fn new() -> Self {
         Self {
             regions: Vec::new(),
-            io: None,
+            io_bus: None,
         }
     }
 
@@ -57,6 +85,26 @@ impl CallbackState {
 fn state() -> &'static Mutex<CallbackState> {
     static STATE: OnceLock<Mutex<CallbackState>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(CallbackState::new()))
+}
+
+/// Separate from [`state`] so IO helpers can latch a stop without re-locking
+/// the region/bus mutex.
+fn stop_latch() -> &'static Mutex<Option<StopReason>> {
+    static STOP: OnceLock<Mutex<Option<StopReason>>> = OnceLock::new();
+    STOP.get_or_init(|| Mutex::new(None))
+}
+
+/// Record a stop from an IO callback (merged into [`sim_kernel::PendingStop`] after execute).
+pub fn request_callback_stop(reason: StopReason) {
+    let mut guard = stop_latch().lock().expect("callback stop latch");
+    if guard.is_none() {
+        *guard = Some(reason);
+    }
+}
+
+/// Take a stop latched by an IO callback, if any.
+pub fn take_callback_stop() -> Option<StopReason> {
+    stop_latch().lock().expect("callback stop latch").take()
 }
 
 /// Register a host-backed guest window for TCG direct access.
@@ -82,52 +130,102 @@ pub unsafe fn map_host_region(guest_base: u64, size: u64, host: *mut u8) {
 }
 
 /// Remove a previously registered host-backed guest window.
-#[allow(dead_code)] // phase D unmap; used in unit tests
 pub fn remove_host_region(guest_base: u64, size: u64) {
     let mut guard = state().lock().expect("tlib callback state");
-    guard.regions.retain(|r| r.guest_base != guest_base || r.size != size);
+    guard
+        .regions
+        .retain(|r| r.guest_base != guest_base || r.size != size);
 }
 
 /// Drop all host region registrations (does not call `tlib_unmap_range`).
-///
-/// Prefer [`remove_host_region`] in tests. After clearing everything, the next
-/// [`crate::cpu::Rl78Cpu::new`] re-registers the default NOP window host pointer.
 pub fn clear_host_regions() {
     state().lock().expect("tlib callback state").regions.clear();
 }
 
-/// Install / replace the IO-page handler. Pass `None` to clear.
-pub fn set_io_handler(handler: Option<Box<dyn IoHandler>>) {
-    state().lock().expect("tlib callback state").io = handler;
+/// Bind the [`MemoryBus`] used for IO-page callbacks.
+///
+/// # Safety
+/// `bus` must remain valid and uniquely used until [`clear_io_bus`] (`Machine`
+/// boxes the bus before [`crate::Cpu::bind_memory`]).
+pub unsafe fn set_io_bus(bus: *mut MemoryBus) {
+    state().lock().expect("tlib callback state").io_bus = Some(bus);
 }
 
-fn io_read(addr: u64, width: u8) -> Result<u64, ()> {
-    let mut guard = state().lock().expect("tlib callback state");
-    match guard.io.as_mut() {
-        Some(io) => io.read(addr, width),
-        None => {
-            // Mapped RAM should be served by guest_offset; IO without a handler
-            // returns 0 (matches tlib reset-vector behavior before mapping).
-            let _ = (addr, width);
-            Ok(0)
-        }
+/// Clear the IO-page bus pointer.
+pub fn clear_io_bus() {
+    state().lock().expect("tlib callback state").io_bus = None;
+}
+
+fn width_len(width: u8) -> Result<usize, ()> {
+    match width {
+        1 | 2 | 4 | 8 => Ok(usize::from(width)),
+        _ => Err(()),
     }
 }
 
-fn io_write(addr: u64, value: u64, width: u8) -> Result<(), ()> {
-    let mut guard = state().lock().expect("tlib callback state");
-    match guard.io.as_mut() {
-        Some(io) => io.write(addr, value, width),
-        None => {
-            eprintln!("rl78-core: unhandled IO write addr={addr:#x} value={value:#x} width={width}");
+fn width_mask(width: u8) -> u64 {
+    match width {
+        1 => 0xff,
+        2 => 0xffff,
+        4 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
+fn io_bus_ptr() -> Option<*mut MemoryBus> {
+    state().lock().expect("tlib callback state").io_bus
+}
+
+#[allow(clippy::result_unit_err)]
+fn io_read(addr: u64, width: u8) -> Result<u64, ()> {
+    let Some(bus) = io_bus_ptr() else {
+        // Mapped RAM should be served by guest_offset; IO before bind returns 0.
+        return Ok(0);
+    };
+    let bus = unsafe { &mut *bus };
+    let mut buf = [0u8; 8];
+    let len = width_len(width)?;
+    match bus.read(addr, &mut buf[..len]) {
+        Ok(()) => Ok(u64::from_le_bytes(buf) & width_mask(width)),
+        Err(err) => {
+            latch_bus_error(addr, false, &err);
             Err(())
         }
     }
 }
 
+#[allow(clippy::result_unit_err)]
+fn io_write(addr: u64, value: u64, width: u8) -> Result<(), ()> {
+    let Some(bus) = io_bus_ptr() else {
+        eprintln!("rl78-core: unhandled IO write addr={addr:#x} value={value:#x} width={width}");
+        return Err(());
+    };
+    let bus = unsafe { &mut *bus };
+    let len = width_len(width)?;
+    let bytes = value.to_le_bytes();
+    match bus.write(addr, &bytes[..len]) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            latch_bus_error(addr, true, &err);
+            Err(())
+        }
+    }
+}
+
+/// Test helper: IO-page write without calling `tlib_set_return_request`.
+#[cfg(test)]
+#[allow(clippy::result_unit_err)]
+pub(crate) fn rl78_host_write_byte_for_test(address: u64, value: u8) -> Result<(), ()> {
+    io_write(address, u64::from(value), 1)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rl78_host_guest_offset_to_host_ptr(offset: u64) -> *mut std::os::raw::c_void {
-    match state().lock().expect("tlib callback state").find_host(offset) {
+    match state()
+        .lock()
+        .expect("tlib callback state")
+        .find_host(offset)
+    {
         Some(p) => p.cast(),
         None => ptr::null_mut(),
     }

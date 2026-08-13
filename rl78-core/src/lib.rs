@@ -1,8 +1,8 @@
 //! RL78 core assembly: CPU wrapper, minimal map, Magic probe, ELF hook.
 //!
 //! tlib (`rl78` branch) is built from the `tlib/` submodule via `build.rs` and
-//! linked statically. [`Rl78Cpu`] owns the tlib session; memory callbacks are
-//! scaffolded in [`callbacks`] (bus wiring is phase D).
+//! linked statically. [`Rl78Cpu`] owns the tlib session; [`Cpu::bind_memory`]
+//! wires ROM/RAM/MMIO into the bus.
 
 mod callbacks;
 mod cpu;
@@ -11,9 +11,12 @@ mod ffi;
 mod magic;
 mod map;
 
-pub use callbacks::{HostRegion, IoHandler, clear_host_regions, map_host_region, set_io_handler};
+pub use callbacks::{
+    HostRegion, TLIB_PAGE_SIZE, clear_host_regions, clear_io_bus, map_host_region,
+    remove_host_region, set_io_bus, take_callback_stop,
+};
 pub use cpu::Rl78Cpu;
-pub use elf::{ElfLoad, LoadError, load_elf};
+pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
@@ -71,6 +74,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -96,6 +100,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[test]
     fn magic_probe_is_a_normal_mapped_device() {
         let sink = BufferSink::default();
@@ -105,6 +110,7 @@ mod tests {
         assert_eq!(captured.lock().expect("probe lock").as_slice(), b"hello");
     }
 
+    #[serial]
     #[test]
     fn unmapped_access_is_logged() {
         let mut machine = minimal_machine(MinimalMachineConfig::default());
@@ -113,11 +119,13 @@ mod tests {
         assert_eq!(machine.bus_mut().take_unmapped_log().len(), 1);
     }
 
+    #[serial]
     #[test]
     fn device_layout_is_selectable() {
         let layout = Rl78Device::Generic64k.memory_layout();
         assert_eq!(layout.rom_size, 64 * 1024);
         assert_eq!(layout.ram_size, 32 * 1024);
+        assert_eq!(layout.ram_base, 0xF0100);
         let custom = MemoryLayout {
             rom_base: 0,
             rom_size: 8 * 1024,
@@ -130,14 +138,5 @@ mod tests {
         };
         assert_eq!(cfg.layout().ram_size, 4 * 1024);
         let _ = minimal_machine(cfg);
-    }
-
-    #[test]
-    fn load_elf_is_stubbed() {
-        let mut machine = minimal_machine(MinimalMachineConfig::default());
-        assert!(matches!(
-            load_elf(b"\0ELF", machine.bus_mut()),
-            Err(LoadError::NotImplemented)
-        ));
     }
 }

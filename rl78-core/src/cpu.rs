@@ -7,42 +7,25 @@
 //! [`Cpu::run_quantum`] via [`Rl78Cpu::finish_tlib_quantum`] right after
 //! `tlib_execute`.
 //!
-//! Memory callbacks live in [`crate::callbacks`]. Phase D will route IO pages
-//! into [`MemoryBus`]; until then a small host-backed NOP window keeps
-//! `run_quantum` safe for the CLI lifecycle tests.
+//! Memory callbacks live in [`crate::callbacks`]. [`Cpu::bind_memory`] maps
+//! `Rom`/`Ram` host buffers into tlib and routes MMIO pages through the bound
+//! [`MemoryBus`] (via [`callbacks::set_io_bus`]).
 
 use std::ffi::CString;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Mutex, Once};
 
 use sim_kernel::{
     Addr, Breakpoint, BreakpointId, Cpu, MemoryBus, PendingStop, Quantum, RegId, SimError,
     resolve_after_tlib_execute,
 };
 
-use crate::callbacks::{self, set_io_handler};
+use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
 use crate::ffi::{self, Rl78Reg};
-
-/// Default fetch window (all `0x00` = RL78 NOP).
-///
-/// TODO(phase D): replace this stand-in with pointers into `MemoryBus`
-/// `MappedRegion` devices (`Rom` / `Ram` `Vec<u8>`). `bind_memory` will walk
-/// the bus, register each RAM/ROM window via `map_host_region` + `tlib_map_range`,
-/// and mark MMIO pages (`MagicProbe`, unmapped SFR, …) with `tlib_set_page_io_accessed`
-/// plus an `IoHandler` that forwards to `MemoryBus::read` / `write`. Until then
-/// this buffer is **not** the machine map — only a fetchable window at guest
-/// address 0 so `tlib_execute` / reset-vector reads do not abort.
-const DEFAULT_CODE_WINDOW: usize = 4096;
 
 static SEAT: Mutex<bool> = Mutex::new(false);
 static TLIB_INIT: Once = Once::new();
-struct CodeWindow(*mut u8);
-// Safety: access is gated by `TlibSeat` (single owner).
-unsafe impl Send for CodeWindow {}
-unsafe impl Sync for CodeWindow {}
-
-static CODE_WINDOW: OnceLock<CodeWindow> = OnceLock::new();
-static CODE_MAPPED: AtomicBool = AtomicBool::new(false);
 
 /// Unit-test only: after a CPU that never ran `tlib_execute` is dropped, the
 /// next `Rl78Cpu::new` should call `tlib_reset` so leftover PC/regs do not leak
@@ -92,32 +75,6 @@ fn ensure_tlib_initialized() {
     });
 }
 
-fn code_window_ptr() -> *mut u8 {
-    CODE_WINDOW
-        .get_or_init(|| {
-            let boxed = vec![0u8; DEFAULT_CODE_WINDOW].into_boxed_slice();
-            CodeWindow(Box::into_raw(boxed) as *mut u8)
-        })
-        .0
-}
-
-fn ensure_default_memory_mapped() {
-    // TODO(phase D): delete this helper. `bind_memory` will map `Rom`/`Ram`
-    // backing stores from `MemoryBus` instead of this process-wide NOP window.
-    //
-    // Does not call `tlib_reset` — reset runs on each CPU instance in
-    // [`Rl78Cpu::new`] (not on first map only; see Bugbot "CPU recreate skips
-    // tlib reset").
-    let ptr = code_window_ptr();
-    unsafe {
-        callbacks::map_host_region(0, DEFAULT_CODE_WINDOW as u64, ptr);
-        if !CODE_MAPPED.swap(true, Ordering::AcqRel) {
-            std::ptr::write_bytes(ptr, 0, DEFAULT_CODE_WINDOW);
-            ffi::tlib_map_range(0, DEFAULT_CODE_WINDOW as u64);
-        }
-    }
-}
-
 /// RL78 CPU backed by tlib. At most one live instance may exist (tlib singleton).
 pub struct Rl78Cpu {
     /// Held for the CPU lifetime. A second live `Rl78Cpu` panics in `TlibSeat::acquire`.
@@ -127,6 +84,12 @@ pub struct Rl78Cpu {
     /// Kernel breakpoint table (id + addr). tlib only stores addresses, not
     /// [`BreakpointId`], so `EXCP_DEBUG` is mapped back to an id via PC lookup.
     breakpoints: Vec<Breakpoint>,
+    /// True after [`Cpu::bind_memory`] has mapped the attached [`MemoryBus`].
+    memory_bound: bool,
+    /// Guest ranges passed to `tlib_map_range` while bound (unmapped on Drop).
+    mapped_ranges: Vec<(u64, u64)>,
+    /// Pages marked IO via `tlib_set_page_io_accessed` (cleared on Drop).
+    io_pages: Vec<u64>,
     /// Unit-test only: true after this instance ran `tlib_execute`. See
     /// [`UNIT_TEST_RESET_TLIB_ON_NEXT_NEW`].
     #[cfg(test)]
@@ -143,8 +106,8 @@ impl Rl78Cpu {
     pub fn new() -> Self {
         let seat = TlibSeat::acquire();
         ensure_tlib_initialized();
-        set_io_handler(None);
-        ensure_default_memory_mapped();
+        clear_io_bus();
+        let _ = take_callback_stop();
         // TODO: if construction paths beyond `new` are added (e.g. `from_elf`,
         // reinit), consolidate `tlib_reset` and related CPU-state init into
         // `init_tlib_cpu_state()` and call it from every entry point instead of
@@ -162,6 +125,9 @@ impl Rl78Cpu {
             _seat: seat,
             pending: PendingStop::new(),
             breakpoints: Vec::new(),
+            memory_bound: false,
+            mapped_ranges: Vec::new(),
+            io_pages: Vec::new(),
             #[cfg(test)]
             unit_test_guest_executed: false,
         }
@@ -175,17 +141,6 @@ impl Rl78Cpu {
     /// Map a guest physical range into tlib and register the host pointer for
     /// TCG direct access.
     ///
-    /// TODO(phase D): `Cpu::bind_memory` becomes the only production caller.
-    /// Planned flow:
-    /// 1. `Machine::new` builds an immutable `MemoryBus` (`Rom` / `Ram` /
-    ///    `MagicProbe` as `MappedRegion`s) and calls `bind_memory`.
-    /// 2. `bind_memory` walks those regions (downcast or a bus helper that
-    ///    exposes RAM/ROM backing `*mut u8` + guest base/size).
-    /// 3. RAM/ROM → this method (`map_host_region` + `tlib_map_range`) so TCG
-    ///    uses the **same** `Vec<u8>` as `MemoryBus`.
-    /// 4. MMIO (`MagicProbe`, unmapped SFR, …) → [`Self::set_io_page`] +
-    ///    `IoHandler` forwarding to `MemoryBus::read` / `write`.
-    ///
     /// # Safety
     /// `host` must remain valid for as long as the range stays mapped (the
     /// `Rom`/`Ram` allocation on the bus).
@@ -194,6 +149,46 @@ impl Rl78Cpu {
             callbacks::map_host_region(guest_base, length, host);
             ffi::tlib_map_range(guest_base, length);
         }
+        self.mapped_ranges.push((guest_base, length));
+    }
+
+    /// Mark every tlib page covering `[guest_base, guest_base + length)` as IO.
+    pub fn set_io_pages(&mut self, guest_base: u64, length: u64) {
+        if length == 0 {
+            return;
+        }
+        let end = guest_base.saturating_add(length);
+        let mut page = guest_base & !(TLIB_PAGE_SIZE - 1);
+        while page < end {
+            unsafe { ffi::tlib_set_page_io_accessed(page) };
+            self.io_pages.push(page);
+            page = page.saturating_add(TLIB_PAGE_SIZE);
+            if page == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Tear down host/tlib mappings installed by [`Cpu::bind_memory`].
+    ///
+    /// Called from [`Drop`] so sequential unit-test Machines do not leave
+    /// dangling host pointers or stale `tlib_map_range` windows after the bus
+    /// is freed (CPU is dropped before the boxed bus).
+    fn unbind_memory(&mut self) {
+        clear_io_bus();
+        let _ = take_callback_stop();
+        for page in self.io_pages.drain(..) {
+            unsafe { ffi::tlib_clear_page_io_accessed(page) };
+        }
+        for (base, size) in self.mapped_ranges.drain(..) {
+            if size == 0 {
+                continue;
+            }
+            let end = base.saturating_add(size).saturating_sub(1);
+            unsafe { ffi::tlib_unmap_range(base, end) };
+        }
+        callbacks::clear_host_regions();
+        self.memory_bound = false;
     }
 
     /// Mark a page as IO-accessed so loads/stores call the host IO callbacks.
@@ -278,14 +273,53 @@ impl Drop for Rl78Cpu {
         if !self.unit_test_guest_executed {
             UNIT_TEST_RESET_TLIB_ON_NEXT_NEW.store(true, Ordering::Release);
         }
-        set_io_handler(None);
+        if self.memory_bound {
+            self.unbind_memory();
+        } else {
+            clear_io_bus();
+            let _ = take_callback_stop();
+        }
     }
 }
 
 impl Cpu for Rl78Cpu {
-    fn bind_memory(&mut self, _bus: &mut MemoryBus) {
-        // TODO(phase D): walk `bus` MappedRegions — RAM/ROM → `map_memory` with
-        // the device `Vec<u8>` pointer; MMIO → `set_io_page` + IoHandler → bus.
+    fn bind_memory(&mut self, bus: &mut MemoryBus) {
+        assert!(
+            !self.memory_bound,
+            "Rl78Cpu::bind_memory: memory already bound"
+        );
+        callbacks::clear_host_regions();
+        let _ = take_callback_stop();
+
+        let mut host_regions = Vec::new();
+        let mut io_regions = Vec::new();
+        bus.for_each_region(|base, size, host| {
+            if let Some(ptr) = host {
+                host_regions.push((base, size, ptr));
+            } else {
+                io_regions.push((base, size));
+            }
+        });
+
+        for (base, size, ptr) in host_regions {
+            unsafe {
+                callbacks::map_host_region(base, size, ptr);
+                ffi::tlib_map_range(base, size);
+            }
+            self.mapped_ranges.push((base, size));
+        }
+
+        for (base, size) in io_regions {
+            // Leave MMIO physically unassigned so ABS16 stores (`rl78_write_byte` →
+            // `stb_phys`) take the IO_MEM_UNASSIGNED path into host write
+            // callbacks. Mapping as RAM would require a host pointer and would
+            // bypass MagicProbe.
+            self.set_io_pages(base, size);
+        }
+
+        // Safety: `Machine` boxes the bus before bind and keeps it pinned.
+        unsafe { set_io_bus(bus as *mut MemoryBus) };
+        self.memory_bound = true;
     }
 
     fn run_quantum(&mut self, max_instructions: u32) -> Quantum {
@@ -294,6 +328,9 @@ impl Cpu for Rl78Cpu {
         #[cfg(test)]
         if instructions > 0 {
             self.unit_test_guest_executed = true;
+        }
+        if let Some(reason) = take_callback_stop() {
+            self.pending.request(reason);
         }
         let pc = self.pc();
         self.finish_tlib_quantum(instructions, exit, self.breakpoint_id_at_pc(pc))
@@ -353,8 +390,10 @@ impl Cpu for Rl78Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use sim_kernel::{StopReason, TlibExit};
 
+    #[serial]
     #[test]
     fn finish_tlib_quantum_maps_excp_debug() {
         let mut cpu = Rl78Cpu::new();
@@ -368,6 +407,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn finish_tlib_quantum_prefers_pending_stop() {
         let mut cpu = Rl78Cpu::new();
@@ -385,6 +425,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn tlib_init_reports_rl78_arch() {
         let _cpu = Rl78Cpu::new();
@@ -392,6 +433,7 @@ mod tests {
         assert_eq!(arch.to_string_lossy(), "rl78");
     }
 
+    #[serial]
     #[test]
     fn sync_breakpoints_removes_stale_tlib_entries() {
         let mut cpu = Rl78Cpu::new();
@@ -419,6 +461,7 @@ mod tests {
         assert_eq!(list_tlib_breakpoints(), vec![0x200]);
     }
 
+    #[serial]
     #[test]
     fn breakpoint_id_at_pc_matches_kernel_table() {
         let mut cpu = Rl78Cpu::new();
@@ -432,6 +475,7 @@ mod tests {
         assert_eq!(cpu.breakpoint_id_at_pc(0x43), None);
     }
 
+    #[serial]
     #[test]
     fn second_live_cpu_panics() {
         let _cpu = Rl78Cpu::new();
@@ -441,6 +485,7 @@ mod tests {
         assert!(panicked.is_err());
     }
 
+    #[serial]
     #[test]
     fn new_resets_cpu_state_between_instances() {
         let mut cpu = Rl78Cpu::new();
@@ -454,13 +499,107 @@ mod tests {
 #[cfg(test)]
 mod map_probe {
     use super::*;
+    use crate::{MAGIC_PROBE_BASE, MinimalMachineConfig, ProbeSink, minimal_machine_with_probe};
+    use serial_test::serial;
+    use sim_kernel::{Cpu, MemoryMapBuilder, Ram, Rom, StopReason, UnmappedPolicy};
+    use std::sync::{Arc, Mutex};
+
+    #[serial]
     #[test]
-    fn map_range_is_visible() {
+    fn bind_memory_maps_rom_host_region() {
+        let mut bus = MemoryMapBuilder::new()
+            .map(0, Box::new(Rom::from_bytes(vec![0u8; 4096])))
+            .unwrap()
+            .map(0xF0100, Box::new(Ram::new(1024)))
+            .unwrap()
+            .build();
         let mut cpu = Rl78Cpu::new();
+        cpu.bind_memory(&mut bus);
+        assert!(cpu.memory_bound);
         let mapped = unsafe { ffi::tlib_is_range_mapped(0, 1) };
-        assert_ne!(mapped, 0, "expected range 0 mapped after Rl78Cpu::new");
+        assert_ne!(mapped, 0);
         let p = crate::callbacks::rl78_host_guest_offset_to_host_ptr(0);
-        assert!(!p.is_null(), "host ptr for 0");
-        let _ = &mut cpu;
+        assert!(!p.is_null());
+        // Do not call `run_quantum` here: after a guest execute, later tests in
+        // this process that touch tlib can SIGSEGV (stale TCG). Guest execute
+        // coverage lives in `guest_magic_probe_smoke`.
+    }
+
+    #[derive(Clone, Default)]
+    struct BufferSink {
+        buf: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl ProbeSink for BufferSink {
+        fn emit(&mut self, bytes: &[u8]) {
+            self.buf
+                .lock()
+                .expect("probe buffer")
+                .extend_from_slice(bytes);
+        }
+    }
+
+    #[serial]
+    #[test]
+    fn bind_memory_routes_magic_probe_via_io() {
+        let sink = BufferSink::default();
+        let captured = Arc::clone(&sink.buf);
+        let mut machine = minimal_machine_with_probe(MinimalMachineConfig::default(), sink);
+        machine
+            .bus_mut()
+            .write(MAGIC_PROBE_BASE, b"via-bus")
+            .unwrap();
+        assert_eq!(&captured.lock().unwrap()[..], b"via-bus");
+        captured.lock().unwrap().clear();
+
+        // IO path installed by bind_memory → set_io_bus (no tlib_set_return_request).
+        assert!(crate::callbacks::rl78_host_write_byte_for_test(MAGIC_PROBE_BASE, b'h').is_ok());
+        assert!(
+            crate::callbacks::rl78_host_write_byte_for_test(MAGIC_PROBE_BASE + 1, b'i').is_ok()
+        );
+        assert_eq!(&captured.lock().unwrap()[..], b"hi");
+    }
+
+    #[serial]
+    #[test]
+    fn unmapped_io_latches_stop() {
+        let mut machine = minimal_machine_with_probe(
+            MinimalMachineConfig {
+                unmapped: UnmappedPolicy::Trap,
+                ..MinimalMachineConfig::default()
+            },
+            BufferSink::default(),
+        );
+        assert!(crate::callbacks::rl78_host_write_byte_for_test(0x80000, 0xAA).is_err());
+        let reason = take_callback_stop();
+        assert_eq!(
+            reason,
+            Some(StopReason::Unmapped {
+                addr: 0x80000,
+                write: true
+            })
+        );
+        assert!(machine.bus_mut().take_trap().is_some());
+    }
+
+    #[serial]
+    #[test]
+    fn drop_clears_bound_host_mappings() {
+        let mut bus = MemoryMapBuilder::new()
+            .map(0, Box::new(Rom::from_bytes(vec![0u8; 4096])))
+            .unwrap()
+            .map(0xF0100, Box::new(Ram::new(1024)))
+            .unwrap()
+            .build();
+        let mut cpu = Rl78Cpu::new();
+        cpu.bind_memory(&mut bus);
+        assert!(!crate::callbacks::rl78_host_guest_offset_to_host_ptr(0).is_null());
+        drop(cpu);
+        assert!(
+            crate::callbacks::rl78_host_guest_offset_to_host_ptr(0).is_null(),
+            "host regions must be cleared on Drop before the bus is freed"
+        );
+        let mapped = unsafe { ffi::tlib_is_range_mapped(0, 1) };
+        assert_eq!(mapped, 0, "tlib map for ROM must be unmapped on Drop");
     }
 }

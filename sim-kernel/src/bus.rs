@@ -8,9 +8,22 @@ pub type Addr = u64;
 /// Error raised by the bus or a mapped device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BusError {
-    Unmapped { addr: Addr, len: usize },
-    OutOfRange { addr: Addr, offset: u64, len: usize },
-    ReadOnly { addr: Addr },
+    Unmapped {
+        addr: Addr,
+        len: usize,
+    },
+    OutOfRange {
+        addr: Addr,
+        offset: u64,
+        len: usize,
+    },
+    ReadOnly {
+        addr: Addr,
+    },
+    /// [`MemoryMapped::load`] on a device that is not image-loadable (not ROM).
+    NotLoadable {
+        addr: Addr,
+    },
 }
 
 /// Failure to register a device on the bus.
@@ -33,6 +46,9 @@ impl fmt::Display for BusError {
                 )
             }
             Self::ReadOnly { addr } => write!(f, "write to read-only addr={addr:#x}"),
+            Self::NotLoadable { addr } => {
+                write!(f, "image load not supported at addr={addr:#x}")
+            }
         }
     }
 }
@@ -49,6 +65,17 @@ pub trait MemoryMapped: Send {
 
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), BusError>;
     fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError>;
+
+    /// Host pointer for TCG direct mapping. `None` means MMIO (IO callbacks).
+    ///
+    /// The pointer must stay valid for the lifetime of the mapping (the device
+    /// `Vec<u8>` owned by the bus). Architecture CPUs call this from
+    /// [`crate::Cpu::bind_memory`].
+    fn host_ptr(&mut self) -> Option<*mut u8>;
+
+    /// Image / flash load path. Only ROM-like devices accept this; others return
+    /// [`BusError::NotLoadable`].
+    fn load(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError>;
 }
 
 /// How the bus treats accesses that hit no region.
@@ -127,6 +154,23 @@ impl MemoryBus {
             .map_err(|err| rewrite_bus_error(err, addr))
     }
 
+    /// Load an image through [`MemoryMapped::load`] (ROM / flash programming).
+    pub fn load(&mut self, addr: Addr, buf: &[u8]) -> Result<(), BusError> {
+        let len = buf.len();
+        let Some(index) = self.find_region(addr) else {
+            return self.unmapped(addr, len, true);
+        };
+        let region = &mut self.regions[index];
+        let offset = addr - region.base;
+        if offset.saturating_add(len as u64) > region.size {
+            return Err(BusError::OutOfRange { addr, offset, len });
+        }
+        region
+            .device
+            .load(offset, buf)
+            .map_err(|err| rewrite_bus_error(err, addr))
+    }
+
     #[must_use]
     pub fn take_unmapped_log(&mut self) -> Vec<UnmappedAccess> {
         std::mem::take(&mut self.unmapped_log)
@@ -135,6 +179,14 @@ impl MemoryBus {
     #[must_use]
     pub fn take_trap(&mut self) -> Option<UnmappedAccess> {
         self.trap.take()
+    }
+
+    /// Walk mapped regions for CPU bind (`host_ptr` is `Some` for RAM/ROM).
+    pub fn for_each_region(&mut self, mut f: impl FnMut(Addr, u64, Option<*mut u8>)) {
+        for region in &mut self.regions {
+            let host = region.device.host_ptr();
+            f(region.base, region.size, host);
+        }
     }
 
     fn find_region(&self, addr: Addr) -> Option<usize> {
@@ -161,6 +213,7 @@ fn overlaps(a_base: Addr, a_size: u64, b_base: Addr, b_size: u64) -> bool {
 fn rewrite_bus_error(err: BusError, addr: Addr) -> BusError {
     match err {
         BusError::ReadOnly { .. } => BusError::ReadOnly { addr },
+        BusError::NotLoadable { .. } => BusError::NotLoadable { addr },
         BusError::OutOfRange { offset, len, .. } => BusError::OutOfRange { addr, offset, len },
         BusError::Unmapped { len, .. } => BusError::Unmapped { addr, len },
     }
@@ -252,6 +305,14 @@ impl MemoryMapped for Ram {
     fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError> {
         copy_into(&mut self.data, offset, buf)
     }
+
+    fn host_ptr(&mut self) -> Option<*mut u8> {
+        Some(self.data.as_mut_ptr())
+    }
+
+    fn load(&mut self, offset: u64, _buf: &[u8]) -> Result<(), BusError> {
+        Err(BusError::NotLoadable { addr: offset })
+    }
 }
 
 /// Read-only memory region.
@@ -286,6 +347,16 @@ impl MemoryMapped for Rom {
         // `addr` is the device-local offset; [`MemoryBus`] rewrites it to the
         // guest address before returning to callers.
         Err(BusError::ReadOnly { addr: offset })
+    }
+
+    fn host_ptr(&mut self) -> Option<*mut u8> {
+        // TCG fetches from the same buffer; guest stores via the bus API still
+        // hit [`BusError::ReadOnly`]. Direct TCG stores are out of M1 scope.
+        Some(self.data.as_mut_ptr())
+    }
+
+    fn load(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError> {
+        copy_into(&mut self.data, offset, buf)
     }
 }
 
@@ -400,6 +471,30 @@ mod tests {
         assert!(matches!(
             builder.map(0x110, Box::new(Ram::new(16))),
             Err(MapError::Overlap { .. })
+        ));
+    }
+
+    #[test]
+    fn rom_load_accepts_image_bytes() {
+        let mut bus = MemoryMapBuilder::new()
+            .map(0x1000, Box::new(Rom::new(16)))
+            .unwrap()
+            .build();
+        bus.load(0x1000, &[1, 2, 3, 4]).unwrap();
+        let mut buf = [0u8; 4];
+        bus.read(0x1000, &mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn ram_rejects_image_load() {
+        let mut bus = MemoryMapBuilder::new()
+            .map(0x1000, Box::new(Ram::new(16)))
+            .unwrap()
+            .build();
+        assert!(matches!(
+            bus.load(0x1000, &[1, 2, 3, 4]),
+            Err(BusError::NotLoadable { addr: 0x1000 })
         ));
     }
 }
