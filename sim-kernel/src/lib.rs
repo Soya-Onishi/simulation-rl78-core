@@ -12,6 +12,7 @@ mod command;
 mod cpu;
 mod event;
 mod machine;
+mod reset;
 mod sim;
 mod stop;
 
@@ -30,6 +31,7 @@ pub use cpu::{
 };
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use machine::Machine;
+pub use reset::Resettable;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
 pub use stop::StopReason;
 

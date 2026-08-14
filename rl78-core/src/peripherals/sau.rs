@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{BusError, EventCtl, EventCtx, MemoryMapped, SimEvent, Tick};
+use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
 
 use crate::peripherals::clock::ClockOutputs;
 
@@ -28,6 +28,7 @@ pub struct SauUnit {
     tx_bytes: Vec<u8>,
     ctl: EventCtl,
     clock: ClockOutputs,
+    tx_id: [Option<EventId>; CHANNELS],
 }
 
 impl SauUnit {
@@ -35,8 +36,8 @@ impl SauUnit {
     pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
         Self {
             sdr: [0; CHANNELS],
-            smr: [0x0020; CHANNELS],
-            scr: [0x0004; CHANNELS],
+            smr: [0; CHANNELS],
+            scr: [0; CHANNELS],
             baud_div: [0; CHANNELS],
             ck_divisor: [0, 0],
             se: 0,
@@ -47,7 +48,15 @@ impl SauUnit {
             tx_bytes: Vec::new(),
             ctl,
             clock,
+            tx_id: [None; CHANNELS],
         }
+    }
+
+    fn cancel_tx(&mut self, channel: usize) {
+        if let Some(id) = self.tx_id[channel].take() {
+            self.ctl.cancel(id);
+        }
+        self.busy[channel] = false;
     }
 
     #[must_use]
@@ -84,15 +93,17 @@ impl SauUnit {
         let Some(period) = self.frame_time(channel) else {
             return;
         };
+        self.cancel_tx(channel);
         self.busy[channel] = true;
         let at = self.ctl.now().saturating_add(period);
-        self.ctl.schedule(
+        let id = self.ctl.schedule(
             at,
             Box::new(SauTxDone {
                 inner: Arc::clone(inner),
                 channel: channel as u8,
             }),
         );
+        self.tx_id[channel] = Some(id);
     }
 
     fn read_sdr(&self, channel: usize) -> u16 {
@@ -154,6 +165,24 @@ impl SauUnit {
     }
 }
 
+impl Resettable for SauUnit {
+    fn reset(&mut self) {
+        for ch in 0..CHANNELS {
+            self.cancel_tx(ch);
+        }
+        self.sdr = [0; CHANNELS];
+        self.smr = [0x0020; CHANNELS];
+        self.scr = [0x0004; CHANNELS];
+        self.baud_div = [0; CHANNELS];
+        self.ck_divisor = [0, 0];
+        self.se = 0;
+        self.so = 0;
+        self.soe = 0;
+        self.sol = 0;
+        self.tx_bytes.clear();
+    }
+}
+
 struct SauTxDone {
     inner: Arc<Mutex<SauUnit>>,
     channel: u8,
@@ -164,6 +193,7 @@ impl SimEvent for SauTxDone {
         let mut g = self.inner.lock().expect("sau");
         let ch = self.channel as usize;
         g.busy[ch] = false;
+        g.tx_id[ch] = None;
         let byte = (g.sdr[ch] & 0xFF) as u8;
         g.tx_bytes.push(byte);
     }

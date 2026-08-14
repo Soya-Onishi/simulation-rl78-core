@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{BusError, MemoryMapped, Tick};
+use sim_kernel::{BusError, MemoryMapped, Resettable, Tick};
 
 /// Frequency in hertz. `ZERO` means the oscillator is stopped.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -128,6 +128,7 @@ pub struct ClockGenerator {
     frqsel3: bool,
     cmc_dirty: bool,
     outputs: ClockOutputs,
+    option_byte: Option<u8>,
 }
 
 impl Default for ClockGenerator {
@@ -161,6 +162,7 @@ impl ClockGenerator {
             frqsel3: false,
             cmc_dirty: false,
             outputs: ClockOutputs::new(),
+            option_byte: None,
         }
     }
 
@@ -169,9 +171,18 @@ impl ClockGenerator {
         self.outputs.clone()
     }
 
-    /// Apply option byte `0x000C2` (`FRQSEL`). `None` uses FRQSEL3=1, HOCODIV=0.
+    pub fn set_option_byte(&mut self, option_byte: Option<u8>) {
+        self.option_byte = option_byte;
+    }
+
+    /// Apply option byte `0x000C2` (`FRQSEL`) and hold-reset the tree.
     pub fn reset(&mut self, option_byte: Option<u8>) {
-        let (hocodiv, frqsel3) = match option_byte {
+        self.option_byte = option_byte;
+        Resettable::reset(self);
+    }
+
+    fn apply_reset(&mut self) {
+        let (hocodiv, frqsel3) = match self.option_byte {
             Some(b) => (b & 0x07, (b & 0x08) != 0),
             None => (0, true),
         };
@@ -373,6 +384,12 @@ impl ClockGenerator {
             f_sxp,
             f_rtcck: f_sxp,
         });
+    }
+}
+
+impl Resettable for ClockGenerator {
+    fn reset(&mut self) {
+        self.apply_reset();
     }
 }
 

@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, SimEvent, Tick};
+use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
 
 use crate::peripherals::clock::ClockOutputs;
 
@@ -33,8 +33,8 @@ impl TauUnit {
     #[must_use]
     pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
         Self {
-            tdr: [0xFFFF; CHANNELS],
-            tcr: [0xFFFF; CHANNELS],
+            tdr: [0; CHANNELS],
+            tcr: [0; CHANNELS],
             tmr: [0; CHANNELS],
             tsr: [0; CHANNELS],
             tps: 0,
@@ -180,6 +180,26 @@ impl TauUnit {
             1 => self.tis1 = value,
             _ => {}
         }
+    }
+}
+
+impl Resettable for TauUnit {
+    fn reset(&mut self) {
+        for ch in 0..CHANNELS {
+            self.stop_channel(ch);
+        }
+        self.tdr = [0; CHANNELS];
+        self.tcr = [0xFFFF; CHANNELS];
+        self.tmr = [0; CHANNELS];
+        self.tsr = [0; CHANNELS];
+        self.tps = 0;
+        self.te = 0;
+        self.to = 0;
+        self.toe = 0;
+        self.tol = 0;
+        self.tom = 0;
+        self.tis0 = 0;
+        self.tis1 = 0;
     }
 }
 

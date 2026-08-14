@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{Addr, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom};
+use sim_kernel::{Addr, EventCtl, HasMemoryMap, MapError, MemoryMapBuilder, Ram, Resettable, Rom};
 
 use crate::map::MemoryLayout;
 use crate::peripherals::clock::{
@@ -40,9 +40,13 @@ impl Rl78G23Core {
         let tau = Arc::new(Mutex::new(TauUnit::new(ctl, outputs)));
         Self { clock, sau, tau }
     }
+}
 
-    pub fn reset(&self, option_byte: Option<u8>) {
-        self.clock.lock().expect("clock").reset(option_byte);
+impl Resettable for Rl78G23Core {
+    fn reset(&mut self) {
+        Resettable::reset(&mut *self.clock.lock().expect("clock"));
+        Resettable::reset(&mut *self.sau.lock().expect("sau"));
+        Resettable::reset(&mut *self.tau.lock().expect("tau"));
     }
 }
 
@@ -103,20 +107,20 @@ impl R7F100Gxl {
         }
     }
 
-    pub fn build(
-        cfg: &crate::G23MachineConfig,
-        ctl: EventCtl,
-    ) -> Result<(Self, MemoryBus), MapError> {
+    #[must_use]
+    pub fn new(ctl: EventCtl, option_byte: Option<u8>) -> Self {
         let core = Rl78G23Core::new(ctl);
-        core.reset(cfg.option_byte);
-        let layout = Self::memory_layout();
-        let bus = MemoryMapBuilder::new()
-            .policy(cfg.unmapped)
-            .merge(core.memory_map()?)?
-            .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
-            .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
-            .build();
-        Ok((Self { core }, bus))
+        core.clock
+            .lock()
+            .expect("clock")
+            .set_option_byte(option_byte);
+        Self { core }
+    }
+}
+
+impl Resettable for R7F100Gxl {
+    fn reset(&mut self) {
+        Resettable::reset(&mut self.core);
     }
 }
 

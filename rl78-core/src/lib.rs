@@ -26,7 +26,8 @@ pub use peripherals::{
 };
 
 use sim_kernel::{
-    EventCtl, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy,
+    EventCtl, HasMemoryMap, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable, Rom,
+    UnmappedPolicy,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
@@ -89,7 +90,13 @@ pub struct G23MachineConfig {
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset.
 pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
     let ctl = EventCtl::new();
-    let (_, bus) = R7F100Gxl::build(&cfg, ctl.clone()).expect("g23 memory map");
+    let mut part = R7F100Gxl::new(ctl.clone(), cfg.option_byte);
+    part.reset();
+    let bus = part
+        .memory_map()
+        .expect("g23 memory map")
+        .policy(cfg.unmapped)
+        .build();
     Machine::new(Rl78Cpu::new(), bus, ctl)
 }
 
@@ -99,7 +106,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::BusError;
+    use sim_kernel::{BusError, HasMemoryMap, Resettable};
+
+    fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
+        let mut part = R7F100Gxl::new(ctl, None);
+        part.reset();
+        let bus = part.memory_map().unwrap().build();
+        (part, bus)
+    }
 
     #[derive(Clone, Default)]
     struct BufferSink {
@@ -164,7 +178,7 @@ mod tests {
     #[test]
     fn g23_clock_and_timer_sfr_are_mapped() {
         let ctl = EventCtl::new();
-        let (_, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl).unwrap();
+        let (_, mut bus) = g23_part(ctl);
         let mut ckc = [0u8; 1];
         bus.read(0xFFFA4, &mut ckc).unwrap();
         assert_eq!(ckc[0], 0);
@@ -211,7 +225,7 @@ mod tests {
     #[test]
     fn tau_interval_sets_overflow_after_tdr_counts() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
+        let (part, mut bus) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -228,7 +242,7 @@ mod tests {
     #[test]
     fn tau_restart_after_tt_ignores_stale_deadline() {
         let ctl = EventCtl::new();
-        let (_, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
+        let (_, mut bus) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -251,7 +265,7 @@ mod tests {
     #[test]
     fn tau_arms_when_fclk_returns() {
         let ctl = EventCtl::new();
-        let (_, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
+        let (_, mut bus) = g23_part(ctl.clone());
         bus.write(0xFFFA1, &[0xC1]).unwrap();
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
@@ -268,7 +282,7 @@ mod tests {
     #[test]
     fn sau_uart_tx_emits_byte_after_frame_time() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
+        let (part, mut bus) = g23_part(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
