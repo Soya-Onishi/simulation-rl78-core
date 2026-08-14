@@ -1,13 +1,11 @@
 //! Assembled simulation target: CPU + bus + clock + events.
 
-use std::sync::MutexGuard;
-
 use crate::breakpoint::BreakpointStore;
 use crate::bus::{Addr, BusError, MemoryBus};
-use crate::clock::{Tick, VirtualClock};
+use crate::clock::VirtualClock;
 use crate::command::SimError;
 use crate::cpu::{Cpu, RegId};
-use crate::event::{EventCtl, EventQueue};
+use crate::event::EventQueue;
 
 /// Concrete machine owned exclusively by the simulation thread.
 ///
@@ -19,29 +17,22 @@ pub struct Machine<C: Cpu> {
     cpu: C,
     bus: Box<MemoryBus>,
     clock: VirtualClock,
-    ctl: EventCtl,
+    events: EventQueue,
     breakpoints: BreakpointStore,
 }
 
 impl<C: Cpu> Machine<C> {
-    /// `ctl` must be the same [`EventCtl`] clone given to peripherals (`Arc` queue).
     #[must_use]
-    pub fn new(mut cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
+    pub fn new(mut cpu: C, bus: MemoryBus) -> Self {
         let mut bus = Box::new(bus);
         cpu.bind_memory(bus.as_mut());
-        ctl.set_now(Tick::ZERO);
         Self {
             cpu,
             bus,
             clock: VirtualClock::new(),
-            ctl,
+            events: EventQueue::new(),
             breakpoints: BreakpointStore::new(),
         }
-    }
-
-    #[must_use]
-    pub fn event_ctl(&self) -> &EventCtl {
-        &self.ctl
     }
 
     #[must_use]
@@ -67,13 +58,12 @@ impl<C: Cpu> Machine<C> {
         &self.clock
     }
 
-    pub fn advance_clock(&mut self, delta: Tick) {
-        self.clock.advance(delta);
-        self.ctl.set_now(self.clock.now());
+    pub fn clock_mut(&mut self) -> &mut VirtualClock {
+        &mut self.clock
     }
 
-    pub fn events_mut(&mut self) -> MutexGuard<'_, EventQueue> {
-        self.ctl.events()
+    pub fn events_mut(&mut self) -> &mut EventQueue {
+        &mut self.events
     }
 
     pub fn breakpoints_mut(&mut self) -> &mut BreakpointStore {
@@ -101,7 +91,21 @@ impl<C: Cpu> Machine<C> {
         self.bus.write(addr, buf)
     }
 
-    pub(crate) fn parts_mut(&mut self) -> (&mut C, &mut MemoryBus, &mut BreakpointStore) {
-        (&mut self.cpu, &mut self.bus, &mut self.breakpoints)
+    pub(crate) fn parts_mut(
+        &mut self,
+    ) -> (
+        &mut C,
+        &mut MemoryBus,
+        &mut VirtualClock,
+        &mut EventQueue,
+        &mut BreakpointStore,
+    ) {
+        (
+            &mut self.cpu,
+            &mut self.bus,
+            &mut self.clock,
+            &mut self.events,
+            &mut self.breakpoints,
+        )
     }
 }
