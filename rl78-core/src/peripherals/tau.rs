@@ -7,8 +7,20 @@ use std::sync::{Arc, Mutex};
 use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
+use crate::peripherals::irq::{IrqId, IrqSink};
 
 pub const CHANNELS: usize = 8;
+
+const CHANNEL_IRQ: [IrqId; CHANNELS] = [
+    IrqId::INTTM00,
+    IrqId::INTTM01,
+    IrqId::INTTM02,
+    IrqId::INTTM03,
+    IrqId::INTTM04,
+    IrqId::INTTM05,
+    IrqId::INTTM06,
+    IrqId::INTTM07,
+];
 
 pub struct TauUnit {
     tdr: [u16; CHANNELS],
@@ -25,13 +37,14 @@ pub struct TauUnit {
     tis1: u8,
     ctl: EventCtl,
     clock: ClockOutputs,
+    irq: IrqSink,
     expire_id: [Option<EventId>; CHANNELS],
     generation: [u32; CHANNELS],
 }
 
 impl TauUnit {
     #[must_use]
-    pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
+    pub fn new(ctl: EventCtl, clock: ClockOutputs, irq: IrqSink) -> Self {
         Self {
             tdr: [0; CHANNELS],
             tcr: [0; CHANNELS],
@@ -47,6 +60,7 @@ impl TauUnit {
             tis1: 0,
             ctl,
             clock,
+            irq,
             expire_id: [None; CHANNELS],
             generation: [0; CHANNELS],
         }
@@ -220,6 +234,7 @@ impl SimEvent for TauExpire {
         }
         g.tsr[ch] |= 0x0001;
         g.tcr[ch] = g.tdr[ch];
+        g.irq.raise(CHANNEL_IRQ[ch]);
         let Some(period) = g.interval(ch) else {
             g.expire_id[ch] = None;
             return;
