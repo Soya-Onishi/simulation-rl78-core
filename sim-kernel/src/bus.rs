@@ -2,6 +2,9 @@
 
 use std::fmt;
 
+use crate::clock::Tick;
+use crate::event::ScheduledWork;
+
 /// Guest physical address. Architecture width is not encoded here.
 pub type Addr = u64;
 
@@ -76,6 +79,9 @@ pub trait MemoryMapped: Send {
     /// Image / flash load path. Only ROM-like devices accept this; others return
     /// [`BusError::NotLoadable`].
     fn load(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError>;
+
+    /// Drain virtual-time work armed by the last accesses (timers, UART bits).
+    fn collect_scheduled(&mut self, _now: Tick, _out: &mut Vec<ScheduledWork>) {}
 }
 
 /// How the bus treats accesses that hit no region.
@@ -109,6 +115,8 @@ pub struct MemoryBus {
     policy: UnmappedPolicy,
     unmapped_log: Vec<UnmappedAccess>,
     trap: Option<UnmappedAccess>,
+    now: Tick,
+    pending: Vec<ScheduledWork>,
 }
 
 impl MemoryBus {
@@ -151,7 +159,25 @@ impl MemoryBus {
         region
             .device
             .write(offset, buf)
-            .map_err(|err| rewrite_bus_error(err, addr))
+            .map_err(|err| rewrite_bus_error(err, addr))?;
+        let now = self.now;
+        let region = &mut self.regions[index];
+        region.device.collect_scheduled(now, &mut self.pending);
+        Ok(())
+    }
+
+    /// Virtual time used when devices arm [`ScheduledWork`] during MMIO.
+    pub fn set_now(&mut self, now: Tick) {
+        self.now = now;
+    }
+
+    /// Take work collected from devices (and any still sitting after MMIO).
+    pub fn harvest_scheduled(&mut self) -> Vec<ScheduledWork> {
+        let now = self.now;
+        for region in &mut self.regions {
+            region.device.collect_scheduled(now, &mut self.pending);
+        }
+        std::mem::take(&mut self.pending)
     }
 
     /// Load an image through [`MemoryMapped::load`] (ROM / flash programming).
@@ -265,6 +291,8 @@ impl MemoryMapBuilder {
             policy: self.policy,
             unmapped_log: Vec::new(),
             trap: None,
+            now: Tick::ZERO,
+            pending: Vec::new(),
         }
     }
 }

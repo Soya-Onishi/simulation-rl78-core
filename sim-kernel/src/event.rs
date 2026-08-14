@@ -36,6 +36,12 @@ pub trait SimEvent: Send {
     fn fire(&mut self, ctx: &mut EventCtx<'_>);
 }
 
+/// Deadline + callback produced by MMIO devices for the kernel event queue.
+pub struct ScheduledWork {
+    pub at: Tick,
+    pub event: Box<dyn SimEvent>,
+}
+
 struct Scheduled {
     at: Tick,
     seq: u64,

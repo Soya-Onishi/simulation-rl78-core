@@ -142,6 +142,51 @@ impl TauUnit {
         }
     }
 
+    pub fn tsr(&self, channel: usize) -> u16 {
+        self.tsr[channel]
+    }
+
+    #[must_use]
+    pub fn channel_enabled(&self, channel: usize) -> bool {
+        self.te & (1 << channel) != 0
+    }
+
+    pub fn on_interval_expire(&mut self, channel: usize) {
+        self.tsr[channel] |= 0x0001;
+        self.tcr[channel] = self.tdr[channel];
+    }
+
+    /// Interval period in nanoseconds, or `None` if `fCLK` is stopped.
+    #[must_use]
+    pub fn interval_ns(&self, channel: usize, f_clk_hz: u32) -> Option<u64> {
+        if f_clk_hz == 0 {
+            return None;
+        }
+        let cks = ((self.tmr[channel] >> 14) & 0x3) as u8;
+        let div = u64::from(self.ck_divider(cks));
+        let counts = u64::from(self.tdr[channel]) + 1;
+        Some(counts.saturating_mul(div).saturating_mul(1_000_000_000) / u64::from(f_clk_hz))
+    }
+
+    fn ck_divider(&self, cks: u8) -> u32 {
+        let prs0 = self.tps & 0xF;
+        let prs1 = (self.tps >> 4) & 0xF;
+        let prs2 = (self.tps >> 8) & 0x3;
+        let prs3 = (self.tps >> 12) & 0x3;
+        match cks {
+            0 => 1 << prs0,
+            1 => 1 << prs1,
+            2 => {
+                if prs2 == 0 {
+                    2
+                } else {
+                    1 << (prs2 * 2)
+                }
+            }
+            _ => 1 << (8 + prs3 * 2),
+        }
+    }
+
     #[must_use]
     pub fn owns(addr: u32) -> bool {
         Self::tdr_channel(addr).is_some()

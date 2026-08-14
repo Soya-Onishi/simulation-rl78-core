@@ -97,18 +97,26 @@ pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
 
 /// Assemble the G23 map without creating a [`Machine`].
 pub fn build_g23_bus(cfg: &G23MachineConfig) -> Result<MemoryBus, MapError> {
+    build_g23_parts(cfg).map(|(bus, _)| bus)
+}
+
+/// Like [`build_g23_bus`], but also returns the shared peripheral block (tests / inspect).
+pub fn build_g23_parts(
+    cfg: &G23MachineConfig,
+) -> Result<(MemoryBus, Arc<Mutex<G23Peripherals>>), MapError> {
     let layout = Rl78Device::R7F100Gxl.memory_layout();
     let peri = Arc::new(Mutex::new(G23Peripherals::from_option_byte(
         cfg.option_byte,
     )));
-    let (sfr, esfr) = g23_sfr_windows(peri);
-    Ok(MemoryMapBuilder::new()
+    let (sfr, esfr) = g23_sfr_windows(Arc::clone(&peri));
+    let bus = MemoryMapBuilder::new()
         .policy(cfg.unmapped)
         .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
         .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
         .map(ESFR_BASE, Box::new(esfr))?
         .map(SFR_BASE, Box::new(sfr))?
-        .build())
+        .build();
+    Ok((bus, peri))
 }
 
 #[cfg(test)]
@@ -207,5 +215,59 @@ mod tests {
         let layout = Rl78Device::R7F100Gxl.memory_layout();
         assert_eq!(layout.ram_base, 0xF3F00);
         assert!(layout.ram_base > 0xF0100);
+    }
+
+    fn pump(bus: &mut MemoryBus, events: &mut sim_kernel::EventQueue, now: sim_kernel::Tick) {
+        bus.set_now(now);
+        for work in bus.harvest_scheduled() {
+            events.schedule(work.at, work.event);
+        }
+        loop {
+            let Some((_, mut event)) = events.pop_due(now) else {
+                break;
+            };
+            let mut ctx = sim_kernel::EventCtx {
+                now,
+                bus,
+                stop: None,
+            };
+            event.fire(&mut ctx);
+            for work in bus.harvest_scheduled() {
+                events.schedule(work.at, work.event);
+            }
+        }
+    }
+
+    #[test]
+    fn tau_interval_sets_overflow_after_tdr_counts() {
+        let (mut bus, peri) = build_g23_parts(&G23MachineConfig::default()).unwrap();
+        let mut events = sim_kernel::EventQueue::new();
+        bus.write(0xFFF18, &[31, 0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        pump(&mut bus, &mut events, sim_kernel::Tick(999));
+        let mut tsr = [0u8; 2];
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 0);
+        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 1);
+        assert!(peri.lock().unwrap().tau.channel_enabled(0));
+    }
+
+    #[test]
+    fn sau_uart_tx_emits_byte_after_frame_time() {
+        let (mut bus, peri) = build_g23_parts(&G23MachineConfig::default()).unwrap();
+        let mut events = sim_kernel::EventQueue::new();
+        bus.write(0xF0118, &[0x04, 0x80]).unwrap();
+        bus.write(0xF012A, &[0x01, 0x00]).unwrap();
+        bus.write(0xF0122, &[0x01, 0x00]).unwrap();
+        bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
+        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        assert!(peri.lock().unwrap().sau.tx_bytes().is_empty());
+        pump(&mut bus, &mut events, sim_kernel::Tick(624));
+        assert!(peri.lock().unwrap().sau.tx_bytes().is_empty());
+        pump(&mut bus, &mut events, sim_kernel::Tick(625));
+        assert_eq!(peri.lock().unwrap().sau.tx_bytes(), b"A");
     }
 }

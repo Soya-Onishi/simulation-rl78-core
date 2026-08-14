@@ -5,7 +5,7 @@ use crate::bus::{Addr, BusError, MemoryBus};
 use crate::clock::VirtualClock;
 use crate::command::SimError;
 use crate::cpu::{Cpu, RegId};
-use crate::event::EventQueue;
+use crate::event::{EventQueue, ScheduledWork};
 
 /// Concrete machine owned exclusively by the simulation thread.
 ///
@@ -88,7 +88,19 @@ impl<C: Cpu> Machine<C> {
     }
 
     pub fn write_mem(&mut self, addr: Addr, buf: &[u8]) -> Result<(), BusError> {
-        self.bus.write(addr, buf)
+        self.bus.write(addr, buf)?;
+        self.harvest_device_events();
+        Ok(())
+    }
+
+    /// Move device-armed deadlines onto the virtual event queue.
+    pub fn harvest_device_events(&mut self) {
+        let now = self.clock.now();
+        self.bus.set_now(now);
+        let work: Vec<ScheduledWork> = self.bus.harvest_scheduled();
+        for item in work {
+            self.events.schedule(item.at, item.event);
+        }
     }
 
     pub(crate) fn parts_mut(

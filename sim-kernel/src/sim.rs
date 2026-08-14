@@ -107,6 +107,8 @@ impl<C: Cpu> Simulator<C> {
             return Some(response);
         }
 
+        self.machine.harvest_device_events();
+
         let ns_per_insn = self.cfg.ns_per_instruction.max(1);
         let budget_ns = {
             let (_, _, clock, events, _) = self.machine.parts_mut();
@@ -139,6 +141,7 @@ impl<C: Cpu> Simulator<C> {
         }
         let elapsed = Tick(result.instructions.saturating_mul(ns_per_insn));
         self.machine.clock_mut().advance(elapsed);
+        self.machine.harvest_device_events();
 
         if let Some(access) = self.machine.bus_mut().take_trap() {
             self.state = SimState::Stopped;
@@ -171,6 +174,7 @@ impl<C: Cpu> Simulator<C> {
                 event.fire(&mut ctx);
                 ctx.stop
             };
+            self.machine.harvest_device_events();
             if let Some(stop) = stop {
                 self.state = SimState::Stopped;
                 return Some(Response::Stopped(stop));
