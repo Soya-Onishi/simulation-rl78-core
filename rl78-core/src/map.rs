@@ -21,6 +21,8 @@ pub enum Rl78Device {
     /// Milestone-1 stand-in (64 KiB flash, 32 KiB RAM) until a real part is chosen.
     #[default]
     Generic64k,
+    /// RL78/G23 R7F100GxL-class map (QEMU `r7f100gxl_mm`).
+    R7F100Gxl,
 }
 
 impl Rl78Device {
@@ -34,6 +36,13 @@ impl Rl78Device {
                 ram_base: 0xF0100,
                 ram_size: 32 * 1024,
             },
+            // QEMU `hw/rl78/r7f100gxl.h`: flash 128 KiB, RAM at 0xF3F00 size 0xC000.
+            Self::R7F100Gxl => MemoryLayout {
+                rom_base: 0x00000,
+                rom_size: 0x20000,
+                ram_base: 0xF3F00,
+                ram_size: 0xC000,
+            },
         }
     }
 }
@@ -44,3 +53,12 @@ impl Rl78Device {
 /// can reach it without an ES prefix — same idea as tlib's harness MMIO page.
 pub const MAGIC_PROBE_BASE: Addr = 0xF0000;
 pub const MAGIC_PROBE_SIZE: usize = 256;
+
+/// Standard SFR page (QEMU `RL78G23_MM_SFR`).
+pub const SFR_BASE: Addr = 0xFFF00;
+pub const SFR_SIZE: usize = 0x100;
+
+/// Extended SFR (QEMU `RL78G23_MM_EXTENDED_SFR`). Overlaps Magic on Generic64k;
+/// only mapped on [`Rl78Device::R7F100Gxl`].
+pub const ESFR_BASE: Addr = 0xF0000;
+pub const ESFR_SIZE: usize = 0x800;

@@ -10,6 +10,7 @@ mod elf;
 mod ffi;
 mod magic;
 mod map;
+mod peripherals;
 
 pub use callbacks::{
     HostRegion, TLIB_PAGE_SIZE, clear_host_regions, clear_io_bus, map_host_region,
@@ -19,9 +20,17 @@ pub use cpu::Rl78Cpu;
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
-pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
+pub use map::{
+    ESFR_BASE, ESFR_SIZE, MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device, SFR_BASE,
+    SFR_SIZE,
+};
+pub use peripherals::{ClockGenerator, ClockTree, G23Peripherals, SauUnit, TauUnit};
+
+use std::sync::{Arc, Mutex};
 
 use sim_kernel::{Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy};
+
+use crate::peripherals::g23_sfr_windows;
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
 #[derive(Clone, Debug, Default)]
@@ -70,6 +79,36 @@ where
         .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
         .map(MAGIC_PROBE_BASE, Box::new(MagicProbe::new(sink)))
         .map(|b| b.build())
+}
+
+/// Knobs for [`g23_machine`]. Option byte `0x000C2` feeds the clock generator.
+#[derive(Clone, Debug, Default)]
+pub struct G23MachineConfig {
+    pub unmapped: UnmappedPolicy,
+    /// Flash option byte at `0x000C2` (`FRQSEL`). `None` matches QEMU when ROM is empty.
+    pub option_byte: Option<u8>,
+}
+
+/// RL78/G23-class machine: ROM/RAM + clock/SAU/TAU SFR windows (no Magic probe).
+pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
+    let bus = build_g23_bus(&cfg).expect("g23 memory map");
+    Machine::new(Rl78Cpu::new(), bus)
+}
+
+/// Assemble the G23 map without creating a [`Machine`].
+pub fn build_g23_bus(cfg: &G23MachineConfig) -> Result<MemoryBus, MapError> {
+    let layout = Rl78Device::R7F100Gxl.memory_layout();
+    let peri = Arc::new(Mutex::new(G23Peripherals::from_option_byte(
+        cfg.option_byte,
+    )));
+    let (sfr, esfr) = g23_sfr_windows(peri);
+    Ok(MemoryMapBuilder::new()
+        .policy(cfg.unmapped)
+        .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
+        .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
+        .map(ESFR_BASE, Box::new(esfr))?
+        .map(SFR_BASE, Box::new(sfr))?
+        .build())
 }
 
 #[cfg(test)]
@@ -138,5 +177,35 @@ mod tests {
         };
         assert_eq!(cfg.layout().ram_size, 4 * 1024);
         let _ = minimal_machine(cfg);
+    }
+
+    #[test]
+    fn g23_clock_and_timer_sfr_are_mapped() {
+        let mut bus = build_g23_bus(&G23MachineConfig::default()).unwrap();
+        let mut ckc = [0u8; 1];
+        bus.read(0xFFFA4, &mut ckc).unwrap();
+        assert_eq!(ckc[0], 0);
+
+        bus.write(0xF00A8, &[1]).unwrap();
+        let mut hocodiv = [0u8; 1];
+        bus.read(0xF00A8, &mut hocodiv).unwrap();
+        assert_eq!(hocodiv[0], 1);
+
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        let mut te = [0u8; 2];
+        bus.read(0xF01B0, &mut te).unwrap();
+        assert_eq!(te, [1, 0]);
+
+        bus.write(0xFFF10, &[0x5A, 0x00]).unwrap();
+        let mut sdr = [0u8; 2];
+        bus.read(0xFFF10, &mut sdr).unwrap();
+        assert_eq!(sdr[0], 0x5A);
+    }
+
+    #[test]
+    fn r7f100gxl_ram_does_not_cover_sau() {
+        let layout = Rl78Device::R7F100Gxl.memory_layout();
+        assert_eq!(layout.ram_base, 0xF3F00);
+        assert!(layout.ram_base > 0xF0100);
     }
 }
