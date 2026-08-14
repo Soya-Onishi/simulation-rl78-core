@@ -10,6 +10,7 @@ use crate::map::MemoryLayout;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
+use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqSink};
 use crate::peripherals::sau::{SauCtrlMmio, SauSdrMmio, SauUnit};
 use crate::peripherals::tau::{TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
 
@@ -25,14 +26,18 @@ const TAU_TDR01: Addr = 0xFFF18;
 const TAU_TDR27: Addr = 0xFFF64;
 const TAU_CTRL: Addr = 0xF0180;
 const TAU_TIS: Addr = 0xF0074;
+const IRQ_IFMK0: Addr = 0xFFFE0;
+const IRQ_IFMK1: Addr = 0xFFFD0;
+const IRQ_EDGE: Addr = 0xFFF38;
 /// Flash option byte `FRQSEL` (QEMU `rom_ptr(0x000C2)`).
 const OPTION_BYTE_ADDR: Addr = 0x000C2;
 
-/// Generic G23 core (clock / SAU0 / TAU0). Flash/RAM sizes come from the part.
+/// Generic G23 core (clock / SAU0 / TAU0 / IRQ). Flash/RAM sizes come from the part.
 pub struct Rl78G23Core {
     pub clock: Arc<Mutex<ClockGenerator>>,
     pub sau: Arc<Mutex<SauUnit>>,
     pub tau: Arc<Mutex<TauUnit>>,
+    pub irq: Arc<Mutex<IrqController>>,
 }
 
 impl Rl78G23Core {
@@ -40,9 +45,20 @@ impl Rl78G23Core {
     pub fn new(ctl: EventCtl) -> Self {
         let clock = Arc::new(Mutex::new(ClockGenerator::new()));
         let outputs = clock.lock().expect("clock").outputs();
-        let sau = Arc::new(Mutex::new(SauUnit::new(ctl.clone(), outputs.clone())));
-        let tau = Arc::new(Mutex::new(TauUnit::new(ctl, outputs)));
-        Self { clock, sau, tau }
+        let irq = Arc::new(Mutex::new(IrqController::new()));
+        let sink = IrqSink::new(Arc::clone(&irq));
+        let sau = Arc::new(Mutex::new(SauUnit::new(
+            ctl.clone(),
+            outputs.clone(),
+            sink.clone(),
+        )));
+        let tau = Arc::new(Mutex::new(TauUnit::new(ctl, outputs, sink)));
+        Self {
+            clock,
+            sau,
+            tau,
+            irq,
+        }
     }
 }
 
@@ -51,6 +67,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.clock.lock().expect("clock"));
         Resettable::reset(&mut *self.sau.lock().expect("sau"));
         Resettable::reset(&mut *self.tau.lock().expect("tau"));
+        Resettable::reset(&mut *self.irq.lock().expect("irq"));
     }
 }
 
@@ -91,7 +108,16 @@ impl HasMemoryMap for Rl78G23Core {
                 Box::new(TauTdrMmio::new(Arc::clone(&self.tau), 2, 0x0C)),
             )?
             .map(TAU_CTRL, Box::new(TauCtrlMmio::new(Arc::clone(&self.tau))))?
-            .map(TAU_TIS, Box::new(TauTisMmio::new(Arc::clone(&self.tau))))
+            .map(TAU_TIS, Box::new(TauTisMmio::new(Arc::clone(&self.tau))))?
+            .map(
+                IRQ_IFMK0,
+                Box::new(IrqBankMmio::new(Arc::clone(&self.irq), 0)),
+            )?
+            .map(
+                IRQ_IFMK1,
+                Box::new(IrqBankMmio::new(Arc::clone(&self.irq), 1)),
+            )?
+            .map(IRQ_EDGE, Box::new(IrqEdgeMmio::new(Arc::clone(&self.irq))))
     }
 }
 

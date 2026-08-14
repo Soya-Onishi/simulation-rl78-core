@@ -7,8 +7,11 @@ use std::sync::{Arc, Mutex};
 use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
+use crate::peripherals::irq::{IrqId, IrqSink};
 
 pub const CHANNELS: usize = 4;
+
+const CHANNEL_IRQ: [IrqId; CHANNELS] = [IrqId::INTST0, IrqId::INTSR0, IrqId::INTST1, IrqId::INTSR1];
 
 const SCR_TXE: u16 = 1 << 15;
 const SSR_TSF: u16 = 1 << 6;
@@ -28,12 +31,13 @@ pub struct SauUnit {
     tx_bytes: Vec<u8>,
     ctl: EventCtl,
     clock: ClockOutputs,
+    irq: IrqSink,
     tx_id: [Option<EventId>; CHANNELS],
 }
 
 impl SauUnit {
     #[must_use]
-    pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
+    pub fn new(ctl: EventCtl, clock: ClockOutputs, irq: IrqSink) -> Self {
         Self {
             sdr: [0; CHANNELS],
             smr: [0; CHANNELS],
@@ -48,6 +52,7 @@ impl SauUnit {
             tx_bytes: Vec::new(),
             ctl,
             clock,
+            irq,
             tx_id: [None; CHANNELS],
         }
     }
@@ -208,6 +213,7 @@ impl SimEvent for SauTxDone {
         g.tx_id[ch] = None;
         let byte = (g.sdr[ch] & 0xFF) as u8;
         g.tx_bytes.push(byte);
+        g.irq.raise(CHANNEL_IRQ[ch]);
     }
 }
 

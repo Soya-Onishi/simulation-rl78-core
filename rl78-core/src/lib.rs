@@ -22,8 +22,8 @@ pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 pub use peripherals::{
-    ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, R7F100Gxl, Rl78G23Core, SauUnit,
-    TauUnit,
+    ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqController, IrqId, IrqRequest,
+    IrqSink, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
 };
 
 use sim_kernel::{
@@ -292,5 +292,50 @@ mod tests {
         assert!(part.core.sau.lock().unwrap().tx_bytes().is_empty());
         pump(&mut bus, &ctl, sim_kernel::Tick(625));
         assert_eq!(part.core.sau.lock().unwrap().tx_bytes(), b"A");
+    }
+
+    #[test]
+    fn irq_reset_masks_if_until_mk_cleared() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl);
+        let mut mk0 = [0u8; 2];
+        bus.read(0xFFFE4, &mut mk0).unwrap();
+        assert_eq!(mk0, [0xFF, 0xFF]);
+        bus.write(0xFFFE0, &[0x00, 0x40]).unwrap();
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTTM00));
+        assert!(part.core.irq.lock().unwrap().pending().is_none());
+        bus.write(0xFFFE4, &[0xFF, 0xBF]).unwrap();
+        let pending = part.core.irq.lock().unwrap().pending().unwrap();
+        assert_eq!(pending.index, IrqId::INTTM00);
+    }
+
+    #[test]
+    fn tau_interval_latches_inttm00() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl.clone());
+        bus.write(0xFFF18, &[31, 0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
+        let mut if0 = [0u8; 2];
+        bus.read(0xFFFE0, &mut if0).unwrap();
+        assert_eq!(if0[1] & 0x40, 0x40);
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTTM00));
+    }
+
+    #[test]
+    fn sau_uart_tx_latches_intst0() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl.clone());
+        bus.write(0xF0118, &[0x04, 0x80]).unwrap();
+        bus.write(0xF012A, &[0x01, 0x00]).unwrap();
+        bus.write(0xF0122, &[0x01, 0x00]).unwrap();
+        bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(625));
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTST0));
+        let mut if0 = [0u8; 2];
+        bus.read(0xFFFE0, &mut if0).unwrap();
+        assert_eq!(if0[1] & 0x20, 0x20);
     }
 }

@@ -63,4 +63,5 @@ unsafe extern "C" {
     pub fn tlib_set_register_value_32(reg_number: c_int, value: u32);
     pub fn tlib_get_register_value(reg_number: c_int) -> u64;
     pub fn tlib_set_register_value(reg_number: c_int, value: u64);
+    pub fn tlib_set_rl78_irq(index: i32, priority: i32, enable: i32);
 }
