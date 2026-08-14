@@ -21,6 +21,9 @@ pub enum Rl78Device {
     /// Milestone-1 stand-in (64 KiB flash, 32 KiB RAM) until a real part is chosen.
     #[default]
     Generic64k,
+    /// RL78/G23 part. Peripheral map is [`crate::peripherals::Rl78G23Core`];
+    /// this variant only supplies flash/RAM windows.
+    R7F100Gxl,
 }
 
 impl Rl78Device {
@@ -33,6 +36,13 @@ impl Rl78Device {
                 // Leave 0xF0000–0xF00FF for [`MAGIC_PROBE_BASE`] (ABS16 mirror).
                 ram_base: 0xF0100,
                 ram_size: 32 * 1024,
+            },
+            // QEMU `hw/rl78/r7f100gxl.h`: flash 128 KiB, RAM at 0xF3F00 size 0xC000.
+            Self::R7F100Gxl => MemoryLayout {
+                rom_base: 0x00000,
+                rom_size: 0x20000,
+                ram_base: 0xF3F00,
+                ram_size: 0xC000,
             },
         }
     }

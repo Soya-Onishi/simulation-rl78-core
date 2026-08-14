@@ -12,6 +12,7 @@ mod command;
 mod cpu;
 mod event;
 mod machine;
+mod reset;
 mod sim;
 mod stop;
 
@@ -20,16 +21,17 @@ mod testing;
 
 pub use breakpoint::{Breakpoint, BreakpointId, BreakpointStore};
 pub use bus::{
-    Addr, BusError, MapError, MemoryBus, MemoryMapBuilder, MemoryMapped, Ram, Rom, UnmappedAccess,
-    UnmappedPolicy,
+    Addr, BusError, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, MemoryMapped, Ram, Rom,
+    UnmappedAccess, UnmappedPolicy,
 };
 pub use clock::{Tick, VirtualClock};
 pub use command::{Command, InspectResult, Response, SimError};
 pub use cpu::{
     Cpu, PendingStop, Quantum, RegId, TlibExit, map_tlib_exit, resolve_after_tlib_execute,
 };
-pub use event::{EventCtx, EventId, EventQueue, SimEvent};
+pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use machine::Machine;
+pub use reset::Resettable;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
 pub use stop::StopReason;
 
