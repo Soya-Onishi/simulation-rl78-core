@@ -24,7 +24,7 @@ pub use bus::{
     Addr, BusError, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, MemoryMapped, Ram, Rom,
     UnmappedAccess, UnmappedPolicy,
 };
-pub use clock::{Tick, VirtualClock};
+pub use clock::{NS_PER_SEC, Tick, VirtualClock};
 pub use command::{Command, InspectResult, Response, SimError};
 pub use cpu::{
     Cpu, PendingStop, Quantum, RegId, TlibExit, map_tlib_exit, resolve_after_tlib_execute,

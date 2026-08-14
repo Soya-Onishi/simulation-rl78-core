@@ -12,26 +12,25 @@ use crate::machine::Machine;
 use crate::stop::StopReason;
 
 /// How far a single CPU quantum may run before the kernel re-checks commands.
-/// Unit: virtual nanoseconds.
 pub const DEFAULT_MAX_QUANTUM: Tick = Tick(10_000);
 
 /// Kernel run configuration.
 #[derive(Clone, Debug)]
 pub struct SimConfig {
-    /// Cap on virtual time advanced per [`Simulator::poll`], in nanoseconds.
+    /// Cap on virtual time advanced per [`Simulator::poll`].
     pub max_quantum: Tick,
-    /// Virtual nanoseconds charged per retired instruction (icount scaling).
+    /// Virtual time charged per retired instruction (icount scaling).
     ///
-    /// Milestone 1 defaults to `1` (1 insn = 1 ns). Real MCU timing models can
-    /// raise this without changing the event/timer API.
-    pub ns_per_instruction: u64,
+    /// Milestone 1 defaults to `Tick(1)` (1 insn = 1 ns). Real MCU timing
+    /// models can raise this without changing the event/timer API.
+    pub ns_per_instruction: Tick,
 }
 
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
             max_quantum: DEFAULT_MAX_QUANTUM,
-            ns_per_instruction: 1,
+            ns_per_instruction: Tick(1),
         }
     }
 }
@@ -107,7 +106,7 @@ impl<C: Cpu> Simulator<C> {
             return Some(response);
         }
 
-        let ns_per_insn = self.cfg.ns_per_instruction.max(1);
+        let ns_per_insn = self.cfg.ns_per_instruction.max(Tick(1));
         let budget_ns = {
             let now = self.machine.clock().now();
             self.machine
@@ -117,7 +116,9 @@ impl<C: Cpu> Simulator<C> {
                 .saturating_sub(now)
                 .min(self.cfg.max_quantum)
         };
-        let max_instructions = (budget_ns.0 / ns_per_insn).min(u64::from(u32::MAX)) as u32;
+        let max_instructions = budget_ns
+            .saturating_div(ns_per_insn)
+            .min(u64::from(u32::MAX)) as u32;
         if max_instructions == 0 {
             // Less than one instruction remains before the next deadline (or the
             // quantum cap). Advancing by that remainder lets due events fire;
@@ -137,7 +138,7 @@ impl<C: Cpu> Simulator<C> {
             self.state = SimState::Stopped;
             return Some(Response::Stopped(StopReason::Halt));
         }
-        let elapsed = Tick(result.instructions.saturating_mul(ns_per_insn));
+        let elapsed = ns_per_insn.saturating_mul(result.instructions);
         self.machine.advance_clock(elapsed);
 
         if let Some(access) = self.machine.bus_mut().take_trap() {

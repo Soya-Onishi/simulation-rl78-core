@@ -127,7 +127,7 @@ fn sub_instruction_remainder_advances_to_event() {
     let mut sim = Simulator::new(
         machine,
         SimConfig {
-            ns_per_instruction: 10,
+            ns_per_instruction: Tick(10),
             ..SimConfig::default()
         },
     );
@@ -228,7 +228,7 @@ fn ns_per_instruction_scales_virtual_time() {
             ScriptOp::Halt,
         ])),
         SimConfig {
-            ns_per_instruction: 10,
+            ns_per_instruction: Tick(10),
             ..SimConfig::default()
         },
     );
