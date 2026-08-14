@@ -55,6 +55,11 @@ impl fmt::Display for BusError {
 
 impl std::error::Error for BusError {}
 
+/// Device that can emit a [`MemoryMapBuilder`] (on-chip core, SoC part, board).
+pub trait HasMemoryMap {
+    fn memory_map(&self) -> Result<MemoryMapBuilder, MapError>;
+}
+
 /// MMIO / memory region. Devices (including Magic probe) implement this.
 pub trait MemoryMapped: Send {
     fn len(&self) -> u64;
@@ -258,6 +263,15 @@ impl MemoryMapBuilder {
         Ok(self)
     }
 
+    /// Fold another unfinished map into this one. Overlaps are rejected.
+    /// [`Self::policy`] on `self` is kept; `other`'s policy is ignored.
+    pub fn merge(mut self, other: Self) -> Result<Self, MapError> {
+        for region in other.regions {
+            self = self.map(region.base, region.device)?;
+        }
+        Ok(self)
+    }
+
     #[must_use]
     pub fn build(self) -> MemoryBus {
         MemoryBus {
@@ -331,6 +345,14 @@ impl Rom {
     #[must_use]
     pub fn from_bytes(data: Vec<u8>) -> Self {
         Self { data }
+    }
+
+    /// Blank flash (erased cells read as `0xFF`).
+    #[must_use]
+    pub fn erased(size: usize) -> Self {
+        Self {
+            data: vec![0xFF; size],
+        }
     }
 }
 
@@ -496,5 +518,29 @@ mod tests {
             bus.load(0x1000, &[1, 2, 3, 4]),
             Err(BusError::NotLoadable { addr: 0x1000 })
         ));
+    }
+
+    #[test]
+    fn merge_combines_non_overlapping_maps() {
+        let a = MemoryMapBuilder::new()
+            .map(0x1000, Box::new(Ram::new(16)))
+            .unwrap();
+        let b = MemoryMapBuilder::new()
+            .map(0x2000, Box::new(Ram::new(8)))
+            .unwrap();
+        let mut bus = a.merge(b).unwrap().build();
+        bus.write(0x1000, &[1]).unwrap();
+        bus.write(0x2000, &[2]).unwrap();
+    }
+
+    #[test]
+    fn merge_rejects_overlap() {
+        let a = MemoryMapBuilder::new()
+            .map(0x1000, Box::new(Ram::new(16)))
+            .unwrap();
+        let b = MemoryMapBuilder::new()
+            .map(0x1008, Box::new(Ram::new(8)))
+            .unwrap();
+        assert!(matches!(a.merge(b), Err(MapError::Overlap { .. })));
     }
 }
