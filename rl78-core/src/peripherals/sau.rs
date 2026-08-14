@@ -152,7 +152,14 @@ impl SauUnit {
                 self.scr[((offset - 0x18) / 2) as usize] = value;
             }
             0x22 => self.se |= value & 0x000F,
-            0x24 => self.se &= !(value & 0x000F),
+            0x24 => {
+                for ch in 0..CHANNELS {
+                    if value & (1 << ch) != 0 {
+                        self.se &= !(1 << ch);
+                        self.cancel_tx(ch);
+                    }
+                }
+            }
             0x26 => {
                 self.ck_divisor[0] = (value & 0x0F) as u8;
                 self.ck_divisor[1] = ((value >> 4) & 0x0F) as u8;

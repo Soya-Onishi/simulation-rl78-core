@@ -81,9 +81,10 @@ impl ClockOutputs {
 }
 
 const CSC_HIOSTOP: u8 = 1 << 0;
+const CSC_MIOEN: u8 = 1 << 1;
 const CSC_XTSTOP: u8 = 1 << 6;
 const CSC_MSTOP: u8 = 1 << 7;
-const CSC_WRITABLE: u8 = CSC_HIOSTOP | (1 << 1) | CSC_XTSTOP | CSC_MSTOP;
+const CSC_WRITABLE: u8 = CSC_HIOSTOP | CSC_MIOEN | CSC_XTSTOP | CSC_MSTOP;
 
 const CKC_MCM1: u8 = 1 << 0;
 const CKC_MCS1: u8 = 1 << 1;
@@ -225,7 +226,7 @@ impl ClockGenerator {
             4 => self.read_ckc(),
             5 => self.cks0,
             6 => self.cks1,
-            7 => self.cksel,
+            8 => self.cksel,
             _ => 0,
         }
     }
@@ -244,7 +245,7 @@ impl ClockGenerator {
             4 => self.write_ckc(value),
             5 => self.cks0 = value,
             6 => self.cks1 = value,
-            7 => {
+            8 => {
                 self.cksel = (value & CKSEL_SELLOSC) | (self.cksel & !CKSEL_SELLOSC);
             }
             _ => {}
@@ -344,7 +345,7 @@ impl ClockGenerator {
         } else {
             Hertz::from_mhz(high_mhz)
         };
-        let mid_osc = if self.csc & (1 << 1) != 0 {
+        let mid_osc = if self.csc & CSC_MIOEN != 0 {
             Hertz::from_mhz(mid_mhz)
         } else {
             Hertz::ZERO
@@ -482,7 +483,7 @@ macro_rules! clock_byte_mmio {
     };
 }
 
-clock_byte_mmio!(ClockSfrMmio, 8, read_sfr, write_sfr);
+clock_byte_mmio!(ClockSfrMmio, 9, read_sfr, write_sfr);
 clock_byte_mmio!(ClockOscDivMmio, 2, read_osc_div, write_osc_div);
 clock_byte_mmio!(ClockHocoMmio, 9, read_hoco, write_hoco);
 clock_byte_mmio!(ClockTrimMmio, 4, read_trim, write_trim);
@@ -516,7 +517,7 @@ mod tests {
     #[test]
     fn ckc_css_mirrors_to_cls() {
         let mut c = ClockGenerator::default();
-        c.write_sfr(7, CKSEL_SELLOSC);
+        c.write_sfr(8, CKSEL_SELLOSC);
         c.write_sfr(4, CKC_CSS);
         let v = c.read_sfr(4);
         assert_ne!(v & CKC_CLS, 0);

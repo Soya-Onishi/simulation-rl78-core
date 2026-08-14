@@ -26,7 +26,7 @@ pub use peripherals::{
 };
 
 use sim_kernel::{
-    EventCtl, HasMemoryMap, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable, Rom,
+    EventCtl, HasMemoryMap, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom,
     UnmappedPolicy,
 };
 
@@ -79,24 +79,22 @@ where
         .map(|b| b.build())
 }
 
-/// Knobs for [`g23_machine`]. Option byte `0x000C2` feeds the clock generator.
+/// Knobs for [`g23_machine`]. Option byte `0x000C2` is read from ROM at reset.
 #[derive(Clone, Debug, Default)]
 pub struct G23MachineConfig {
     pub unmapped: UnmappedPolicy,
-    /// Flash option byte at `0x000C2` (`FRQSEL`). `None` matches QEMU when ROM is empty.
-    pub option_byte: Option<u8>,
 }
 
-/// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset.
+/// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
 pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
     let ctl = EventCtl::new();
-    let mut part = R7F100Gxl::new(ctl.clone(), cfg.option_byte);
-    part.reset();
-    let bus = part
+    let mut part = R7F100Gxl::new(ctl.clone());
+    let mut bus = part
         .memory_map()
         .expect("g23 memory map")
         .policy(cfg.unmapped)
         .build();
+    part.reset(&mut bus);
     Machine::new(Rl78Cpu::new(), bus, ctl)
 }
 
@@ -106,12 +104,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::{BusError, HasMemoryMap, Resettable};
+    use sim_kernel::{BusError, HasMemoryMap};
 
     fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
-        let mut part = R7F100Gxl::new(ctl, None);
-        part.reset();
-        let bus = part.memory_map().unwrap().build();
+        let mut part = R7F100Gxl::new(ctl);
+        let mut bus = part.memory_map().unwrap().build();
+        part.reset(&mut bus);
         (part, bus)
     }
 

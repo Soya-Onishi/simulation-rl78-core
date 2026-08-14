@@ -346,6 +346,14 @@ impl Rom {
     pub fn from_bytes(data: Vec<u8>) -> Self {
         Self { data }
     }
+
+    /// Blank flash (erased cells read as `0xFF`).
+    #[must_use]
+    pub fn erased(size: usize) -> Self {
+        Self {
+            data: vec![0xFF; size],
+        }
+    }
 }
 
 impl MemoryMapped for Rom {

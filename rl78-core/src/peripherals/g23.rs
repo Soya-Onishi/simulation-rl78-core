@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{Addr, EventCtl, HasMemoryMap, MapError, MemoryMapBuilder, Ram, Resettable, Rom};
+use sim_kernel::{
+    Addr, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable, Rom,
+};
 
 use crate::map::MemoryLayout;
 use crate::peripherals::clock::{
@@ -23,6 +25,8 @@ const TAU_TDR01: Addr = 0xFFF18;
 const TAU_TDR27: Addr = 0xFFF64;
 const TAU_CTRL: Addr = 0xF0180;
 const TAU_TIS: Addr = 0xF0074;
+/// Flash option byte `FRQSEL` (QEMU `rom_ptr(0x000C2)`).
+const OPTION_BYTE_ADDR: Addr = 0x000C2;
 
 /// Generic G23 core (clock / SAU0 / TAU0). Flash/RAM sizes come from the part.
 pub struct Rl78G23Core {
@@ -108,18 +112,21 @@ impl R7F100Gxl {
     }
 
     #[must_use]
-    pub fn new(ctl: EventCtl, option_byte: Option<u8>) -> Self {
-        let core = Rl78G23Core::new(ctl);
-        core.clock
+    pub fn new(ctl: EventCtl) -> Self {
+        Self {
+            core: Rl78G23Core::new(ctl),
+        }
+    }
+
+    /// Hold-reset. `FRQSEL` is latched from ROM at [`OPTION_BYTE_ADDR`].
+    pub fn reset(&mut self, bus: &mut MemoryBus) {
+        let mut byte = [0u8; 1];
+        let option = bus.read(OPTION_BYTE_ADDR, &mut byte).ok().map(|_| byte[0]);
+        self.core
+            .clock
             .lock()
             .expect("clock")
-            .set_option_byte(option_byte);
-        Self { core }
-    }
-}
-
-impl Resettable for R7F100Gxl {
-    fn reset(&mut self) {
+            .set_option_byte(option);
         Resettable::reset(&mut self.core);
     }
 }
@@ -129,7 +136,7 @@ impl HasMemoryMap for R7F100Gxl {
         let layout = Self::memory_layout();
         self.core.memory_map()?.merge(
             MemoryMapBuilder::new()
-                .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
+                .map(layout.rom_base, Box::new(Rom::erased(layout.rom_size)))?
                 .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?,
         )
     }
