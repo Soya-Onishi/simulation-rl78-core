@@ -128,6 +128,7 @@ impl<C: Cpu> Simulator<C> {
                 return None;
             }
             self.machine.clock_mut().advance(budget_ns);
+            self.machine.harvest_device_events();
             return self.fire_due_events();
         }
 
@@ -156,7 +157,7 @@ impl<C: Cpu> Simulator<C> {
             return Some(Response::Stopped(stop));
         }
 
-        None
+        self.fire_due_events()
     }
 
     fn fire_due_events(&mut self) -> Option<Response> {

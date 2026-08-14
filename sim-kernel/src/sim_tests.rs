@@ -114,9 +114,8 @@ fn quantum_does_not_pass_next_event() {
         },
     );
     sim.command(Command::Start);
-    assert!(sim.poll().is_none());
-    assert_eq!(sim.machine().clock().now(), Tick(4));
     assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Halt)));
+    assert_eq!(sim.machine().clock().now(), Tick(4));
 }
 
 #[test]

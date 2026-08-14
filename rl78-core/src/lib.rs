@@ -256,6 +256,45 @@ mod tests {
     }
 
     #[test]
+    fn tau_restart_after_tt_ignores_stale_deadline() {
+        let (mut bus, _) = build_g23_parts(&G23MachineConfig::default()).unwrap();
+        let mut events = sim_kernel::EventQueue::new();
+        bus.write(0xFFF18, &[31, 0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        bus.write(0xF01B4, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
+        let mut tsr = [0u8; 2];
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 0);
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
+        pump(&mut bus, &mut events, sim_kernel::Tick(1999));
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 0);
+        pump(&mut bus, &mut events, sim_kernel::Tick(2000));
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 1);
+    }
+
+    #[test]
+    fn tau_arms_when_fclk_returns() {
+        let (mut bus, _) = build_g23_parts(&G23MachineConfig::default()).unwrap();
+        let mut events = sim_kernel::EventQueue::new();
+        bus.write(0xFFFA1, &[0xC1]).unwrap();
+        bus.write(0xFFF18, &[31, 0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        bus.write(0xFFFA1, &[0xC0]).unwrap();
+        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
+        let mut tsr = [0u8; 2];
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 1);
+    }
+
+    #[test]
     fn sau_uart_tx_emits_byte_after_frame_time() {
         let (mut bus, peri) = build_g23_parts(&G23MachineConfig::default()).unwrap();
         let mut events = sim_kernel::EventQueue::new();

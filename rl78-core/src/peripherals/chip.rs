@@ -16,6 +16,7 @@ pub struct G23Peripherals {
     pub tau: TauUnit,
     pending: Vec<ScheduledWork>,
     tau_started: [bool; TAU_CH],
+    tau_generation: [u32; TAU_CH],
 }
 
 impl Default for G23Peripherals {
@@ -33,6 +34,7 @@ impl G23Peripherals {
             tau: TauUnit::default(),
             pending: Vec::new(),
             tau_started: [false; TAU_CH],
+            tau_generation: [0; TAU_CH],
         }
     }
 
@@ -68,20 +70,28 @@ impl G23Peripherals {
         let fclk = self.clock.f_clk_hz();
         for ch in 0..TAU_CH {
             let on = self.tau.channel_enabled(ch);
-            if on && !self.tau_started[ch] {
-                self.tau_started[ch] = true;
-                if let Some(ns) = self.tau.interval_ns(ch, fclk) {
-                    out.push(ScheduledWork {
-                        at: now.saturating_add(Tick(ns)),
-                        event: Box::new(TauExpire {
-                            peri: Arc::clone(inner),
-                            channel: ch as u8,
-                        }),
-                    });
-                }
-            }
             if !on {
-                self.tau_started[ch] = false;
+                if self.tau_started[ch] {
+                    self.tau_generation[ch] = self.tau_generation[ch].wrapping_add(1);
+                    self.tau_started[ch] = false;
+                }
+                continue;
+            }
+            if self.tau_started[ch] {
+                continue;
+            }
+            if let Some(ns) = self.tau.interval_ns(ch, fclk) {
+                self.tau_started[ch] = true;
+                let at = now.saturating_add(Tick(ns));
+                out.push(ScheduledWork {
+                    at,
+                    event: Box::new(TauExpire {
+                        peri: Arc::clone(inner),
+                        channel: ch as u8,
+                        generation: self.tau_generation[ch],
+                        at,
+                    }),
+                });
             }
         }
         for ch in 0..SAU_CH {
@@ -104,26 +114,39 @@ impl G23Peripherals {
 struct TauExpire {
     peri: Arc<Mutex<G23Peripherals>>,
     channel: u8,
+    generation: u32,
+    at: Tick,
 }
 
 impl SimEvent for TauExpire {
     fn fire(&mut self, ctx: &mut EventCtx<'_>) {
         let mut g = self.peri.lock().expect("g23 peripherals");
         let ch = self.channel as usize;
-        if !g.tau.channel_enabled(ch) {
+        if g.tau_generation[ch] != self.generation || !g.tau.channel_enabled(ch) {
             g.tau_started[ch] = false;
             return;
         }
         g.tau.on_interval_expire(ch);
-        if let Some(ns) = g.tau.interval_ns(ch, g.clock.f_clk_hz()) {
-            g.pending.push(ScheduledWork {
-                at: ctx.now.saturating_add(Tick(ns)),
-                event: Box::new(TauExpire {
-                    peri: Arc::clone(&self.peri),
-                    channel: self.channel,
-                }),
-            });
+        let Some(period) = g.tau.interval_ns(ch, g.clock.f_clk_hz()) else {
+            g.tau_started[ch] = false;
+            return;
+        };
+        if period == 0 {
+            return;
         }
+        let mut next = self.at.saturating_add(Tick(period));
+        while next <= ctx.now {
+            next = next.saturating_add(Tick(period));
+        }
+        g.pending.push(ScheduledWork {
+            at: next,
+            event: Box::new(TauExpire {
+                peri: Arc::clone(&self.peri),
+                channel: self.channel,
+                generation: self.generation,
+                at: next,
+            }),
+        });
     }
 }
 

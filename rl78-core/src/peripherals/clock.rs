@@ -253,10 +253,11 @@ impl ClockGenerator {
         } else {
             0
         };
+        // SELLOSC=1 selects LOCO as fSUB (G23). SELLOSC=0 is XT1, unimplemented → 0.
         let f_sub = if self.cksel & CKSEL_SELLOSC != 0 {
-            0
-        } else {
             LOW_OSC
+        } else {
+            0
         };
         let f_oco = if self.ckc & CKC_MCM1 != 0 {
             mid_osc
@@ -317,10 +318,18 @@ mod tests {
     #[test]
     fn ckc_css_mirrors_to_cls() {
         let mut c = ClockGenerator::default();
+        c.write_u8(CKSEL, CKSEL_SELLOSC);
         c.write_u8(CKC, CKC_CSS);
         let v = c.read_u8(CKC);
         assert_ne!(v & CKC_CLS, 0);
         assert_ne!(v & CKC_CSS, 0);
         assert_eq!(c.f_clk_hz(), LOW_OSC);
+    }
+
+    #[test]
+    fn css_without_xt1_or_sellosc_stops_fclk() {
+        let mut c = ClockGenerator::default();
+        c.write_u8(CKC, CKC_CSS);
+        assert_eq!(c.f_clk_hz(), 0);
     }
 }
