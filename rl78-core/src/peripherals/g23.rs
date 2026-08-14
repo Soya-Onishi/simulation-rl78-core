@@ -2,12 +2,27 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{EventCtl, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom};
+use sim_kernel::{Addr, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom};
 
 use crate::map::MemoryLayout;
-use crate::peripherals::clock::{ClockBank, ClockGenerator, ClockMmio};
-use crate::peripherals::sau::{SauBank, SauMmio, SauUnit};
-use crate::peripherals::tau::{TauBank, TauMmio, TauUnit};
+use crate::peripherals::clock::{
+    ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
+};
+use crate::peripherals::sau::{SauCtrlMmio, SauSdrMmio, SauUnit};
+use crate::peripherals::tau::{TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
+
+/// G23 clock / SAU0 / TAU0 window bases (wiring, not device internals).
+const CLOCK_SFR: Addr = 0xFFFA0;
+const CLOCK_OSC_DIV: Addr = 0xF00F2;
+const CLOCK_HOCO: Addr = 0xF00A0;
+const CLOCK_TRIM: Addr = 0xF0212;
+const SAU_SDR01: Addr = 0xFFF10;
+const SAU_SDR23: Addr = 0xFFF44;
+const SAU_CTRL: Addr = 0xF0100;
+const TAU_TDR01: Addr = 0xFFF18;
+const TAU_TDR27: Addr = 0xFFF64;
+const TAU_CTRL: Addr = 0xF0180;
+const TAU_TIS: Addr = 0xF0074;
 
 /// Generic G23 core (clock / SAU0 / TAU0). Flash/RAM sizes come from the part.
 pub struct Rl78G23Core {
@@ -20,37 +35,55 @@ impl Rl78G23Core {
     #[must_use]
     pub fn new(ctl: EventCtl) -> Self {
         let clock = Arc::new(Mutex::new(ClockGenerator::new()));
-        let sau = Arc::new(Mutex::new(SauUnit::new(ctl.clone(), Arc::clone(&clock))));
-        let tau = Arc::new(Mutex::new(TauUnit::new(ctl, Arc::clone(&clock))));
+        let outputs = clock.lock().expect("clock").outputs();
+        let sau = Arc::new(Mutex::new(SauUnit::new(ctl.clone(), outputs.clone())));
+        let tau = Arc::new(Mutex::new(TauUnit::new(ctl, outputs)));
         Self { clock, sau, tau }
     }
 
     pub fn reset(&self, option_byte: Option<u8>) {
         self.clock.lock().expect("clock").reset(option_byte);
     }
+}
 
-    /// Map every clock/SAU/TAU window. Missing a [`ClockBank`]/[`SauBank`]/[`TauBank`]
-    /// variant in `ALL` is a compile-time hole; this loop is the runtime check.
-    pub fn map_into(&self, mut builder: MemoryMapBuilder) -> Result<MemoryMapBuilder, MapError> {
-        for bank in ClockBank::ALL {
-            builder = builder.map(
-                bank.base(),
-                Box::new(ClockMmio::new(Arc::clone(&self.clock), bank)),
-            )?;
-        }
-        for bank in SauBank::ALL {
-            builder = builder.map(
-                bank.base(),
-                Box::new(SauMmio::new(Arc::clone(&self.sau), bank)),
-            )?;
-        }
-        for bank in TauBank::ALL {
-            builder = builder.map(
-                bank.base(),
-                Box::new(TauMmio::new(Arc::clone(&self.tau), bank)),
-            )?;
-        }
-        Ok(builder)
+impl HasMemoryMap for Rl78G23Core {
+    fn memory_map(&self) -> Result<MemoryMapBuilder, MapError> {
+        MemoryMapBuilder::new()
+            .map(
+                CLOCK_SFR,
+                Box::new(ClockSfrMmio::new(Arc::clone(&self.clock))),
+            )?
+            .map(
+                CLOCK_OSC_DIV,
+                Box::new(ClockOscDivMmio::new(Arc::clone(&self.clock))),
+            )?
+            .map(
+                CLOCK_HOCO,
+                Box::new(ClockHocoMmio::new(Arc::clone(&self.clock))),
+            )?
+            .map(
+                CLOCK_TRIM,
+                Box::new(ClockTrimMmio::new(Arc::clone(&self.clock))),
+            )?
+            .map(
+                SAU_SDR01,
+                Box::new(SauSdrMmio::new(Arc::clone(&self.sau), 0)),
+            )?
+            .map(
+                SAU_SDR23,
+                Box::new(SauSdrMmio::new(Arc::clone(&self.sau), 2)),
+            )?
+            .map(SAU_CTRL, Box::new(SauCtrlMmio::new(Arc::clone(&self.sau))))?
+            .map(
+                TAU_TDR01,
+                Box::new(TauTdrMmio::new(Arc::clone(&self.tau), 0, 4)),
+            )?
+            .map(
+                TAU_TDR27,
+                Box::new(TauTdrMmio::new(Arc::clone(&self.tau), 2, 0x0C)),
+            )?
+            .map(TAU_CTRL, Box::new(TauCtrlMmio::new(Arc::clone(&self.tau))))?
+            .map(TAU_TIS, Box::new(TauTisMmio::new(Arc::clone(&self.tau))))
     }
 }
 
@@ -77,12 +110,23 @@ impl R7F100Gxl {
         let core = Rl78G23Core::new(ctl);
         core.reset(cfg.option_byte);
         let layout = Self::memory_layout();
-        let builder = MemoryMapBuilder::new().policy(cfg.unmapped);
-        let builder = core.map_into(builder)?;
-        let bus = builder
+        let bus = MemoryMapBuilder::new()
+            .policy(cfg.unmapped)
+            .merge(core.memory_map()?)?
             .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
             .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
             .build();
         Ok((Self { core }, bus))
+    }
+}
+
+impl HasMemoryMap for R7F100Gxl {
+    fn memory_map(&self) -> Result<MemoryMapBuilder, MapError> {
+        let layout = Self::memory_layout();
+        self.core.memory_map()?.merge(
+            MemoryMapBuilder::new()
+                .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
+                .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?,
+        )
     }
 }

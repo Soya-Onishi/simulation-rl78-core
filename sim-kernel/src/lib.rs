@@ -20,8 +20,8 @@ mod testing;
 
 pub use breakpoint::{Breakpoint, BreakpointId, BreakpointStore};
 pub use bus::{
-    Addr, BusError, MapError, MemoryBus, MemoryMapBuilder, MemoryMapped, Ram, Rom, UnmappedAccess,
-    UnmappedPolicy,
+    Addr, BusError, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, MemoryMapped, Ram, Rom,
+    UnmappedAccess, UnmappedPolicy,
 };
 pub use clock::{Tick, VirtualClock};
 pub use command::{Command, InspectResult, Response, SimError};

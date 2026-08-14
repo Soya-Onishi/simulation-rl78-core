@@ -21,7 +21,9 @@ pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
-pub use peripherals::{ClockGenerator, ClockTree, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit};
+pub use peripherals::{
+    ClockGenerator, ClockOutputs, ClockTree, Hertz, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
+};
 
 use sim_kernel::{
     EventCtl, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy,
@@ -59,7 +61,7 @@ where
     S: ProbeSink + 'static,
 {
     let bus = build_minimal_bus(&cfg, sink).expect("minimal memory map");
-    Machine::new(Rl78Cpu::new(), bus)
+    Machine::new(Rl78Cpu::new(), bus, EventCtl::new())
 }
 
 /// Assemble the M1 memory map without creating a [`Machine`].
@@ -88,7 +90,7 @@ pub struct G23MachineConfig {
 pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
     let ctl = EventCtl::new();
     let (_, bus) = R7F100Gxl::build(&cfg, ctl.clone()).expect("g23 memory map");
-    Machine::with_event_ctl(Rl78Cpu::new(), bus, ctl)
+    Machine::new(Rl78Cpu::new(), bus, ctl)
 }
 
 #[cfg(test)]

@@ -1,48 +1,18 @@
 //! Serial Array Unit 0 (QEMU `hw/rl78/sau.c`).
+//!
+//! Absolute SFR bases are applied by the SoC map, not this module.
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{Addr, BusError, EventCtl, EventCtx, MemoryMapped, SimEvent, Tick};
+use sim_kernel::{BusError, EventCtl, EventCtx, MemoryMapped, SimEvent, Tick};
 
-use crate::peripherals::clock::ClockGenerator;
+use crate::peripherals::clock::ClockOutputs;
 
 pub const CHANNELS: usize = 4;
 
 const SCR_TXE: u16 = 1 << 15;
 const SSR_TSF: u16 = 1 << 6;
 const SMR_CKS: u16 = 1 << 15;
-
-/// SAU MMIO windows (QEMU `rl78g23_register_sau`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SauBank {
-    /// `0xFFF10`, size 4: SDR0–1.
-    Sdr01,
-    /// `0xFFF44`, size 4: SDR2–3.
-    Sdr23,
-    /// `0xF0100`, size 0x40: SSR/SIR/SMR/SCR/SE/SS/ST/SPS/SO/SOE.
-    Ctrl,
-}
-
-impl SauBank {
-    pub const ALL: [Self; 3] = [Self::Sdr01, Self::Sdr23, Self::Ctrl];
-
-    #[must_use]
-    pub const fn base(self) -> Addr {
-        match self {
-            Self::Sdr01 => 0xFFF10,
-            Self::Sdr23 => 0xFFF44,
-            Self::Ctrl => 0xF0100,
-        }
-    }
-
-    #[must_use]
-    pub const fn size(self) -> u64 {
-        match self {
-            Self::Sdr01 | Self::Sdr23 => 4,
-            Self::Ctrl => 0x40,
-        }
-    }
-}
 
 pub struct SauUnit {
     sdr: [u16; CHANNELS],
@@ -57,12 +27,12 @@ pub struct SauUnit {
     busy: [bool; CHANNELS],
     tx_bytes: Vec<u8>,
     ctl: EventCtl,
-    clock: Arc<Mutex<ClockGenerator>>,
+    clock: ClockOutputs,
 }
 
 impl SauUnit {
     #[must_use]
-    pub fn new(ctl: EventCtl, clock: Arc<Mutex<ClockGenerator>>) -> Self {
+    pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
         Self {
             sdr: [0; CHANNELS],
             smr: [0x0020; CHANNELS],
@@ -92,9 +62,9 @@ impl SauUnit {
             && !self.busy[channel]
     }
 
-    fn frame_ns(&self, channel: usize) -> Option<u64> {
-        let f_clk_hz = self.clock.lock().expect("clock").f_clk_hz();
-        if f_clk_hz == 0 {
+    fn frame_time(&self, channel: usize) -> Option<Tick> {
+        let f_clk = self.clock.f_clk();
+        if f_clk.is_stopped() {
             return None;
         }
         let prs_sel = if self.smr[channel] & SMR_CKS != 0 {
@@ -103,24 +73,19 @@ impl SauUnit {
             0
         };
         let prs = u32::from(self.ck_divisor[prs_sel] & 0x0F);
-        let fmck = u64::from(f_clk_hz) / (1u64 << prs);
-        let div = u64::from(self.baud_div[channel]) + 1;
-        let ftclk = fmck / div / 2;
-        if ftclk == 0 {
-            return None;
-        }
-        Some(10u64.saturating_mul(1_000_000_000) / ftclk)
+        let cycles = (1u64 << prs) * (u64::from(self.baud_div[channel]) + 1) * 2 * 10;
+        f_clk.cycles_to_tick(cycles).filter(|t| !t.is_zero())
     }
 
     fn start_tx(&mut self, inner: &Arc<Mutex<SauUnit>>, channel: usize) {
         if !self.can_start_tx(channel) {
             return;
         }
-        let Some(ns) = self.frame_ns(channel) else {
+        let Some(period) = self.frame_time(channel) else {
             return;
         };
         self.busy[channel] = true;
-        let at = self.ctl.now().saturating_add(Tick(ns));
+        let at = self.ctl.now().saturating_add(period);
         self.ctl.schedule(
             at,
             Box::new(SauTxDone {
@@ -130,21 +95,23 @@ impl SauUnit {
         );
     }
 
-    fn sdr_channel(bank: SauBank, offset: u64) -> Option<usize> {
-        match bank {
-            SauBank::Sdr01 if offset < 4 => Some((offset / 2) as usize),
-            SauBank::Sdr23 if offset < 4 => Some(2 + (offset / 2) as usize),
-            _ => None,
+    fn read_sdr(&self, channel: usize) -> u16 {
+        if self.se & (1 << channel) == 0 {
+            self.sdr[channel] | (self.baud_div[channel] << 9)
+        } else {
+            self.sdr[channel] & 0x1FF
         }
     }
 
-    fn read16(&self, bank: SauBank, offset: u64) -> u16 {
-        if let Some(ch) = Self::sdr_channel(bank, offset) {
-            if self.se & (1 << ch) == 0 {
-                return self.sdr[ch] | (self.baud_div[ch] << 9);
-            }
-            return self.sdr[ch] & 0x1FF;
+    fn write_sdr(&mut self, channel: usize, value: u16, inner: &Arc<Mutex<SauUnit>>) {
+        if self.se & (1 << channel) == 0 {
+            self.baud_div[channel] = value >> 9;
         }
+        self.sdr[channel] = value & 0x1FF;
+        self.start_tx(inner, channel);
+    }
+
+    fn read_ctrl(&self, offset: u64) -> u16 {
         match offset {
             0x00 | 0x02 | 0x04 | 0x06 => {
                 let ch = (offset / 2) as usize;
@@ -165,15 +132,7 @@ impl SauUnit {
         }
     }
 
-    fn write16(&mut self, bank: SauBank, offset: u64, value: u16, inner: &Arc<Mutex<SauUnit>>) {
-        if let Some(ch) = Self::sdr_channel(bank, offset) {
-            if self.se & (1 << ch) == 0 {
-                self.baud_div[ch] = value >> 9;
-            }
-            self.sdr[ch] = value & 0x1FF;
-            self.start_tx(inner, ch);
-            return;
-        }
+    fn write_ctrl(&mut self, offset: u64, value: u16) {
         match offset {
             0x10 | 0x12 | 0x14 | 0x16 => {
                 self.smr[((offset - 0x10) / 2) as usize] = value;
@@ -210,79 +169,117 @@ impl SimEvent for SauTxDone {
     }
 }
 
-pub struct SauMmio {
-    inner: Arc<Mutex<SauUnit>>,
-    bank: SauBank,
-}
-
-impl SauMmio {
-    #[must_use]
-    pub fn new(inner: Arc<Mutex<SauUnit>>, bank: SauBank) -> Self {
-        Self { inner, bank }
+fn oob(offset: u64, len: usize) -> BusError {
+    BusError::OutOfRange {
+        addr: offset,
+        offset,
+        len,
     }
 }
 
-impl MemoryMapped for SauMmio {
+fn read_word_reg(
+    offset: u64,
+    buf: &mut [u8],
+    size: u64,
+    read16: impl Fn(u64) -> u16,
+) -> Result<(), BusError> {
+    match buf.len() {
+        2 if offset % 2 == 0 && offset.saturating_add(2) <= size => {
+            buf.copy_from_slice(&read16(offset).to_le_bytes());
+            Ok(())
+        }
+        1 if offset < size => {
+            let w = read16(offset & !1);
+            buf[0] = w.to_le_bytes()[(offset & 1) as usize];
+            Ok(())
+        }
+        len => Err(oob(offset, len)),
+    }
+}
+
+fn write_word_reg(
+    offset: u64,
+    buf: &[u8],
+    size: u64,
+    mut write16: impl FnMut(u64, u16),
+) -> Result<(), BusError> {
+    match buf.len() {
+        2 if offset % 2 == 0 && offset.saturating_add(2) <= size => {
+            write16(offset, u16::from_le_bytes([buf[0], buf[1]]));
+            Ok(())
+        }
+        len => Err(oob(offset, len)),
+    }
+}
+
+pub struct SauSdrMmio {
+    inner: Arc<Mutex<SauUnit>>,
+    channel_base: usize,
+}
+
+impl SauSdrMmio {
+    #[must_use]
+    pub fn new(inner: Arc<Mutex<SauUnit>>, channel_base: usize) -> Self {
+        Self {
+            inner,
+            channel_base,
+        }
+    }
+}
+
+impl MemoryMapped for SauSdrMmio {
     fn len(&self) -> u64 {
-        self.bank.size()
+        4
     }
 
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), BusError> {
-        if offset.saturating_add(buf.len() as u64) > self.bank.size() {
-            return Err(BusError::OutOfRange {
-                addr: offset,
-                offset,
-                len: buf.len(),
-            });
-        }
         let g = self.inner.lock().expect("sau");
-        match buf.len() {
-            1 => {
-                let w = g.read16(self.bank, offset & !1);
-                buf[0] = w.to_le_bytes()[(offset & 1) as usize];
-            }
-            2 if offset % 2 == 0 => buf.copy_from_slice(&g.read16(self.bank, offset).to_le_bytes()),
-            _ => {
-                return Err(BusError::OutOfRange {
-                    addr: offset,
-                    offset,
-                    len: buf.len(),
-                });
-            }
-        }
-        Ok(())
+        let base = self.channel_base;
+        read_word_reg(offset, buf, 4, |o| g.read_sdr(base + (o / 2) as usize))
     }
 
     fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError> {
-        if offset.saturating_add(buf.len() as u64) > self.bank.size() {
-            return Err(BusError::OutOfRange {
-                addr: offset,
-                offset,
-                len: buf.len(),
-            });
-        }
         let mut g = self.inner.lock().expect("sau");
-        match buf.len() {
-            2 if offset % 2 == 0 => {
-                let value = u16::from_le_bytes([buf[0], buf[1]]);
-                g.write16(self.bank, offset, value, &self.inner);
-            }
-            1 => {
-                return Err(BusError::OutOfRange {
-                    addr: offset,
-                    offset,
-                    len: 1,
-                });
-            }
-            _ => {
-                return Err(BusError::OutOfRange {
-                    addr: offset,
-                    offset,
-                    len: buf.len(),
-                });
-            }
-        }
-        Ok(())
+        let inner = Arc::clone(&self.inner);
+        let base = self.channel_base;
+        write_word_reg(offset, buf, 4, |o, v| {
+            g.write_sdr(base + (o / 2) as usize, v, &inner)
+        })
+    }
+
+    fn host_ptr(&mut self) -> Option<*mut u8> {
+        None
+    }
+
+    fn load(&mut self, offset: u64, _buf: &[u8]) -> Result<(), BusError> {
+        Err(BusError::NotLoadable { addr: offset })
+    }
+}
+
+pub struct SauCtrlMmio {
+    inner: Arc<Mutex<SauUnit>>,
+}
+
+impl SauCtrlMmio {
+    #[must_use]
+    pub fn new(inner: Arc<Mutex<SauUnit>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl MemoryMapped for SauCtrlMmio {
+    fn len(&self) -> u64 {
+        0x40
+    }
+
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), BusError> {
+        let g = self.inner.lock().expect("sau");
+        read_word_reg(offset, buf, 0x40, |o| g.read_ctrl(o))
+    }
+
+    fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), BusError> {
+        let mut g = self.inner.lock().expect("sau");
+        write_word_reg(offset, buf, 0x40, |o, v| g.write_ctrl(o, v))
     }
 
     fn host_ptr(&mut self) -> Option<*mut u8> {

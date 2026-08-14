@@ -4,7 +4,7 @@ use crate::bus::{MemoryBus, MemoryMapBuilder, Ram, UnmappedPolicy};
 use crate::clock::Tick;
 use crate::command::{Command, InspectResult, Response, SimError};
 use crate::cpu::RegId;
-use crate::event::{EventCtx, SimEvent};
+use crate::event::{EventCtl, EventCtx, SimEvent};
 use crate::machine::Machine;
 use crate::sim::{SimConfig, SimState, Simulator, spawn};
 use crate::stop::StopReason;
@@ -19,7 +19,7 @@ impl SimEvent for HaltAtFire {
 }
 
 fn empty_machine(cpu: ScriptedCpu) -> Machine<ScriptedCpu> {
-    Machine::new(cpu, MemoryBus::new())
+    Machine::new(cpu, MemoryBus::new(), EventCtl::new())
 }
 
 fn run_until_stop(sim: &mut Simulator<ScriptedCpu>) -> Response {
@@ -62,7 +62,7 @@ fn inspect_reg_and_mem_when_stopped() {
         .map(0x2000, Box::new(Ram::new(16)))
         .unwrap()
         .build();
-    let mut machine = Machine::new(ScriptedCpu::new(vec![]), bus);
+    let mut machine = Machine::new(ScriptedCpu::new(vec![]), bus, EventCtl::new());
     machine.write_reg(RegId(3), 0x55).unwrap();
     let mut sim = Simulator::new(machine, SimConfig::default());
 
@@ -148,6 +148,7 @@ fn mmio_write_reaches_ram() {
             data: b"hi".to_vec(),
         }]),
         bus,
+        EventCtl::new(),
     );
     let mut sim = Simulator::new(machine, SimConfig::default());
     assert_eq!(
@@ -186,6 +187,7 @@ fn trap_policy_stops_even_if_cpu_continues() {
             data: vec![0],
         }]),
         bus,
+        EventCtl::new(),
     );
     let mut sim = Simulator::new(machine, SimConfig::default());
     assert_eq!(

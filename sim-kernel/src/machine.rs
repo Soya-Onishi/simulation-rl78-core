@@ -24,15 +24,9 @@ pub struct Machine<C: Cpu> {
 }
 
 impl<C: Cpu> Machine<C> {
+    /// `ctl` must be the same [`EventCtl`] clone given to peripherals (`Arc` queue).
     #[must_use]
-    pub fn new(cpu: C, bus: MemoryBus) -> Self {
-        Self::with_event_ctl(cpu, bus, EventCtl::new())
-    }
-
-    /// Same as [`Self::new`], sharing [`EventCtl`] with peripherals that schedule
-    /// timers at MMIO time (QEMU `timer_mod`).
-    #[must_use]
-    pub fn with_event_ctl(mut cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
+    pub fn new(mut cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
         let mut bus = Box::new(bus);
         cpu.bind_memory(bus.as_mut());
         ctl.set_now(Tick::ZERO);
