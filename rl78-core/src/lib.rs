@@ -10,6 +10,7 @@ mod elf;
 mod ffi;
 mod magic;
 mod map;
+mod peripherals;
 
 pub use callbacks::{
     HostRegion, TLIB_PAGE_SIZE, clear_host_regions, clear_io_bus, map_host_region,
@@ -20,8 +21,14 @@ pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
+pub use peripherals::{
+    ClockGenerator, ClockOutputs, ClockTree, Hertz, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
+};
 
-use sim_kernel::{Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy};
+use sim_kernel::{
+    EventCtl, HasMemoryMap, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable, Rom,
+    UnmappedPolicy,
+};
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
 #[derive(Clone, Debug, Default)]
@@ -55,7 +62,7 @@ where
     S: ProbeSink + 'static,
 {
     let bus = build_minimal_bus(&cfg, sink).expect("minimal memory map");
-    Machine::new(Rl78Cpu::new(), bus)
+    Machine::new(Rl78Cpu::new(), bus, EventCtl::new())
 }
 
 /// Assemble the M1 memory map without creating a [`Machine`].
@@ -72,13 +79,41 @@ where
         .map(|b| b.build())
 }
 
+/// Knobs for [`g23_machine`]. Option byte `0x000C2` feeds the clock generator.
+#[derive(Clone, Debug, Default)]
+pub struct G23MachineConfig {
+    pub unmapped: UnmappedPolicy,
+    /// Flash option byte at `0x000C2` (`FRQSEL`). `None` matches QEMU when ROM is empty.
+    pub option_byte: Option<u8>,
+}
+
+/// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset.
+pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
+    let ctl = EventCtl::new();
+    let mut part = R7F100Gxl::new(ctl.clone(), cfg.option_byte);
+    part.reset();
+    let bus = part
+        .memory_map()
+        .expect("g23 memory map")
+        .policy(cfg.unmapped)
+        .build();
+    Machine::new(Rl78Cpu::new(), bus, ctl)
+}
+
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::BusError;
+    use sim_kernel::{BusError, HasMemoryMap, Resettable};
+
+    fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
+        let mut part = R7F100Gxl::new(ctl, None);
+        part.reset();
+        let bus = part.memory_map().unwrap().build();
+        (part, bus)
+    }
 
     #[derive(Clone, Default)]
     struct BufferSink {
@@ -138,5 +173,125 @@ mod tests {
         };
         assert_eq!(cfg.layout().ram_size, 4 * 1024);
         let _ = minimal_machine(cfg);
+    }
+
+    #[test]
+    fn g23_clock_and_timer_sfr_are_mapped() {
+        let ctl = EventCtl::new();
+        let (_, mut bus) = g23_part(ctl);
+        let mut ckc = [0u8; 1];
+        bus.read(0xFFFA4, &mut ckc).unwrap();
+        assert_eq!(ckc[0], 0);
+
+        bus.write(0xF00A8, &[1]).unwrap();
+        let mut hocodiv = [0u8; 1];
+        bus.read(0xF00A8, &mut hocodiv).unwrap();
+        assert_eq!(hocodiv[0], 1);
+
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        let mut te = [0u8; 2];
+        bus.read(0xF01B0, &mut te).unwrap();
+        assert_eq!(te, [1, 0]);
+
+        bus.write(0xFFF10, &[0x5A, 0x00]).unwrap();
+        let mut sdr = [0u8; 2];
+        bus.read(0xFFF10, &mut sdr).unwrap();
+        assert_eq!(sdr[0], 0x5A);
+    }
+
+    #[test]
+    fn r7f100gxl_ram_does_not_cover_sau() {
+        let layout = R7F100Gxl::memory_layout();
+        assert_eq!(layout.ram_base, 0xF3F00);
+        assert!(layout.ram_base > 0xF0100);
+    }
+
+    fn pump(bus: &mut MemoryBus, ctl: &EventCtl, now: sim_kernel::Tick) {
+        ctl.set_now(now);
+        loop {
+            let due = ctl.events().pop_due(now);
+            let Some((_, mut event)) = due else {
+                break;
+            };
+            let mut ctx = sim_kernel::EventCtx {
+                now,
+                bus,
+                stop: None,
+            };
+            event.fire(&mut ctx);
+        }
+    }
+
+    #[test]
+    fn tau_interval_sets_overflow_after_tdr_counts() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl.clone());
+        bus.write(0xFFF18, &[31, 0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(999));
+        let mut tsr = [0u8; 2];
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 0);
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 1);
+        assert!(part.core.tau.lock().unwrap().channel_enabled(0));
+    }
+
+    #[test]
+    fn tau_restart_after_tt_ignores_stale_deadline() {
+        let ctl = EventCtl::new();
+        let (_, mut bus) = g23_part(ctl.clone());
+        bus.write(0xFFF18, &[31, 0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        bus.write(0xF01B4, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
+        let mut tsr = [0u8; 2];
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 0);
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1999));
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 0);
+        pump(&mut bus, &ctl, sim_kernel::Tick(2000));
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 1);
+    }
+
+    #[test]
+    fn tau_arms_when_fclk_returns() {
+        let ctl = EventCtl::new();
+        let (_, mut bus) = g23_part(ctl.clone());
+        bus.write(0xFFFA1, &[0xC1]).unwrap();
+        bus.write(0xFFF18, &[31, 0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        bus.write(0xFFFA1, &[0xC0]).unwrap();
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
+        let mut tsr = [0u8; 2];
+        bus.read(0xF01A0, &mut tsr).unwrap();
+        assert_eq!(tsr[0] & 1, 1);
+    }
+
+    #[test]
+    fn sau_uart_tx_emits_byte_after_frame_time() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl.clone());
+        bus.write(0xF0118, &[0x04, 0x80]).unwrap();
+        bus.write(0xF012A, &[0x01, 0x00]).unwrap();
+        bus.write(0xF0122, &[0x01, 0x00]).unwrap();
+        bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        assert!(part.core.sau.lock().unwrap().tx_bytes().is_empty());
+        pump(&mut bus, &ctl, sim_kernel::Tick(624));
+        assert!(part.core.sau.lock().unwrap().tx_bytes().is_empty());
+        pump(&mut bus, &ctl, sim_kernel::Tick(625));
+        assert_eq!(part.core.sau.lock().unwrap().tx_bytes(), b"A");
     }
 }
