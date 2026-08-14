@@ -17,6 +17,7 @@ void rl78_host_write_double_word(uint64_t address, uint64_t value, uint64_t cpus
 void rl78_host_write_quad_word(uint64_t address, uint64_t value, uint64_t cpustate);
 void rl78_host_abort(char *message);
 void rl78_host_log(int32_t level, char *message);
+void rl78_host_on_rl78_irq_ack(uint32_t index);
 
 void rl78_tlib_callbacks_anchor(void) {}
 
@@ -73,4 +74,9 @@ void tlib_abort(char *message)
 void tlib_log(int32_t level, char *message)
 {
     rl78_host_log(level, message);
+}
+
+void tlib_on_rl78_irq_ack(uint32_t index)
+{
+    rl78_host_on_rl78_irq_ack(index);
 }

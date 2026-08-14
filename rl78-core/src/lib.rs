@@ -96,7 +96,10 @@ pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
         .policy(cfg.unmapped)
         .build();
     part.reset(&mut bus);
-    Machine::new(Rl78Cpu::new(), bus, ctl)
+    let irq = std::sync::Arc::clone(&part.core.irq);
+    let machine = Machine::new(Rl78Cpu::new(), bus, ctl);
+    peripherals::irq::bind_cpu_line(irq);
+    machine
 }
 
 #[cfg(test)]
