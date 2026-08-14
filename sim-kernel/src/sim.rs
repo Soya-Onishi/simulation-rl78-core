@@ -109,9 +109,9 @@ impl<C: Cpu> Simulator<C> {
 
         let ns_per_insn = self.cfg.ns_per_instruction.max(1);
         let budget_ns = {
-            let now = self.machine.clock().now();
-            self.machine
-                .events_mut()
+            let (_, _, clock, events, _) = self.machine.parts_mut();
+            let now = clock.now();
+            events
                 .next_deadline()
                 .unwrap_or(Tick::MAX)
                 .saturating_sub(now)
@@ -125,12 +125,12 @@ impl<C: Cpu> Simulator<C> {
             if budget_ns.is_zero() {
                 return None;
             }
-            self.machine.advance_clock(budget_ns);
+            self.machine.clock_mut().advance(budget_ns);
             return self.fire_due_events();
         }
 
         let result = {
-            let (cpu, _, _) = self.machine.parts_mut();
+            let (cpu, _, _, _, _) = self.machine.parts_mut();
             cpu.run_quantum(max_instructions)
         };
         if result.instructions == 0 && result.stop.is_none() {
@@ -138,7 +138,7 @@ impl<C: Cpu> Simulator<C> {
             return Some(Response::Stopped(StopReason::Halt));
         }
         let elapsed = Tick(result.instructions.saturating_mul(ns_per_insn));
-        self.machine.advance_clock(elapsed);
+        self.machine.clock_mut().advance(elapsed);
 
         if let Some(access) = self.machine.bus_mut().take_trap() {
             self.state = SimState::Stopped;
@@ -153,7 +153,7 @@ impl<C: Cpu> Simulator<C> {
             return Some(Response::Stopped(stop));
         }
 
-        self.fire_due_events()
+        None
     }
 
     fn fire_due_events(&mut self) -> Option<Response> {
@@ -223,7 +223,7 @@ impl<C: Cpu> Simulator<C> {
     }
 
     fn sync_breakpoints(&mut self) {
-        let (cpu, _, breakpoints) = self.machine.parts_mut();
+        let (cpu, _, _, _, breakpoints) = self.machine.parts_mut();
         let snapshot = breakpoints.as_slice().to_vec();
         cpu.sync_breakpoints(&snapshot);
     }
