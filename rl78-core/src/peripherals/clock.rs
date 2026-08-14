@@ -135,7 +135,7 @@ pub struct ClockGenerator {
 impl Default for ClockGenerator {
     fn default() -> Self {
         let mut s = Self::new();
-        s.reset(None);
+        Resettable::reset(&mut s);
         s
     }
 }
@@ -176,37 +176,6 @@ impl ClockGenerator {
         self.option_byte = option_byte;
     }
 
-    /// Apply option byte `0x000C2` (`FRQSEL`) and hold-reset the tree.
-    pub fn reset(&mut self, option_byte: Option<u8>) {
-        self.option_byte = option_byte;
-        Resettable::reset(self);
-    }
-
-    fn apply_reset(&mut self) {
-        let (hocodiv, frqsel3) = match self.option_byte {
-            Some(b) => (b & 0x07, (b & 0x08) != 0),
-            None => (0, true),
-        };
-        self.cmc = 0x00;
-        self.ckc = 0x00;
-        self.csc = 0xC0;
-        self.osts = 0x07;
-        self.cks0 = 0x00;
-        self.cks1 = 0x00;
-        self.osmc = 0x01;
-        self.cksel = 0x00;
-        self.hocodiv = hocodiv;
-        self.mocodiv = 0x00;
-        self.moscdiv = 0x00;
-        self.hiotrm = 0x20;
-        self.miotrm = 0x90;
-        self.liotrm = 0x80;
-        self.wkupmd = 0x00;
-        self.frqsel3 = frqsel3;
-        self.cmc_dirty = false;
-        self.commit();
-    }
-
     #[must_use]
     pub fn tree(&self) -> ClockTree {
         self.outputs.snapshot()
@@ -226,7 +195,7 @@ impl ClockGenerator {
             4 => self.read_ckc(),
             5 => self.cks0,
             6 => self.cks1,
-            8 => self.cksel,
+            7 => self.cksel,
             _ => 0,
         }
     }
@@ -245,7 +214,7 @@ impl ClockGenerator {
             4 => self.write_ckc(value),
             5 => self.cks0 = value,
             6 => self.cks1 = value,
-            8 => {
+            7 => {
                 self.cksel = (value & CKSEL_SELLOSC) | (self.cksel & !CKSEL_SELLOSC);
             }
             _ => {}
@@ -390,7 +359,28 @@ impl ClockGenerator {
 
 impl Resettable for ClockGenerator {
     fn reset(&mut self) {
-        self.apply_reset();
+        let (hocodiv, frqsel3) = match self.option_byte {
+            Some(b) => (b & 0x07, (b & 0x08) != 0),
+            None => (0, true),
+        };
+        self.cmc = 0x00;
+        self.ckc = 0x00;
+        self.csc = 0xC0;
+        self.osts = 0x07;
+        self.cks0 = 0x00;
+        self.cks1 = 0x00;
+        self.osmc = 0x01;
+        self.cksel = 0x00;
+        self.hocodiv = hocodiv;
+        self.mocodiv = 0x00;
+        self.moscdiv = 0x00;
+        self.hiotrm = 0x20;
+        self.miotrm = 0x90;
+        self.liotrm = 0x80;
+        self.wkupmd = 0x00;
+        self.frqsel3 = frqsel3;
+        self.cmc_dirty = false;
+        self.commit();
     }
 }
 
@@ -483,7 +473,7 @@ macro_rules! clock_byte_mmio {
     };
 }
 
-clock_byte_mmio!(ClockSfrMmio, 9, read_sfr, write_sfr);
+clock_byte_mmio!(ClockSfrMmio, 8, read_sfr, write_sfr);
 clock_byte_mmio!(ClockOscDivMmio, 2, read_osc_div, write_osc_div);
 clock_byte_mmio!(ClockHocoMmio, 9, read_hoco, write_hoco);
 clock_byte_mmio!(ClockTrimMmio, 4, read_trim, write_trim);
@@ -517,7 +507,7 @@ mod tests {
     #[test]
     fn ckc_css_mirrors_to_cls() {
         let mut c = ClockGenerator::default();
-        c.write_sfr(8, CKSEL_SELLOSC);
+        c.write_sfr(7, CKSEL_SELLOSC);
         c.write_sfr(4, CKC_CSS);
         let v = c.read_sfr(4);
         assert_ne!(v & CKC_CLS, 0);
@@ -537,7 +527,7 @@ mod tests {
         let c = ClockGenerator::new();
         assert_eq!(c.f_clk(), Hertz::ZERO);
         let mut c = ClockGenerator::new();
-        c.reset(None);
+        Resettable::reset(&mut c);
         assert_eq!(c.f_clk(), Hertz::from_mhz(32));
     }
 }
