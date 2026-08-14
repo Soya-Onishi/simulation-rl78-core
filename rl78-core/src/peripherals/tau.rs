@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
 
-use crate::peripherals::clock::ClockOutputs;
+use crate::peripherals::clock::{ClockOutputs, Cycles};
 
 pub const CHANNELS: usize = 8;
 
@@ -60,7 +60,7 @@ impl TauUnit {
     fn interval(&self, channel: usize) -> Option<Tick> {
         let cks = ((self.tmr[channel] >> 14) & 0x3) as u8;
         let div = u64::from(self.ck_divider(cks));
-        let counts = u64::from(self.tdr[channel]) + 1;
+        let counts = Cycles::from_count(u64::from(self.tdr[channel]) + 1);
         self.clock
             .f_clk()
             .cycles_to_tick(counts.saturating_mul(div))

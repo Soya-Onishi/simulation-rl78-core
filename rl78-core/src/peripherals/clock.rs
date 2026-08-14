@@ -4,7 +4,30 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{BusError, MemoryMapped, Resettable, Tick};
+use sim_kernel::{BusError, MemoryMapped, NS_PER_SEC, Resettable, Tick};
+
+/// Oscillator or baud-rate generator cycle count (not virtual time).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Cycles(pub u64);
+
+impl Cycles {
+    pub const ZERO: Self = Self(0);
+
+    #[must_use]
+    pub const fn from_count(n: u64) -> Self {
+        Self(n)
+    }
+
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn saturating_mul(self, n: u64) -> Self {
+        Self(self.0.saturating_mul(n))
+    }
+}
 
 /// Frequency in hertz. `ZERO` means the oscillator is stopped.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -12,6 +35,7 @@ pub struct Hertz(u32);
 
 impl Hertz {
     pub const ZERO: Self = Self(0);
+    const HZ_PER_MHZ: u32 = 1_000_000;
 
     #[must_use]
     pub const fn from_hz(hz: u32) -> Self {
@@ -20,7 +44,12 @@ impl Hertz {
 
     #[must_use]
     pub const fn from_mhz(mhz: u32) -> Self {
-        Self(mhz.saturating_mul(1_000_000))
+        Self(mhz.saturating_mul(Self::HZ_PER_MHZ))
+    }
+
+    #[must_use]
+    pub const fn as_hz(self) -> u32 {
+        self.0
     }
 
     #[must_use]
@@ -28,13 +57,43 @@ impl Hertz {
         self.0 == 0
     }
 
+    /// Integer clock divider (`f / n`). A zero divisor stops the output.
+    #[must_use]
+    pub const fn divide(self, divisor: u32) -> Self {
+        match self.0.checked_div(divisor) {
+            Some(hz) => Self(hz),
+            None => Self::ZERO,
+        }
+    }
+
+    /// Duration of one cycle at this frequency.
+    #[must_use]
+    pub const fn period(self) -> Option<Tick> {
+        self.cycles_to_tick(Cycles(1))
+    }
+
     /// `cycles` of this clock as virtual nanoseconds.
     #[must_use]
-    pub const fn cycles_to_tick(self, cycles: u64) -> Option<Tick> {
-        if self.0 == 0 {
+    pub const fn cycles_to_tick(self, cycles: Cycles) -> Option<Tick> {
+        match cycles
+            .0
+            .saturating_mul(NS_PER_SEC)
+            .checked_div(self.0 as u64)
+        {
+            Some(ns) => Some(Tick(ns)),
+            None => None,
+        }
+    }
+
+    /// Inverse of [`Self::cycles_to_tick`].
+    #[must_use]
+    pub const fn tick_to_cycles(self, tick: Tick) -> Option<Cycles> {
+        if self.is_stopped() {
             None
         } else {
-            Some(Tick(cycles.saturating_mul(1_000_000_000) / (self.0 as u64)))
+            Some(Cycles(
+                tick.as_ns().saturating_mul(self.0 as u64) / NS_PER_SEC,
+            ))
         }
     }
 }
@@ -481,6 +540,19 @@ clock_byte_mmio!(ClockTrimMmio, 4, read_trim, write_trim);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hertz_converts_cycles_and_ticks() {
+        let f = Hertz::from_mhz(32);
+        assert_eq!(f.as_hz(), 32_000_000);
+        assert_eq!(f.period(), Some(Tick(31)));
+        assert_eq!(f.cycles_to_tick(Cycles(32_000_000)), Some(Tick(NS_PER_SEC)));
+        assert_eq!(f.tick_to_cycles(Tick(NS_PER_SEC)), Some(Cycles(32_000_000)));
+        assert_eq!(f.divide(2), Hertz::from_mhz(16));
+        assert!(Hertz::ZERO.cycles_to_tick(Cycles(1)).is_none());
+        assert!(Hertz::ZERO.tick_to_cycles(Tick(1)).is_none());
+        assert!(Hertz::ZERO.period().is_none());
+    }
 
     #[test]
     fn reset_fclk_is_hoco_32mhz() {

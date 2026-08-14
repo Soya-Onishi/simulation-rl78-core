@@ -4,17 +4,36 @@
 //! schedule against it (cf. `timer_init_ns`). CPU progress is converted with
 //! [`crate::SimConfig::ns_per_instruction`] so instruction retirement and
 //! nanosecond timers share one timeline.
+//!
+//! [`Tick`] is both an **instant** (`VirtualClock::now`, event deadlines) and a
+//! **duration** on the same nanosecond scale (timer periods, `max_quantum`,
+//! `ns_per_instruction`). A separate `DurationNs` type is not used: durations
+//! add to instants with saturating `Add` / [`Tick::saturating_add`].
 
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
-/// Monotonic virtual time in nanoseconds.
+/// Nanoseconds in one SI second. Virtual time and [`Tick`] durations use this
+/// scale (same as QEMU `NANOSECONDS_PER_SECOND`).
+pub const NS_PER_SEC: u64 = 1_000_000_000;
+
+/// Monotonic virtual time, or a duration, in nanoseconds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Tick(pub u64);
 
 impl Tick {
     pub const ZERO: Self = Self(0);
     pub const MAX: Self = Self(u64::MAX);
+
+    #[must_use]
+    pub const fn from_ns(ns: u64) -> Self {
+        Self(ns)
+    }
+
+    #[must_use]
+    pub const fn as_ns(self) -> u64 {
+        self.0
+    }
 
     #[must_use]
     pub const fn saturating_add(self, other: Self) -> Self {
@@ -25,6 +44,23 @@ impl Tick {
     #[must_use]
     pub const fn saturating_sub(self, other: Self) -> Self {
         Self(self.0.saturating_sub(other.0))
+    }
+
+    #[must_use]
+    pub const fn saturating_mul(self, n: u64) -> Self {
+        Self(self.0.saturating_mul(n))
+    }
+
+    /// Floor-divide two durations (`budget / ns_per_instruction`).
+    ///
+    /// A zero divisor yields `0` so a misconfigured quantum cannot request an
+    /// unbounded instruction count.
+    #[must_use]
+    pub const fn saturating_div(self, rhs: Self) -> u64 {
+        match self.0.checked_div(rhs.0) {
+            Some(q) => q,
+            None => 0,
+        }
     }
 
     #[must_use]
@@ -99,5 +135,9 @@ mod tests {
         assert_eq!(Tick(2).saturating_sub(Tick(5)), Tick::ZERO);
         assert_eq!(Tick(10).min(Tick(3)), Tick(3));
         assert!(Tick::ZERO.is_zero());
+        assert_eq!(Tick(10).saturating_mul(3), Tick(30));
+        assert_eq!(Tick(10).saturating_div(Tick(3)), 3);
+        assert_eq!(Tick(10).saturating_div(Tick::ZERO), 0);
+        assert_eq!(Tick::from_ns(NS_PER_SEC).as_ns(), NS_PER_SEC);
     }
 }

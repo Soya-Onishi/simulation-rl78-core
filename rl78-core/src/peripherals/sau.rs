@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
 
-use crate::peripherals::clock::ClockOutputs;
+use crate::peripherals::clock::{ClockOutputs, Cycles};
 
 pub const CHANNELS: usize = 4;
 
@@ -82,7 +82,12 @@ impl SauUnit {
             0
         };
         let prs = u32::from(self.ck_divisor[prs_sel] & 0x0F);
-        let cycles = (1u64 << prs) * (u64::from(self.baud_div[channel]) + 1) * 2 * 10;
+        // Operation clock = f_clk / 2^prs; SDR baud divider; UART 10-bit frame
+        // with 2 clocks per bit (QEMU sau.c).
+        let cycles = Cycles::from_count(1u64 << prs)
+            .saturating_mul(u64::from(self.baud_div[channel]) + 1)
+            .saturating_mul(2)
+            .saturating_mul(10);
         f_clk.cycles_to_tick(cycles).filter(|t| !t.is_zero())
     }
 
