@@ -20,17 +20,12 @@ pub use cpu::Rl78Cpu;
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
-pub use map::{
-    ESFR_BASE, ESFR_SIZE, MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device, SFR_BASE,
-    SFR_SIZE,
+pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
+pub use peripherals::{ClockGenerator, ClockTree, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit};
+
+use sim_kernel::{
+    EventCtl, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy,
 };
-pub use peripherals::{ClockGenerator, ClockTree, G23Peripherals, SauUnit, TauUnit};
-
-use std::sync::{Arc, Mutex};
-
-use sim_kernel::{Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy};
-
-use crate::peripherals::g23_sfr_windows;
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
 #[derive(Clone, Debug, Default)]
@@ -89,34 +84,11 @@ pub struct G23MachineConfig {
     pub option_byte: Option<u8>,
 }
 
-/// RL78/G23-class machine: ROM/RAM + clock/SAU/TAU SFR windows (no Magic probe).
+/// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset.
 pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
-    let bus = build_g23_bus(&cfg).expect("g23 memory map");
-    Machine::new(Rl78Cpu::new(), bus)
-}
-
-/// Assemble the G23 map without creating a [`Machine`].
-pub fn build_g23_bus(cfg: &G23MachineConfig) -> Result<MemoryBus, MapError> {
-    build_g23_parts(cfg).map(|(bus, _)| bus)
-}
-
-/// Like [`build_g23_bus`], but also returns the shared peripheral block (tests / inspect).
-pub fn build_g23_parts(
-    cfg: &G23MachineConfig,
-) -> Result<(MemoryBus, Arc<Mutex<G23Peripherals>>), MapError> {
-    let layout = Rl78Device::R7F100Gxl.memory_layout();
-    let peri = Arc::new(Mutex::new(G23Peripherals::from_option_byte(
-        cfg.option_byte,
-    )));
-    let (sfr, esfr) = g23_sfr_windows(Arc::clone(&peri));
-    let bus = MemoryMapBuilder::new()
-        .policy(cfg.unmapped)
-        .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
-        .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
-        .map(ESFR_BASE, Box::new(esfr))?
-        .map(SFR_BASE, Box::new(sfr))?
-        .build();
-    Ok((bus, peri))
+    let ctl = EventCtl::new();
+    let (_, bus) = R7F100Gxl::build(&cfg, ctl.clone()).expect("g23 memory map");
+    Machine::with_event_ctl(Rl78Cpu::new(), bus, ctl)
 }
 
 #[cfg(test)]
@@ -189,7 +161,8 @@ mod tests {
 
     #[test]
     fn g23_clock_and_timer_sfr_are_mapped() {
-        let mut bus = build_g23_bus(&G23MachineConfig::default()).unwrap();
+        let ctl = EventCtl::new();
+        let (_, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl).unwrap();
         let mut ckc = [0u8; 1];
         bus.read(0xFFFA4, &mut ckc).unwrap();
         assert_eq!(ckc[0], 0);
@@ -212,18 +185,16 @@ mod tests {
 
     #[test]
     fn r7f100gxl_ram_does_not_cover_sau() {
-        let layout = Rl78Device::R7F100Gxl.memory_layout();
+        let layout = R7F100Gxl::memory_layout();
         assert_eq!(layout.ram_base, 0xF3F00);
         assert!(layout.ram_base > 0xF0100);
     }
 
-    fn pump(bus: &mut MemoryBus, events: &mut sim_kernel::EventQueue, now: sim_kernel::Tick) {
-        bus.set_now(now);
-        for work in bus.harvest_scheduled() {
-            events.schedule(work.at, work.event);
-        }
+    fn pump(bus: &mut MemoryBus, ctl: &EventCtl, now: sim_kernel::Tick) {
+        ctl.set_now(now);
         loop {
-            let Some((_, mut event)) = events.pop_due(now) else {
+            let due = ctl.events().pop_due(now);
+            let Some((_, mut event)) = due else {
                 break;
             };
             let mut ctx = sim_kernel::EventCtx {
@@ -232,63 +203,61 @@ mod tests {
                 stop: None,
             };
             event.fire(&mut ctx);
-            for work in bus.harvest_scheduled() {
-                events.schedule(work.at, work.event);
-            }
         }
     }
 
     #[test]
     fn tau_interval_sets_overflow_after_tdr_counts() {
-        let (mut bus, peri) = build_g23_parts(&G23MachineConfig::default()).unwrap();
-        let mut events = sim_kernel::EventQueue::new();
+        let ctl = EventCtl::new();
+        let (part, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
-        pump(&mut bus, &mut events, sim_kernel::Tick(0));
-        pump(&mut bus, &mut events, sim_kernel::Tick(999));
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(999));
         let mut tsr = [0u8; 2];
         bus.read(0xF01A0, &mut tsr).unwrap();
         assert_eq!(tsr[0] & 1, 0);
-        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
         bus.read(0xF01A0, &mut tsr).unwrap();
         assert_eq!(tsr[0] & 1, 1);
-        assert!(peri.lock().unwrap().tau.channel_enabled(0));
+        assert!(part.core.tau.lock().unwrap().channel_enabled(0));
     }
 
     #[test]
     fn tau_restart_after_tt_ignores_stale_deadline() {
-        let (mut bus, _) = build_g23_parts(&G23MachineConfig::default()).unwrap();
-        let mut events = sim_kernel::EventQueue::new();
+        let ctl = EventCtl::new();
+        let (_, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
-        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
         bus.write(0xF01B4, &[0x01, 0x00]).unwrap();
-        pump(&mut bus, &mut events, sim_kernel::Tick(0));
-        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
         let mut tsr = [0u8; 2];
         bus.read(0xF01A0, &mut tsr).unwrap();
         assert_eq!(tsr[0] & 1, 0);
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
-        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
-        pump(&mut bus, &mut events, sim_kernel::Tick(1999));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1999));
         bus.read(0xF01A0, &mut tsr).unwrap();
         assert_eq!(tsr[0] & 1, 0);
-        pump(&mut bus, &mut events, sim_kernel::Tick(2000));
+        pump(&mut bus, &ctl, sim_kernel::Tick(2000));
         bus.read(0xF01A0, &mut tsr).unwrap();
         assert_eq!(tsr[0] & 1, 1);
     }
 
     #[test]
     fn tau_arms_when_fclk_returns() {
-        let (mut bus, _) = build_g23_parts(&G23MachineConfig::default()).unwrap();
-        let mut events = sim_kernel::EventQueue::new();
+        let ctl = EventCtl::new();
+        let (_, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
         bus.write(0xFFFA1, &[0xC1]).unwrap();
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
-        pump(&mut bus, &mut events, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
         bus.write(0xFFFA1, &[0xC0]).unwrap();
-        pump(&mut bus, &mut events, sim_kernel::Tick(0));
-        pump(&mut bus, &mut events, sim_kernel::Tick(1000));
+        bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        pump(&mut bus, &ctl, sim_kernel::Tick(1000));
         let mut tsr = [0u8; 2];
         bus.read(0xF01A0, &mut tsr).unwrap();
         assert_eq!(tsr[0] & 1, 1);
@@ -296,17 +265,17 @@ mod tests {
 
     #[test]
     fn sau_uart_tx_emits_byte_after_frame_time() {
-        let (mut bus, peri) = build_g23_parts(&G23MachineConfig::default()).unwrap();
-        let mut events = sim_kernel::EventQueue::new();
+        let ctl = EventCtl::new();
+        let (part, mut bus) = R7F100Gxl::build(&G23MachineConfig::default(), ctl.clone()).unwrap();
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
         bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
-        pump(&mut bus, &mut events, sim_kernel::Tick(0));
-        assert!(peri.lock().unwrap().sau.tx_bytes().is_empty());
-        pump(&mut bus, &mut events, sim_kernel::Tick(624));
-        assert!(peri.lock().unwrap().sau.tx_bytes().is_empty());
-        pump(&mut bus, &mut events, sim_kernel::Tick(625));
-        assert_eq!(peri.lock().unwrap().sau.tx_bytes(), b"A");
+        pump(&mut bus, &ctl, sim_kernel::Tick(0));
+        assert!(part.core.sau.lock().unwrap().tx_bytes().is_empty());
+        pump(&mut bus, &ctl, sim_kernel::Tick(624));
+        assert!(part.core.sau.lock().unwrap().tx_bytes().is_empty());
+        pump(&mut bus, &ctl, sim_kernel::Tick(625));
+        assert_eq!(part.core.sau.lock().unwrap().tx_bytes(), b"A");
     }
 }

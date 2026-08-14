@@ -1,11 +1,13 @@
 //! Assembled simulation target: CPU + bus + clock + events.
 
+use std::sync::MutexGuard;
+
 use crate::breakpoint::BreakpointStore;
 use crate::bus::{Addr, BusError, MemoryBus};
-use crate::clock::VirtualClock;
+use crate::clock::{Tick, VirtualClock};
 use crate::command::SimError;
 use crate::cpu::{Cpu, RegId};
-use crate::event::{EventQueue, ScheduledWork};
+use crate::event::{EventCtl, EventQueue};
 
 /// Concrete machine owned exclusively by the simulation thread.
 ///
@@ -17,22 +19,35 @@ pub struct Machine<C: Cpu> {
     cpu: C,
     bus: Box<MemoryBus>,
     clock: VirtualClock,
-    events: EventQueue,
+    ctl: EventCtl,
     breakpoints: BreakpointStore,
 }
 
 impl<C: Cpu> Machine<C> {
     #[must_use]
-    pub fn new(mut cpu: C, bus: MemoryBus) -> Self {
+    pub fn new(cpu: C, bus: MemoryBus) -> Self {
+        Self::with_event_ctl(cpu, bus, EventCtl::new())
+    }
+
+    /// Same as [`Self::new`], sharing [`EventCtl`] with peripherals that schedule
+    /// timers at MMIO time (QEMU `timer_mod`).
+    #[must_use]
+    pub fn with_event_ctl(mut cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
         let mut bus = Box::new(bus);
         cpu.bind_memory(bus.as_mut());
+        ctl.set_now(Tick::ZERO);
         Self {
             cpu,
             bus,
             clock: VirtualClock::new(),
-            events: EventQueue::new(),
+            ctl,
             breakpoints: BreakpointStore::new(),
         }
+    }
+
+    #[must_use]
+    pub fn event_ctl(&self) -> &EventCtl {
+        &self.ctl
     }
 
     #[must_use]
@@ -58,12 +73,13 @@ impl<C: Cpu> Machine<C> {
         &self.clock
     }
 
-    pub fn clock_mut(&mut self) -> &mut VirtualClock {
-        &mut self.clock
+    pub fn advance_clock(&mut self, delta: Tick) {
+        self.clock.advance(delta);
+        self.ctl.set_now(self.clock.now());
     }
 
-    pub fn events_mut(&mut self) -> &mut EventQueue {
-        &mut self.events
+    pub fn events_mut(&mut self) -> MutexGuard<'_, EventQueue> {
+        self.ctl.events()
     }
 
     pub fn breakpoints_mut(&mut self) -> &mut BreakpointStore {
@@ -88,36 +104,10 @@ impl<C: Cpu> Machine<C> {
     }
 
     pub fn write_mem(&mut self, addr: Addr, buf: &[u8]) -> Result<(), BusError> {
-        self.bus.write(addr, buf)?;
-        self.harvest_device_events();
-        Ok(())
+        self.bus.write(addr, buf)
     }
 
-    /// Move device-armed deadlines onto the virtual event queue.
-    pub fn harvest_device_events(&mut self) {
-        let now = self.clock.now();
-        self.bus.set_now(now);
-        let work: Vec<ScheduledWork> = self.bus.harvest_scheduled();
-        for item in work {
-            self.events.schedule(item.at, item.event);
-        }
-    }
-
-    pub(crate) fn parts_mut(
-        &mut self,
-    ) -> (
-        &mut C,
-        &mut MemoryBus,
-        &mut VirtualClock,
-        &mut EventQueue,
-        &mut BreakpointStore,
-    ) {
-        (
-            &mut self.cpu,
-            &mut self.bus,
-            &mut self.clock,
-            &mut self.events,
-            &mut self.breakpoints,
-        )
+    pub(crate) fn parts_mut(&mut self) -> (&mut C, &mut MemoryBus, &mut BreakpointStore) {
+        (&mut self.cpu, &mut self.bus, &mut self.breakpoints)
     }
 }

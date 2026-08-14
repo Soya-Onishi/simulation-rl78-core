@@ -14,6 +14,8 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::bus::MemoryBus;
 use crate::clock::Tick;
@@ -34,12 +36,6 @@ pub struct EventCtx<'a> {
 /// Work scheduled against the virtual clock.
 pub trait SimEvent: Send {
     fn fire(&mut self, ctx: &mut EventCtx<'_>);
-}
-
-/// Deadline + callback produced by MMIO devices for the kernel event queue.
-pub struct ScheduledWork {
-    pub at: Tick,
-    pub event: Box<dyn SimEvent>,
 }
 
 struct Scheduled {
@@ -109,6 +105,10 @@ impl EventQueue {
     }
 
     /// Next non-cancelled deadline, if any.
+    ///
+    /// The pending set is a min-heap: after dropping cancelled entries, the
+    /// earliest deadline is the heap front (`O(1)` peek). Callers must not scan
+    /// the whole queue on each poll.
     pub fn next_deadline(&mut self) -> Option<Tick> {
         self.drop_stale();
         self.heap.peek().map(|Reverse(item)| item.at)
@@ -134,6 +134,54 @@ impl EventQueue {
             }
             break;
         }
+    }
+}
+
+/// Handle cloned into peripherals so they can `timer_mod` at MMIO time.
+///
+/// Time lives here (and on [`crate::VirtualClock`] in [`crate::Machine`]), not
+/// on [`crate::MemoryBus`]. Devices schedule/cancel directly; the kernel does
+/// not harvest every mapped region each poll.
+#[derive(Clone)]
+pub struct EventCtl {
+    now: Arc<AtomicU64>,
+    events: Arc<Mutex<EventQueue>>,
+}
+
+impl Default for EventCtl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventCtl {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            now: Arc::new(AtomicU64::new(0)),
+            events: Arc::new(Mutex::new(EventQueue::new())),
+        }
+    }
+
+    #[must_use]
+    pub fn now(&self) -> Tick {
+        Tick(self.now.load(Ordering::SeqCst))
+    }
+
+    pub fn set_now(&self, now: Tick) {
+        self.now.store(now.0, Ordering::SeqCst);
+    }
+
+    pub fn schedule(&self, at: Tick, event: Box<dyn SimEvent>) -> EventId {
+        self.events.lock().expect("event queue").schedule(at, event)
+    }
+
+    pub fn cancel(&self, id: EventId) -> bool {
+        self.events.lock().expect("event queue").cancel(id)
+    }
+
+    pub fn events(&self) -> MutexGuard<'_, EventQueue> {
+        self.events.lock().expect("event queue")
     }
 }
 
