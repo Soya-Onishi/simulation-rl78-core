@@ -1,0 +1,540 @@
+//! Typed unidirectional wires and ports (no shared voltage net).
+//!
+//! Construction is typestate: a wire is either 1 source to N sinks or N sources
+//! to 1 sink. [`WiringBuilder::build`] freezes ready wires into [`SolidWire`]s
+//! owned by [`crate::Machine`]. Peripherals keep [`SourcePort`] / sink callbacks
+//! on `Arc` to the same solid wire and `drive` without going through [`crate::EventCtx`].
+
+use std::cell::Cell;
+use std::sync::{Arc, Mutex};
+
+thread_local! {
+    static IN_DRIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Digital level used as a [`Wire`] payload.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DigitalLevel {
+    #[default]
+    HiZ,
+    High,
+    Low,
+}
+
+/// Analog voltage in microvolts, used as a [`Wire`] payload.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AnalogVoltage(pub i64);
+
+/// Nested `drive` dropped because another callback is already on the stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedDrive;
+
+/// Receives wire updates. Fan-out calls with `values.len() == 1` and `changed == 0`.
+pub trait WireSink<T>: Send + Sync {
+    fn on_input(&self, values: &[T], changed: usize);
+}
+
+struct Inner<T> {
+    values: Vec<T>,
+    sinks: Vec<Arc<dyn WireSink<T>>>,
+    nested: Vec<NestedDrive>,
+    frozen: bool,
+}
+
+impl<T: Default> Inner<T> {
+    fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            sinks: Vec::new(),
+            nested: Vec::new(),
+            frozen: false,
+        }
+    }
+}
+
+/// Frozen wire after [`WiringBuilder::build`]. Ports hold clones of this `Arc`.
+pub struct SolidWire<T> {
+    inner: Arc<Mutex<Inner<T>>>,
+}
+
+impl<T> Clone for SolidWire<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> SolidWire<T> {
+    fn from_inner(inner: Arc<Mutex<Inner<T>>>) -> Self {
+        Self { inner }
+    }
+}
+
+trait ErasedSolid: Send + Sync {
+    fn take_nested(&self) -> Vec<NestedDrive>;
+}
+
+/// Type-erased solid wire for the [`Wiring`] bag.
+pub struct WiringPiece {
+    inner: Arc<dyn ErasedSolid>,
+}
+
+impl<T: Send + 'static> ErasedSolid for SolidWire<T> {
+    fn take_nested(&self) -> Vec<NestedDrive> {
+        std::mem::take(&mut self.inner.lock().expect("wire").nested)
+    }
+}
+
+/// Source endpoint owned by a peripheral. `drive` pushes into the bound wire.
+pub struct SourcePort<T> {
+    wire: Option<SolidWire<T>>,
+    index: usize,
+}
+
+impl<T> Clone for SourcePort<T> {
+    fn clone(&self) -> Self {
+        Self {
+            wire: self.wire.clone(),
+            index: self.index,
+        }
+    }
+}
+
+impl<T> SourcePort<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            wire: None,
+            index: 0,
+        }
+    }
+}
+
+impl<T> Default for SourcePort<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Clone + Send + 'static> SourcePort<T> {
+    pub fn drive(&self, value: T) {
+        let Some(solid) = self.wire.as_ref() else {
+            return;
+        };
+        let nested = IN_DRIVE.with(|flag| {
+            if flag.get() {
+                true
+            } else {
+                flag.set(true);
+                false
+            }
+        });
+        if nested {
+            solid.inner.lock().expect("wire").nested.push(NestedDrive);
+            return;
+        }
+        struct DriveGuard;
+        impl Drop for DriveGuard {
+            fn drop(&mut self) {
+                IN_DRIVE.with(|flag| flag.set(false));
+            }
+        }
+        let _guard = DriveGuard;
+        let (snapshot, sinks, changed) = {
+            let mut g = solid.inner.lock().expect("wire");
+            if self.index < g.values.len() {
+                g.values[self.index] = value;
+            }
+            let changed = self.index;
+            (g.values.clone(), g.sinks.clone(), changed)
+        };
+        for sink in sinks {
+            sink.on_input(&snapshot, changed);
+        }
+    }
+}
+
+fn bind_source<T>(port: &mut SourcePort<T>, inner: &Arc<Mutex<Inner<T>>>, index: usize) {
+    port.wire = Some(SolidWire::from_inner(Arc::clone(inner)));
+    port.index = index;
+}
+
+/// Open wire (0 sources, 0 sinks).
+pub struct Wire<T> {
+    inner: Arc<Mutex<Inner<T>>>,
+}
+
+impl<T: Default + Clone + Send + 'static> Wire<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner::new())),
+        }
+    }
+
+    #[must_use]
+    pub fn source(self, port: &mut SourcePort<T>) -> OneSource<T> {
+        {
+            let mut g = self.inner.lock().expect("wire");
+            debug_assert!(!g.frozen);
+            let index = g.values.len();
+            g.values.push(T::default());
+            bind_source(port, &self.inner, index);
+        }
+        OneSource { inner: self.inner }
+    }
+
+    #[must_use]
+    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> OneSink<T> {
+        self.inner.lock().expect("wire").sinks.push(sink);
+        OneSink { inner: self.inner }
+    }
+}
+
+impl<T: Default> Default for Wire<T> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner::new())),
+        }
+    }
+}
+
+/// Typestate: one source, no sink yet.
+pub struct OneSource<T> {
+    inner: Arc<Mutex<Inner<T>>>,
+}
+
+impl<T: Default + Clone + Send + 'static> OneSource<T> {
+    #[must_use]
+    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> OneToOne<T> {
+        self.inner.lock().expect("wire").sinks.push(sink);
+        OneToOne { inner: self.inner }
+    }
+}
+
+/// Typestate: one sink, no source yet.
+pub struct OneSink<T> {
+    inner: Arc<Mutex<Inner<T>>>,
+}
+
+impl<T: Default + Clone + Send + 'static> OneSink<T> {
+    #[must_use]
+    pub fn source(self, port: &mut SourcePort<T>) -> OneToOne<T> {
+        {
+            let mut g = self.inner.lock().expect("wire");
+            let index = g.values.len();
+            g.values.push(T::default());
+            bind_source(port, &self.inner, index);
+        }
+        OneToOne { inner: self.inner }
+    }
+}
+
+/// Typestate: (1, 1). Next source → fan-in; next sink → fan-out. Ready for [`WiringBuilder::push`].
+pub struct OneToOne<T> {
+    inner: Arc<Mutex<Inner<T>>>,
+}
+
+impl<T: Default + Clone + Send + 'static> OneToOne<T> {
+    #[must_use]
+    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> FanOut<T> {
+        self.inner.lock().expect("wire").sinks.push(sink);
+        FanOut { inner: self.inner }
+    }
+
+    #[must_use]
+    pub fn source(self, port: &mut SourcePort<T>) -> FanIn<T> {
+        {
+            let mut g = self.inner.lock().expect("wire");
+            let index = g.values.len();
+            g.values.push(T::default());
+            bind_source(port, &self.inner, index);
+        }
+        FanIn { inner: self.inner }
+    }
+}
+
+/// 1 source, N≥2 sinks. Further sources are not available on this type.
+pub struct FanOut<T> {
+    inner: Arc<Mutex<Inner<T>>>,
+}
+
+impl<T: Clone + Send + 'static> FanOut<T> {
+    #[must_use]
+    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> Self {
+        self.inner.lock().expect("wire").sinks.push(sink);
+        self
+    }
+}
+
+/// N≥2 sources, 1 sink. Further sinks are not available on this type.
+pub struct FanIn<T> {
+    inner: Arc<Mutex<Inner<T>>>,
+}
+
+impl<T: Default + Clone + Send + 'static> FanIn<T> {
+    #[must_use]
+    pub fn source(self, port: &mut SourcePort<T>) -> Self {
+        {
+            let mut g = self.inner.lock().expect("wire");
+            let index = g.values.len();
+            g.values.push(T::default());
+            bind_source(port, &self.inner, index);
+        }
+        self
+    }
+}
+
+/// Wires that can enter the builder bag (1-1, 1-N, or N-1).
+pub trait ReadyWire: Sized {
+    fn freeze(self) -> WiringPiece;
+}
+
+fn freeze_inner<T: Send + 'static>(inner: Arc<Mutex<Inner<T>>>) -> WiringPiece {
+    inner.lock().expect("wire").frozen = true;
+    WiringPiece {
+        inner: Arc::new(SolidWire::from_inner(inner)),
+    }
+}
+
+impl<T: Send + 'static> ReadyWire for OneToOne<T> {
+    fn freeze(self) -> WiringPiece {
+        freeze_inner(self.inner)
+    }
+}
+
+impl<T: Send + 'static> ReadyWire for FanOut<T> {
+    fn freeze(self) -> WiringPiece {
+        freeze_inner(self.inner)
+    }
+}
+
+impl<T: Send + 'static> ReadyWire for FanIn<T> {
+    fn freeze(self) -> WiringPiece {
+        freeze_inner(self.inner)
+    }
+}
+
+/// Finished bag of solid wires owned by [`crate::Machine`].
+#[derive(Default)]
+pub struct Wiring {
+    wires: Vec<Arc<dyn ErasedSolid>>,
+}
+
+impl Wiring {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self { wires: Vec::new() }
+    }
+
+    pub fn take_nested_drives(&mut self) -> Vec<NestedDrive> {
+        let mut out = Vec::new();
+        for w in &self.wires {
+            out.extend(w.take_nested());
+        }
+        out
+    }
+}
+
+/// Collects ready typestate wires, then [`Self::build`]s a [`Wiring`].
+#[derive(Default)]
+pub struct WiringBuilder {
+    wires: Vec<Arc<dyn ErasedSolid>>,
+}
+
+impl WiringBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn push(mut self, wire: impl ReadyWire) -> Self {
+        self.wires.push(wire.freeze().inner);
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> Wiring {
+        Wiring { wires: self.wires }
+    }
+}
+
+/// Test source with a [`SourcePort`].
+pub struct DummySource<T> {
+    pub port: SourcePort<T>,
+}
+
+impl<T> DummySource<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            port: SourcePort::new(),
+        }
+    }
+}
+
+impl<T> Default for DummySource<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Test sink that records the last callback arguments.
+pub struct DummySink<T> {
+    last: Mutex<Option<(Vec<T>, usize)>>,
+}
+
+impl<T> DummySink<T> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            last: Mutex::new(None),
+        }
+    }
+
+    #[must_use]
+    pub fn callback(self: &Arc<Self>) -> Arc<dyn WireSink<T>>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        Arc::clone(self) as Arc<dyn WireSink<T>>
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<(Vec<T>, usize)>
+    where
+        T: Clone,
+    {
+        self.last.lock().expect("dummy sink").clone()
+    }
+}
+
+impl<T> Default for DummySink<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Clone + Send + Sync> WireSink<T> for DummySink<T> {
+    fn on_input(&self, values: &[T], changed: usize) {
+        *self.last.lock().expect("dummy sink") = Some((values.to_vec(), changed));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_to_one_notifies_sink() {
+        let mut src = DummySource::<u8>::new();
+        let sink = Arc::new(DummySink::<u8>::new());
+        let mut wiring = WiringBuilder::new()
+            .push(Wire::new().source(&mut src.port).sink(sink.callback()))
+            .build();
+        src.port.drive(0x5A);
+        assert_eq!(sink.last(), Some((vec![0x5A], 0)));
+        assert!(wiring.take_nested_drives().is_empty());
+    }
+
+    #[test]
+    fn fan_out_notifies_all_sinks() {
+        let mut src = DummySource::<DigitalLevel>::new();
+        let a = Arc::new(DummySink::<DigitalLevel>::new());
+        let b = Arc::new(DummySink::<DigitalLevel>::new());
+        let _wiring = WiringBuilder::new()
+            .push(
+                Wire::new()
+                    .source(&mut src.port)
+                    .sink(a.callback())
+                    .sink(b.callback()),
+            )
+            .build();
+        src.port.drive(DigitalLevel::High);
+        assert_eq!(a.last(), Some((vec![DigitalLevel::High], 0)));
+        assert_eq!(b.last(), Some((vec![DigitalLevel::High], 0)));
+    }
+
+    #[test]
+    fn fan_in_reports_all_values_and_changed_index() {
+        let mut s0 = DummySource::<u8>::new();
+        let mut s1 = DummySource::<u8>::new();
+        let sink = Arc::new(DummySink::<u8>::new());
+        let _wiring = WiringBuilder::new()
+            .push(
+                Wire::new()
+                    .sink(sink.callback())
+                    .source(&mut s0.port)
+                    .source(&mut s1.port),
+            )
+            .build();
+        s0.port.drive(1);
+        assert_eq!(sink.last(), Some((vec![1, 0], 0)));
+        s1.port.drive(2);
+        assert_eq!(sink.last(), Some((vec![1, 2], 1)));
+    }
+
+    #[test]
+    fn nested_drive_same_callback_stack_logs() {
+        let mut src = DummySource::<u8>::new();
+        let mut chained = DummySource::<u8>::new();
+        let chained_sink = Arc::new(DummySink::<u8>::new());
+
+        struct Chain {
+            next: Mutex<Option<SourcePort<u8>>>,
+            seen: DummySink<u8>,
+        }
+        impl WireSink<u8> for Chain {
+            fn on_input(&self, values: &[u8], changed: usize) {
+                self.seen.on_input(values, changed);
+                if let Some(v) = values.first().copied() {
+                    if let Some(port) = self.next.lock().expect("next").as_ref() {
+                        port.drive(v);
+                    }
+                }
+            }
+        }
+
+        let chain = Arc::new(Chain {
+            next: Mutex::new(None),
+            seen: DummySink::new(),
+        });
+        let mut wiring = WiringBuilder::new()
+            .push(
+                Wire::new()
+                    .source(&mut src.port)
+                    .sink(Arc::clone(&chain) as _),
+            )
+            .push(
+                Wire::new()
+                    .source(&mut chained.port)
+                    .sink(chained_sink.callback()),
+            )
+            .build();
+
+        *chain.next.lock().expect("next") = Some(chained.port.clone());
+
+        src.port.drive(7);
+        assert_eq!(chain.seen.last(), Some((vec![7], 0)));
+        assert!(chained_sink.last().is_none());
+        assert_eq!(wiring.take_nested_drives().len(), 1);
+    }
+
+    #[test]
+    fn analog_payload_is_independent_of_digital() {
+        let mut src = DummySource::<AnalogVoltage>::new();
+        let sink = Arc::new(DummySink::<AnalogVoltage>::new());
+        let _wiring = WiringBuilder::new()
+            .push(Wire::new().source(&mut src.port).sink(sink.callback()))
+            .build();
+        src.port.drive(AnalogVoltage(3_300_000));
+        assert_eq!(sink.last(), Some((vec![AnalogVoltage(3_300_000)], 0)));
+    }
+
+    #[test]
+    fn empty_wiring_builds() {
+        let _ = WiringBuilder::new().build();
+    }
+}

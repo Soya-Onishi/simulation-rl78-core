@@ -1,6 +1,7 @@
 //! Architecture-independent simulation kernel.
 //!
-//! Owns virtual time, the event queue, the memory bus contract, and the
+//! Owns virtual time, the event queue, the memory bus contract, typed pin
+//! wires, and the
 //! start/stop/quit control surface. Architecture crates implement [`Cpu`] and
 //! assemble a [`Machine`]; host front-ends (CLI now, GDB later) talk only
 //! through [`Command`] / [`Response`] on the simulation thread.
@@ -15,6 +16,7 @@ mod machine;
 mod reset;
 mod sim;
 mod stop;
+mod wiring;
 
 #[cfg(test)]
 mod testing;
@@ -34,6 +36,11 @@ pub use machine::Machine;
 pub use reset::Resettable;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
 pub use stop::StopReason;
+pub use wiring::{
+    AnalogVoltage, DigitalLevel, DummySink, DummySource, FanIn, FanOut, NestedDrive, OneSink,
+    OneSource, OneToOne, ReadyWire, SolidWire, SourcePort, Wire, WireSink, Wiring, WiringBuilder,
+    WiringPiece,
+};
 
 #[cfg(test)]
 mod sim_tests;
