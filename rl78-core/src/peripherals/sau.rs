@@ -12,27 +12,6 @@ use crate::peripherals::clock::{ClockOutputs, Cycles};
 
 pub const CHANNELS: usize = 4;
 
-/// Host-side UART TX capture filled by board wiring, not by [`SauUnit`].
-#[derive(Default)]
-pub struct ByteCapture {
-    bytes: Vec<u8>,
-}
-
-impl ByteCapture {
-    #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn push(&mut self, byte: u8) {
-        self.bytes.push(byte);
-    }
-
-    pub fn clear(&mut self) {
-        self.bytes.clear();
-    }
-}
-
 const SCR_TXE: u16 = 1 << 15;
 const SSR_TSF: u16 = 1 << 6;
 const SMR_CKS: u16 = 1 << 15;

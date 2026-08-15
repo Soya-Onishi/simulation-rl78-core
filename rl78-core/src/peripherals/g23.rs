@@ -7,11 +7,12 @@ use sim_kernel::{
 };
 
 use crate::map::MemoryLayout;
+use crate::peripherals::byte_capture::ByteCapture;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
 use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqId};
-use crate::peripherals::sau::{self, ByteCapture, SauCtrlMmio, SauSdrMmio, SauUnit};
+use crate::peripherals::sau::{self, SauCtrlMmio, SauSdrMmio, SauUnit};
 use crate::peripherals::tau::{self, TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
 
 /// G23 clock / SAU0 / TAU0 window bases (wiring, not device internals).
