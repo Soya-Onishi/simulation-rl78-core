@@ -261,6 +261,11 @@ impl IrqController {
         self.recompute();
     }
 
+    /// Wire sink: pulse on `line` latches IF.
+    pub fn on_input(this: &Arc<Mutex<Self>>, line: IrqId, _values: &[()], _changed: usize) {
+        this.lock().expect("irq").raise(line);
+    }
+
     pub fn ack(&mut self, irq: IrqId) {
         self.flag &= !(1u64 << irq.index());
         self.recompute();

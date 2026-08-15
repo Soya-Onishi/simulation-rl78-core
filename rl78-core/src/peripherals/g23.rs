@@ -55,23 +55,19 @@ fn wiring(
 ) {
     for (ch, id) in SAU_IRQ.iter().copied().enumerate() {
         let irq = Arc::clone(irq);
-        let _wire = Wire::new().source(sau.irq_source(ch)).sink(move |_, _| {
-            irq.lock().expect("irq").raise(id);
-        });
+        let _wire = Wire::new()
+            .source(sau.irq_source(ch))
+            .sink(move |values, changed| IrqController::on_input(&irq, id, values, changed));
     }
     let uart_tx = Arc::clone(uart_tx);
     let _tx = Wire::new()
         .source(sau.tx_source())
-        .sink(move |values, changed| {
-            if let Some(&b) = values.get(changed) {
-                uart_tx.lock().expect("tx").push(b);
-            }
-        });
+        .sink(move |values, changed| ByteCapture::on_input(&uart_tx, values, changed));
     for (ch, id) in TAU_IRQ.iter().copied().enumerate() {
         let irq = Arc::clone(irq);
-        let _wire = Wire::new().source(tau.irq_source(ch)).sink(move |_, _| {
-            irq.lock().expect("irq").raise(id);
-        });
+        let _wire = Wire::new()
+            .source(tau.irq_source(ch))
+            .sink(move |values, changed| IrqController::on_input(&irq, id, values, changed));
     }
 }
 

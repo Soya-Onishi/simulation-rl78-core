@@ -1,5 +1,7 @@
 //! Host-side byte capture attached as a board Wire sink (not a guest peripheral).
 
+use std::sync::{Arc, Mutex};
+
 /// Buffer filled by board UART TX wiring, not by a guest peripheral.
 #[derive(Default)]
 pub struct ByteCapture {
@@ -18,5 +20,12 @@ impl ByteCapture {
 
     pub fn clear(&mut self) {
         self.bytes.clear();
+    }
+
+    /// Wire sink: append the driven byte.
+    pub fn on_input(this: &Arc<Mutex<Self>>, values: &[u8], changed: usize) {
+        if let Some(&b) = values.get(changed) {
+            this.lock().expect("tx").push(b);
+        }
     }
 }
