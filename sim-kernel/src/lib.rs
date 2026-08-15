@@ -36,7 +36,7 @@ pub use machine::Machine;
 pub use reset::Resettable;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
 pub use stop::StopReason;
-pub use wiring::{AnalogVoltage, DigitalLevel, SolidWire, SourcePort, U0, U1, Wire, WireSink};
+pub use wiring::{AnalogVoltage, DigitalLevel, SolidWire, SourcePort, U0, U1, Wire};
 
 #[cfg(test)]
 mod sim_tests;

@@ -1,8 +1,8 @@
 //! Typed unidirectional wires and ports (no shared voltage net).
 //!
-//! Construction is typestate [`Wire<T, C, Sinks, Sources>`] (typenum counts):
+//! Construction is typestate [`Wire<T, Sinks, Sources>`] (typenum counts):
 //! either 1 source to N sinks or N sources to 1 sink. Ports keep `Arc`s to the
-//! same inner wire; `drive` invokes sinks with `&mut C` and no [`crate::EventCtx`].
+//! same inner wire; `drive` invokes sink closures immediately (no [`crate::EventCtx`]).
 
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -24,18 +24,14 @@ pub enum DigitalLevel {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnalogVoltage(pub i64);
 
-/// Receives wire updates. `C` is the sink-side component (`drive` passes `&mut C`).
-/// Fan-out calls with `values.len() == 1` and `changed == 0`.
-pub trait WireSink<T, C: ?Sized>: Send + Sync {
-    fn on_input(&self, component: &mut C, values: &[T], changed: usize);
-}
+type SinkFn<T> = Arc<dyn Fn(&[T], usize) + Send + Sync>;
 
-struct Inner<T, C: ?Sized> {
+struct Inner<T> {
     values: Vec<T>,
-    sinks: Vec<Arc<dyn WireSink<T, C>>>,
+    sinks: Vec<SinkFn<T>>,
 }
 
-impl<T, C: ?Sized> Inner<T, C> {
+impl<T> Inner<T> {
     fn new() -> Self {
         Self {
             values: Vec::new(),
@@ -45,11 +41,11 @@ impl<T, C: ?Sized> Inner<T, C> {
 }
 
 /// Shared wire state. [`SourcePort`] holds this `Arc` after [`Wire::source`].
-pub struct SolidWire<T, C: ?Sized> {
-    inner: Arc<Mutex<Inner<T, C>>>,
+pub struct SolidWire<T> {
+    inner: Arc<Mutex<Inner<T>>>,
 }
 
-impl<T, C: ?Sized> Clone for SolidWire<T, C> {
+impl<T> Clone for SolidWire<T> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -57,52 +53,49 @@ impl<T, C: ?Sized> Clone for SolidWire<T, C> {
     }
 }
 
-impl<T, C: ?Sized> SolidWire<T, C> {
-    fn from_inner(inner: Arc<Mutex<Inner<T, C>>>) -> Self {
+impl<T> SolidWire<T> {
+    fn from_inner(inner: Arc<Mutex<Inner<T>>>) -> Self {
         Self { inner }
     }
 }
 
 /// Source endpoint owned by a peripheral. `drive` pushes into the bound wire.
-pub struct SourcePort<T, C: ?Sized = ()> {
-    wire: Option<SolidWire<T, C>>,
+pub struct SourcePort<T> {
+    wire: Option<SolidWire<T>>,
     index: usize,
-    _c: PhantomData<fn(&mut C)>,
 }
 
-impl<T, C: ?Sized> Clone for SourcePort<T, C> {
+impl<T> Clone for SourcePort<T> {
     fn clone(&self) -> Self {
         Self {
             wire: self.wire.clone(),
             index: self.index,
-            _c: PhantomData,
         }
     }
 }
 
-impl<T, C: ?Sized> SourcePort<T, C> {
+impl<T> SourcePort<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
             wire: None,
             index: 0,
-            _c: PhantomData,
         }
     }
 }
 
-impl<T, C: ?Sized> Default for SourcePort<T, C> {
+impl<T> Default for SourcePort<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Send + 'static, C: ?Sized + 'static> SourcePort<T, C> {
-    /// Updates this source and invokes sinks immediately with `&mut component`.
+impl<T: Send + 'static> SourcePort<T> {
+    /// Updates this source and invokes sink closures immediately with `&values`.
     /// The inner lock is held for the callbacks so another `drive` on **this**
     /// wire deadlocks (`Mutex` is not reentrant). A sink may `drive` a **different**
     /// wire (combinational chain).
-    pub fn drive(&self, value: T, component: &mut C) {
+    pub fn drive(&self, value: T) {
         let Some(solid) = self.wire.as_ref() else {
             return;
         };
@@ -114,16 +107,12 @@ impl<T: Send + 'static, C: ?Sized + 'static> SourcePort<T, C> {
         let Inner { values, sinks } = &mut *g;
         let values = &*values;
         for sink in sinks.iter() {
-            sink.on_input(component, values, changed);
+            sink(values, changed);
         }
     }
 }
 
-fn bind_source<T, C: ?Sized>(
-    port: &mut SourcePort<T, C>,
-    inner: &Arc<Mutex<Inner<T, C>>>,
-    index: usize,
-) {
+fn bind_source<T>(port: &mut SourcePort<T>, inner: &Arc<Mutex<Inner<T>>>, index: usize) {
     port.wire = Some(SolidWire::from_inner(Arc::clone(inner)));
     port.index = index;
 }
@@ -136,16 +125,15 @@ fn bind_source<T, C: ?Sized>(
 ///
 /// TODO: info-level log (do not reject) when a generated wire stays source-only,
 /// sink-only, or empty (`Sinks::USIZE == 0` or `Sources::USIZE == 0`).
-pub struct Wire<T, C: ?Sized, Sinks: Unsigned, Sources: Unsigned> {
-    inner: Arc<Mutex<Inner<T, C>>>,
+pub struct Wire<T, Sinks: Unsigned, Sources: Unsigned> {
+    inner: Arc<Mutex<Inner<T>>>,
     _counts: PhantomData<(Sinks, Sources)>,
 }
 
-fn recast<T, C, Sinks, Sources, NewSinks, NewSources>(
-    wire: Wire<T, C, Sinks, Sources>,
-) -> Wire<T, C, NewSinks, NewSources>
+fn recast<T, Sinks, Sources, NewSinks, NewSources>(
+    wire: Wire<T, Sinks, Sources>,
+) -> Wire<T, NewSinks, NewSources>
 where
-    C: ?Sized,
     Sinks: Unsigned,
     Sources: Unsigned,
     NewSinks: Unsigned,
@@ -157,17 +145,14 @@ where
     }
 }
 
-fn attach_source<T: Default, C: ?Sized>(
-    inner: &Arc<Mutex<Inner<T, C>>>,
-    port: &mut SourcePort<T, C>,
-) {
+fn attach_source<T: Default>(inner: &Arc<Mutex<Inner<T>>>, port: &mut SourcePort<T>) {
     let mut g = inner.lock().expect("wire");
     let index = g.values.len();
     g.values.push(T::default());
     bind_source(port, inner, index);
 }
 
-impl<T, C: ?Sized> Wire<T, C, U0, U0> {
+impl<T> Wire<T, U0, U0> {
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -177,60 +162,54 @@ impl<T, C: ?Sized> Wire<T, C, U0, U0> {
     }
 }
 
-impl<T, C> Wire<T, C, U0, U0>
-where
-    T: Default + Send + 'static,
-    C: ?Sized + 'static,
-{
+impl<T: Default + Send + 'static> Wire<T, U0, U0> {
     #[must_use]
-    pub fn source(self, port: &mut SourcePort<T, C>) -> Wire<T, C, U0, U1> {
+    pub fn source(self, port: &mut SourcePort<T>) -> Wire<T, U0, U1> {
         attach_source(&self.inner, port);
         recast(self)
     }
 
     #[must_use]
-    pub fn sink<K>(self, sink: K) -> Wire<T, C, U1, U0>
+    pub fn sink<F>(self, sink: F) -> Wire<T, U1, U0>
     where
-        K: WireSink<T, C> + 'static,
+        F: Fn(&[T], usize) + Send + Sync + 'static,
     {
         self.inner.lock().expect("wire").sinks.push(Arc::new(sink));
         recast(self)
     }
 }
 
-impl<T, C: ?Sized> Default for Wire<T, C, U0, U0> {
+impl<T> Default for Wire<T, U0, U0> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// Extra source: only while there is exactly one sink (N→1, including 0→1 → 1→1).
-impl<T, C, Sources> Wire<T, C, U1, Sources>
+impl<T, Sources> Wire<T, U1, Sources>
 where
     T: Default + Send + 'static,
-    C: ?Sized + 'static,
     Sources: Unsigned + core::ops::Add<B1>,
     Add1<Sources>: Unsigned,
 {
     #[must_use]
-    pub fn source(self, port: &mut SourcePort<T, C>) -> Wire<T, C, U1, Add1<Sources>> {
+    pub fn source(self, port: &mut SourcePort<T>) -> Wire<T, U1, Add1<Sources>> {
         attach_source(&self.inner, port);
         recast(self)
     }
 }
 
 /// Extra sink: only while there is exactly one source (1→N, including 1→0 → 1→1).
-impl<T, C, Sinks> Wire<T, C, Sinks, U1>
+impl<T, Sinks> Wire<T, Sinks, U1>
 where
     T: Send + 'static,
-    C: ?Sized + 'static,
     Sinks: Unsigned + core::ops::Add<B1>,
     Add1<Sinks>: Unsigned,
 {
     #[must_use]
-    pub fn sink<K>(self, sink: K) -> Wire<T, C, Add1<Sinks>, U1>
+    pub fn sink<F>(self, sink: F) -> Wire<T, Add1<Sinks>, U1>
     where
-        K: WireSink<T, C> + 'static,
+        F: Fn(&[T], usize) + Send + Sync + 'static,
     {
         self.inner.lock().expect("wire").sinks.push(Arc::new(sink));
         recast(self)
@@ -241,11 +220,11 @@ where
 mod tests {
     use super::*;
 
-    struct DummySource<T, C: ?Sized = ()> {
-        port: SourcePort<T, C>,
+    struct DummySource<T> {
+        port: SourcePort<T>,
     }
 
-    impl<T, C: ?Sized> DummySource<T, C> {
+    impl<T> DummySource<T> {
         fn new() -> Self {
             Self {
                 port: SourcePort::new(),
@@ -265,24 +244,22 @@ mod tests {
         }
     }
 
-    impl<T> DummySink<T> {
+    impl<T: Clone + Send + Sync + 'static> DummySink<T> {
         fn new() -> Self {
             Self {
                 last: Arc::new(Mutex::new(None)),
             }
         }
 
-        fn last(&self) -> Option<(Vec<T>, usize)>
-        where
-            T: Clone,
-        {
+        fn last(&self) -> Option<(Vec<T>, usize)> {
             self.last.lock().expect("dummy sink").clone()
         }
-    }
 
-    impl<T: Clone + Send + Sync> WireSink<T, ()> for DummySink<T> {
-        fn on_input(&self, _component: &mut (), values: &[T], changed: usize) {
-            *self.last.lock().expect("dummy sink") = Some((values.to_vec(), changed));
+        fn callback(&self) -> impl Fn(&[T], usize) + Send + Sync + 'static {
+            let last = Arc::clone(&self.last);
+            move |values: &[T], changed| {
+                *last.lock().expect("dummy sink") = Some((values.to_vec(), changed));
+            }
         }
     }
 
@@ -290,8 +267,8 @@ mod tests {
     fn one_to_one_notifies_sink() {
         let mut src = DummySource::<u8>::new();
         let sink = DummySink::<u8>::new();
-        let _w = Wire::new().source(&mut src.port).sink(sink.clone());
-        src.port.drive(0x5A, &mut ());
+        let _w = Wire::new().source(&mut src.port).sink(sink.callback());
+        src.port.drive(0x5A);
         assert_eq!(sink.last(), Some((vec![0x5A], 0)));
     }
 
@@ -302,9 +279,9 @@ mod tests {
         let b = DummySink::<DigitalLevel>::new();
         let _w = Wire::new()
             .source(&mut src.port)
-            .sink(a.clone())
-            .sink(b.clone());
-        src.port.drive(DigitalLevel::High, &mut ());
+            .sink(a.callback())
+            .sink(b.callback());
+        src.port.drive(DigitalLevel::High);
         assert_eq!(a.last(), Some((vec![DigitalLevel::High], 0)));
         assert_eq!(b.last(), Some((vec![DigitalLevel::High], 0)));
     }
@@ -315,32 +292,13 @@ mod tests {
         let mut s1 = DummySource::<u8>::new();
         let sink = DummySink::<u8>::new();
         let _w = Wire::new()
-            .sink(sink.clone())
+            .sink(sink.callback())
             .source(&mut s0.port)
             .source(&mut s1.port);
-        s0.port.drive(1, &mut ());
+        s0.port.drive(1);
         assert_eq!(sink.last(), Some((vec![1, 0], 0)));
-        s1.port.drive(2, &mut ());
+        s1.port.drive(2);
         assert_eq!(sink.last(), Some((vec![1, 2], 1)));
-    }
-
-    #[test]
-    fn on_input_mutates_sink_component() {
-        struct Recv {
-            last: Option<(Vec<u8>, usize)>,
-        }
-        struct RecvPin;
-        impl WireSink<u8, Recv> for RecvPin {
-            fn on_input(&self, recv: &mut Recv, values: &[u8], changed: usize) {
-                recv.last = Some((values.to_vec(), changed));
-            }
-        }
-
-        let mut src = DummySource::<u8, Recv>::new();
-        let mut recv = Recv { last: None };
-        let _w = Wire::new().source(&mut src.port).sink(RecvPin);
-        src.port.drive(0x5A, &mut recv);
-        assert_eq!(recv.last, Some((vec![0x5A], 0)));
     }
 
     #[test]
@@ -348,35 +306,29 @@ mod tests {
         let mut src = DummySource::<u8>::new();
         let mut chained = DummySource::<u8>::new();
         let chained_sink = DummySink::<u8>::new();
+        let seen = DummySink::<u8>::new();
 
-        struct Chain {
-            next: Mutex<Option<SourcePort<u8>>>,
-            seen: DummySink<u8>,
-        }
-        impl WireSink<u8, ()> for Arc<Chain> {
-            fn on_input(&self, component: &mut (), values: &[u8], changed: usize) {
-                self.seen.on_input(component, values, changed);
+        let next = Arc::new(Mutex::new(None::<SourcePort<u8>>));
+        let next_bind = Arc::clone(&next);
+        let seen_cb = seen.callback();
+        let _w0 = Wire::new()
+            .source(&mut src.port)
+            .sink(move |values, changed| {
+                seen_cb(values, changed);
                 if let Some(v) = values.first().copied() {
-                    if let Some(port) = self.next.lock().expect("next").as_ref() {
-                        port.drive(v, component);
+                    if let Some(port) = next_bind.lock().expect("next").as_ref() {
+                        port.drive(v);
                     }
                 }
-            }
-        }
-
-        let chain = Arc::new(Chain {
-            next: Mutex::new(None),
-            seen: DummySink::new(),
-        });
-        let _w0 = Wire::new().source(&mut src.port).sink(Arc::clone(&chain));
+            });
         let _w1 = Wire::new()
             .source(&mut chained.port)
-            .sink(chained_sink.clone());
+            .sink(chained_sink.callback());
 
-        *chain.next.lock().expect("next") = Some(chained.port.clone());
+        *next.lock().expect("next") = Some(chained.port.clone());
 
-        src.port.drive(7, &mut ());
-        assert_eq!(chain.seen.last(), Some((vec![7], 0)));
+        src.port.drive(7);
+        assert_eq!(seen.last(), Some((vec![7], 0)));
         assert_eq!(chained_sink.last(), Some((vec![7], 0)));
     }
 
@@ -384,8 +336,22 @@ mod tests {
     fn analog_payload_is_independent_of_digital() {
         let mut src = DummySource::<AnalogVoltage>::new();
         let sink = DummySink::<AnalogVoltage>::new();
-        let _w = Wire::new().source(&mut src.port).sink(sink.clone());
-        src.port.drive(AnalogVoltage(3_300_000), &mut ());
+        let _w = Wire::new().source(&mut src.port).sink(sink.callback());
+        src.port.drive(AnalogVoltage(3_300_000));
         assert_eq!(sink.last(), Some((vec![AnalogVoltage(3_300_000)], 0)));
+    }
+
+    #[test]
+    fn sink_closure_owns_component() {
+        let mut src = DummySource::<u8>::new();
+        let recv = Arc::new(Mutex::new(None::<(Vec<u8>, usize)>));
+        let recv_cb = Arc::clone(&recv);
+        let _w = Wire::new()
+            .source(&mut src.port)
+            .sink(move |values, changed| {
+                *recv_cb.lock().expect("recv") = Some((values.to_vec(), changed));
+            });
+        src.port.drive(0x5A);
+        assert_eq!(*recv.lock().expect("recv"), Some((vec![0x5A], 0)));
     }
 }

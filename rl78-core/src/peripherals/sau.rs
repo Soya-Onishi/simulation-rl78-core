@@ -6,18 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
     BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, SourcePort, Tick,
-    WireSink,
 };
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
-use crate::peripherals::irq::{IrqController, IrqId, IrqPulse};
 
 pub const CHANNELS: usize = 4;
 
-pub(crate) const CHANNEL_IRQ: [IrqId; CHANNELS] =
-    [IrqId::INTST0, IrqId::INTSR0, IrqId::INTST1, IrqId::INTSR1];
-
-/// Host-side UART TX capture. `drive` passes `&mut Self` into [`CaptureTx`].
+/// Host-side UART TX capture filled by board wiring, not by [`SauUnit`].
 #[derive(Default)]
 pub struct ByteCapture {
     bytes: Vec<u8>,
@@ -29,19 +24,12 @@ impl ByteCapture {
         &self.bytes
     }
 
+    pub fn push(&mut self, byte: u8) {
+        self.bytes.push(byte);
+    }
+
     pub fn clear(&mut self) {
         self.bytes.clear();
-    }
-}
-
-/// Wire tag: append the driven byte onto [`ByteCapture`].
-pub struct CaptureTx;
-
-impl WireSink<u8, ByteCapture> for CaptureTx {
-    fn on_input(&self, capture: &mut ByteCapture, values: &[u8], changed: usize) {
-        if let Some(&b) = values.get(changed) {
-            capture.bytes.push(b);
-        }
     }
 }
 
@@ -62,21 +50,14 @@ pub struct SauUnit {
     busy: [bool; CHANNELS],
     ctl: EventCtl,
     clock: ClockOutputs,
-    irq_out: [SourcePort<IrqPulse, IrqController>; CHANNELS],
-    tx_out: SourcePort<u8, ByteCapture>,
-    irq: Arc<Mutex<IrqController>>,
-    uart_tx: Arc<Mutex<ByteCapture>>,
+    irq_out: [SourcePort<()>; CHANNELS],
+    tx_out: SourcePort<u8>,
     tx_id: [Option<EventId>; CHANNELS],
 }
 
 impl SauUnit {
     #[must_use]
-    pub fn new(
-        ctl: EventCtl,
-        clock: ClockOutputs,
-        irq: Arc<Mutex<IrqController>>,
-        uart_tx: Arc<Mutex<ByteCapture>>,
-    ) -> Self {
+    pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
         Self {
             sdr: [0; CHANNELS],
             smr: [0; CHANNELS],
@@ -92,19 +73,17 @@ impl SauUnit {
             clock,
             irq_out: std::array::from_fn(|_| SourcePort::new()),
             tx_out: SourcePort::new(),
-            irq,
-            uart_tx,
             tx_id: [None; CHANNELS],
         }
     }
 
     #[must_use]
-    pub fn irq_source(&mut self, channel: usize) -> &mut SourcePort<IrqPulse, IrqController> {
+    pub fn irq_source(&mut self, channel: usize) -> &mut SourcePort<()> {
         &mut self.irq_out[channel]
     }
 
     #[must_use]
-    pub fn tx_source(&mut self) -> &mut SourcePort<u8, ByteCapture> {
+    pub fn tx_source(&mut self) -> &mut SourcePort<u8> {
         &mut self.tx_out
     }
 
@@ -257,8 +236,8 @@ impl SimEvent for SauTxDone {
         g.busy[ch] = false;
         g.tx_id[ch] = None;
         let byte = (g.sdr[ch] & 0xFF) as u8;
-        g.tx_out.drive(byte, &mut g.uart_tx.lock().expect("tx"));
-        g.irq_out[ch].drive(IrqPulse, &mut g.irq.lock().expect("irq"));
+        g.tx_out.drive(byte);
+        g.irq_out[ch].drive(());
     }
 }
 

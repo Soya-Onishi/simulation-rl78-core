@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sim_kernel::{BusError, MemoryMapped, Resettable, WireSink};
+use sim_kernel::{BusError, MemoryMapped, Resettable};
 
 use crate::ffi;
 
@@ -153,16 +153,6 @@ impl IrqId {
 pub struct IrqRequest {
     pub index: IrqId,
     pub priority: u8,
-}
-
-/// Pulse on an IRQ wire: each `drive` is an edge. IF latch stays in [`IrqController`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct IrqPulse;
-
-impl WireSink<IrqPulse, IrqController> for IrqId {
-    fn on_input(&self, irq: &mut IrqController, _values: &[IrqPulse], _changed: usize) {
-        irq.raise(*self);
-    }
 }
 
 /// Sixteen consecutive IRQ lines packed in one IF/MK/PR word (`IF0`..`IF3`).

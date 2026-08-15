@@ -22,8 +22,8 @@ pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 pub use peripherals::{
-    ByteCapture, CaptureTx, ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqController,
-    IrqId, IrqPulse, IrqRequest, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
+    ByteCapture, ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqController, IrqId,
+    IrqRequest, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
 };
 
 use sim_kernel::{

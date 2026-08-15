@@ -47,4 +47,4 @@ Magic probe はゲスト物理 `0xF0000`（`MOV !addr16, #imm` が `addr16 | 0xF
 
 ## 配線（コード記述）
 
-ピン結線は設定ファイルを使わない。`Wire<T, C, Sinks, Sources>`（typenum）で 1→N または N→1 を組み立て、`SourcePort::drive(value, &mut component)` が `WireSink::on_input` にシンク側コンポーネントの `&mut C` を渡す。GPIO enable やプル／衝突の合成は後続の回路部品。
+ピン結線は設定ファイルを使わない。`Wire<T, Sinks, Sources>`（typenum）で 1→N または N→1 を組み立て、`SourcePort::drive` がボード側で登録したシンク閉包をすぐ呼ぶ。閉包がシンク側コンポーネントを捉える。GPIO enable やプル／衝突の合成は後続の回路部品。

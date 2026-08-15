@@ -10,8 +10,8 @@ use crate::map::MemoryLayout;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
-use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio};
-use crate::peripherals::sau::{self, ByteCapture, CaptureTx, SauCtrlMmio, SauSdrMmio, SauUnit};
+use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqId};
+use crate::peripherals::sau::{self, ByteCapture, SauCtrlMmio, SauSdrMmio, SauUnit};
 use crate::peripherals::tau::{self, TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
 
 /// G23 clock / SAU0 / TAU0 window bases (wiring, not device internals).
@@ -32,6 +32,54 @@ const IRQ_EDGE: Addr = 0xFFF38;
 /// Flash option byte `FRQSEL` (QEMU `rom_ptr(0x000C2)`).
 const OPTION_BYTE_ADDR: Addr = 0x000C2;
 
+/// Board net: sink-side instances live here, not inside SAU/TAU.
+struct G23Wiring {
+    irq: Arc<Mutex<IrqController>>,
+    uart_tx: Arc<Mutex<ByteCapture>>,
+}
+
+const SAU_IRQ: [IrqId; sau::CHANNELS] =
+    [IrqId::INTST0, IrqId::INTSR0, IrqId::INTST1, IrqId::INTSR1];
+
+const TAU_IRQ: [IrqId; tau::CHANNELS] = [
+    IrqId::INTTM00,
+    IrqId::INTTM01,
+    IrqId::INTTM02,
+    IrqId::INTTM03,
+    IrqId::INTTM04,
+    IrqId::INTTM05,
+    IrqId::INTTM06,
+    IrqId::INTTM07,
+];
+
+impl G23Wiring {
+    fn attach_sau(&self, sau: &mut SauUnit) {
+        for (ch, id) in SAU_IRQ.iter().copied().enumerate() {
+            let irq = Arc::clone(&self.irq);
+            let _wire = Wire::new().source(sau.irq_source(ch)).sink(move |_, _| {
+                irq.lock().expect("irq").raise(id);
+            });
+        }
+        let uart_tx = Arc::clone(&self.uart_tx);
+        let _tx = Wire::new()
+            .source(sau.tx_source())
+            .sink(move |values, changed| {
+                if let Some(&b) = values.get(changed) {
+                    uart_tx.lock().expect("tx").push(b);
+                }
+            });
+    }
+
+    fn attach_tau(&self, tau: &mut TauUnit) {
+        for (ch, id) in TAU_IRQ.iter().copied().enumerate() {
+            let irq = Arc::clone(&self.irq);
+            let _wire = Wire::new().source(tau.irq_source(ch)).sink(move |_, _| {
+                irq.lock().expect("irq").raise(id);
+            });
+        }
+    }
+}
+
 /// Generic G23 core (clock / SAU0 / TAU0 / IRQ). Flash/RAM sizes come from the part.
 pub struct Rl78G23Core {
     pub clock: Arc<Mutex<ClockGenerator>>,
@@ -48,24 +96,14 @@ impl Rl78G23Core {
         let outputs = clock.lock().expect("clock").outputs();
         let irq = Arc::new(Mutex::new(IrqController::new()));
         let uart_tx = Arc::new(Mutex::new(ByteCapture::default()));
-        let mut sau_unit = SauUnit::new(
-            ctl.clone(),
-            outputs.clone(),
-            Arc::clone(&irq),
-            Arc::clone(&uart_tx),
-        );
-        let mut tau_unit = TauUnit::new(ctl, outputs, Arc::clone(&irq));
-        for ch in 0..sau::CHANNELS {
-            let _wire = Wire::new()
-                .source(sau_unit.irq_source(ch))
-                .sink(sau::CHANNEL_IRQ[ch]);
-        }
-        let _tx = Wire::new().source(sau_unit.tx_source()).sink(CaptureTx);
-        for ch in 0..tau::CHANNELS {
-            let _wire = Wire::new()
-                .source(tau_unit.irq_source(ch))
-                .sink(tau::CHANNEL_IRQ[ch]);
-        }
+        let wiring = G23Wiring {
+            irq: Arc::clone(&irq),
+            uart_tx: Arc::clone(&uart_tx),
+        };
+        let mut sau_unit = SauUnit::new(ctl.clone(), outputs.clone());
+        let mut tau_unit = TauUnit::new(ctl, outputs);
+        wiring.attach_sau(&mut sau_unit);
+        wiring.attach_tau(&mut tau_unit);
         Self {
             clock,
             sau: Arc::new(Mutex::new(sau_unit)),
