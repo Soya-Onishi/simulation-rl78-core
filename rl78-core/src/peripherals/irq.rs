@@ -155,23 +155,6 @@ pub struct IrqRequest {
     pub priority: u8,
 }
 
-/// Shared raise port for TAU/SAU (QEMU `irq-in`).
-#[derive(Clone)]
-pub struct IrqSink {
-    inner: Arc<Mutex<IrqController>>,
-}
-
-impl IrqSink {
-    #[must_use]
-    pub fn new(inner: Arc<Mutex<IrqController>>) -> Self {
-        Self { inner }
-    }
-
-    pub fn raise(&self, irq: IrqId) {
-        self.inner.lock().expect("irq").raise(irq);
-    }
-}
-
 /// Sixteen consecutive IRQ lines packed in one IF/MK/PR word (`IF0`..`IF3`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct IrqGroup(u8);
@@ -276,6 +259,11 @@ impl IrqController {
     pub fn raise(&mut self, irq: IrqId) {
         self.flag |= 1u64 << irq.index();
         self.recompute();
+    }
+
+    /// Wire sink: pulse on `line` latches IF.
+    pub fn on_input(this: &Arc<Mutex<Self>>, line: IrqId, _values: &[()], _changed: usize) {
+        this.lock().expect("irq").raise(line);
     }
 
     pub fn ack(&mut self, irq: IrqId) {

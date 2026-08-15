@@ -4,14 +4,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
+use sim_kernel::{
+    BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, SourcePort, Tick,
+};
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
-use crate::peripherals::irq::{IrqId, IrqSink};
 
 pub const CHANNELS: usize = 4;
-
-const CHANNEL_IRQ: [IrqId; CHANNELS] = [IrqId::INTST0, IrqId::INTSR0, IrqId::INTST1, IrqId::INTSR1];
 
 const SCR_TXE: u16 = 1 << 15;
 const SSR_TSF: u16 = 1 << 6;
@@ -28,16 +27,16 @@ pub struct SauUnit {
     soe: u16,
     sol: u16,
     busy: [bool; CHANNELS],
-    tx_bytes: Vec<u8>,
     ctl: EventCtl,
     clock: ClockOutputs,
-    irq: IrqSink,
+    irq_out: [SourcePort<()>; CHANNELS],
+    tx_out: SourcePort<u8>,
     tx_id: [Option<EventId>; CHANNELS],
 }
 
 impl SauUnit {
     #[must_use]
-    pub fn new(ctl: EventCtl, clock: ClockOutputs, irq: IrqSink) -> Self {
+    pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
         Self {
             sdr: [0; CHANNELS],
             smr: [0; CHANNELS],
@@ -49,12 +48,22 @@ impl SauUnit {
             soe: 0,
             sol: 0,
             busy: [false; CHANNELS],
-            tx_bytes: Vec::new(),
             ctl,
             clock,
-            irq,
+            irq_out: std::array::from_fn(|_| SourcePort::new()),
+            tx_out: SourcePort::new(),
             tx_id: [None; CHANNELS],
         }
+    }
+
+    #[must_use]
+    pub fn irq_source(&mut self, channel: usize) -> &mut SourcePort<()> {
+        &mut self.irq_out[channel]
+    }
+
+    #[must_use]
+    pub fn tx_source(&mut self) -> &mut SourcePort<u8> {
+        &mut self.tx_out
     }
 
     fn cancel_tx(&mut self, channel: usize) {
@@ -62,11 +71,6 @@ impl SauUnit {
             self.ctl.cancel(id);
         }
         self.busy[channel] = false;
-    }
-
-    #[must_use]
-    pub fn tx_bytes(&self) -> &[u8] {
-        &self.tx_bytes
     }
 
     fn can_start_tx(&self, channel: usize) -> bool {
@@ -196,7 +200,6 @@ impl Resettable for SauUnit {
         self.so = 0;
         self.soe = 0;
         self.sol = 0;
-        self.tx_bytes.clear();
     }
 }
 
@@ -212,8 +215,8 @@ impl SimEvent for SauTxDone {
         g.busy[ch] = false;
         g.tx_id[ch] = None;
         let byte = (g.sdr[ch] & 0xFF) as u8;
-        g.tx_bytes.push(byte);
-        g.irq.raise(CHANNEL_IRQ[ch]);
+        g.tx_out.drive(byte);
+        g.irq_out[ch].drive(());
     }
 }
 
