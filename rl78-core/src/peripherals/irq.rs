@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sim_kernel::{BusError, MemoryMapped, Resettable};
+use sim_kernel::{BusError, MemoryMapped, Resettable, SourcePort, Wire, WireSink};
 
 use crate::ffi;
 
@@ -155,21 +155,38 @@ pub struct IrqRequest {
     pub priority: u8,
 }
 
-/// Shared raise port for TAU/SAU (QEMU `irq-in`).
-#[derive(Clone)]
-pub struct IrqSink {
+/// Pulse on an IRQ wire: each `drive` is an edge. IF latch stays in [`IrqController`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IrqPulse;
+
+/// Per-channel IRQ sink (one Wire per `IrqId`). Aggregates into [`IrqController::raise`].
+pub struct IrqChannelSink {
     inner: Arc<Mutex<IrqController>>,
+    id: IrqId,
 }
 
-impl IrqSink {
+impl IrqChannelSink {
     #[must_use]
-    pub fn new(inner: Arc<Mutex<IrqController>>) -> Self {
-        Self { inner }
+    pub fn new(inner: Arc<Mutex<IrqController>>, id: IrqId) -> Arc<Self> {
+        Arc::new(Self { inner, id })
     }
+}
 
-    pub fn raise(&self, irq: IrqId) {
-        self.inner.lock().expect("irq").raise(irq);
+impl WireSink<IrqPulse> for IrqChannelSink {
+    fn on_input(&self, _values: &[IrqPulse], _changed: usize) {
+        self.inner.lock().expect("irq").raise(self.id);
     }
+}
+
+/// Bind a peripheral IRQ source to this controller line (1→1 pulse wire).
+pub(crate) fn connect_irq_line(
+    port: &mut SourcePort<IrqPulse>,
+    irq: &Arc<Mutex<IrqController>>,
+    id: IrqId,
+) {
+    let _wire = Wire::new()
+        .source(port)
+        .sink(IrqChannelSink::new(Arc::clone(irq), id) as Arc<dyn WireSink<IrqPulse>>);
 }
 
 /// Sixteen consecutive IRQ lines packed in one IF/MK/PR word (`IF0`..`IF3`).

@@ -4,14 +4,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, Tick};
+use sim_kernel::{
+    BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, SourcePort, Tick,
+};
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
-use crate::peripherals::irq::{IrqId, IrqSink};
+use crate::peripherals::irq::{IrqId, IrqPulse};
 
 pub const CHANNELS: usize = 8;
 
-const CHANNEL_IRQ: [IrqId; CHANNELS] = [
+pub(crate) const CHANNEL_IRQ: [IrqId; CHANNELS] = [
     IrqId::INTTM00,
     IrqId::INTTM01,
     IrqId::INTTM02,
@@ -37,14 +39,14 @@ pub struct TauUnit {
     tis1: u8,
     ctl: EventCtl,
     clock: ClockOutputs,
-    irq: IrqSink,
+    irq_out: [SourcePort<IrqPulse>; CHANNELS],
     expire_id: [Option<EventId>; CHANNELS],
     generation: [u32; CHANNELS],
 }
 
 impl TauUnit {
     #[must_use]
-    pub fn new(ctl: EventCtl, clock: ClockOutputs, irq: IrqSink) -> Self {
+    pub fn new(ctl: EventCtl, clock: ClockOutputs) -> Self {
         Self {
             tdr: [0; CHANNELS],
             tcr: [0; CHANNELS],
@@ -60,10 +62,15 @@ impl TauUnit {
             tis1: 0,
             ctl,
             clock,
-            irq,
+            irq_out: std::array::from_fn(|_| SourcePort::new()),
             expire_id: [None; CHANNELS],
             generation: [0; CHANNELS],
         }
+    }
+
+    #[must_use]
+    pub fn irq_source(&mut self, channel: usize) -> &mut SourcePort<IrqPulse> {
+        &mut self.irq_out[channel]
     }
 
     #[must_use]
@@ -234,7 +241,7 @@ impl SimEvent for TauExpire {
         }
         g.tsr[ch] |= 0x0001;
         g.tcr[ch] = g.tdr[ch];
-        g.irq.raise(CHANNEL_IRQ[ch]);
+        g.irq_out[ch].drive(IrqPulse);
         let Some(period) = g.interval(ch) else {
             g.expire_id[ch] = None;
             return;

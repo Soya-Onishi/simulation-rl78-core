@@ -8,6 +8,6 @@ mod tau;
 
 pub use clock::{ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz};
 pub use g23::{R7F100Gxl, Rl78G23Core};
-pub use irq::{IrqController, IrqId, IrqRequest, IrqSink};
-pub use sau::SauUnit;
+pub use irq::{IrqChannelSink, IrqController, IrqId, IrqPulse, IrqRequest};
+pub use sau::{ByteCapture, SauUnit};
 pub use tau::TauUnit;

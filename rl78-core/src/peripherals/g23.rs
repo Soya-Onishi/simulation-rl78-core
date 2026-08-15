@@ -4,15 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
     Addr, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable, Rom,
+    Wire, WireSink,
 };
 
 use crate::map::MemoryLayout;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
-use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqSink};
-use crate::peripherals::sau::{SauCtrlMmio, SauSdrMmio, SauUnit};
-use crate::peripherals::tau::{TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
+use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, connect_irq_line};
+use crate::peripherals::sau::{self, ByteCapture, SauCtrlMmio, SauSdrMmio, SauUnit};
+use crate::peripherals::tau::{self, TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
 
 /// G23 clock / SAU0 / TAU0 window bases (wiring, not device internals).
 const CLOCK_SFR: Addr = 0xFFFA0;
@@ -38,6 +39,7 @@ pub struct Rl78G23Core {
     pub sau: Arc<Mutex<SauUnit>>,
     pub tau: Arc<Mutex<TauUnit>>,
     pub irq: Arc<Mutex<IrqController>>,
+    pub uart_tx: Arc<ByteCapture>,
 }
 
 impl Rl78G23Core {
@@ -46,18 +48,24 @@ impl Rl78G23Core {
         let clock = Arc::new(Mutex::new(ClockGenerator::new()));
         let outputs = clock.lock().expect("clock").outputs();
         let irq = Arc::new(Mutex::new(IrqController::new()));
-        let sink = IrqSink::new(Arc::clone(&irq));
-        let sau = Arc::new(Mutex::new(SauUnit::new(
-            ctl.clone(),
-            outputs.clone(),
-            sink.clone(),
-        )));
-        let tau = Arc::new(Mutex::new(TauUnit::new(ctl, outputs, sink)));
+        let uart_tx = ByteCapture::new();
+        let mut sau_unit = SauUnit::new(ctl.clone(), outputs.clone());
+        let mut tau_unit = TauUnit::new(ctl, outputs);
+        for ch in 0..sau::CHANNELS {
+            connect_irq_line(sau_unit.irq_source(ch), &irq, sau::CHANNEL_IRQ[ch]);
+        }
+        let _tx = Wire::new()
+            .source(sau_unit.tx_source())
+            .sink(Arc::clone(&uart_tx) as Arc<dyn WireSink<u8>>);
+        for ch in 0..tau::CHANNELS {
+            connect_irq_line(tau_unit.irq_source(ch), &irq, tau::CHANNEL_IRQ[ch]);
+        }
         Self {
             clock,
-            sau,
-            tau,
+            sau: Arc::new(Mutex::new(sau_unit)),
+            tau: Arc::new(Mutex::new(tau_unit)),
             irq,
+            uart_tx,
         }
     }
 }
@@ -68,6 +76,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.sau.lock().expect("sau"));
         Resettable::reset(&mut *self.tau.lock().expect("tau"));
         Resettable::reset(&mut *self.irq.lock().expect("irq"));
+        self.uart_tx.clear();
     }
 }
 
