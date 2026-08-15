@@ -22,8 +22,8 @@ pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 pub use peripherals::{
-    ByteCapture, ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqChannelSink,
-    IrqController, IrqId, IrqPulse, IrqRequest, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
+    ByteCapture, CaptureTx, ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqController,
+    IrqId, IrqPulse, IrqRequest, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
 };
 
 use sim_kernel::{
@@ -290,11 +290,11 @@ mod tests {
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
         bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
-        assert!(part.core.uart_tx.bytes().is_empty());
+        assert!(part.core.uart_tx.lock().unwrap().bytes().is_empty());
         pump(&mut bus, &ctl, sim_kernel::Tick(624));
-        assert!(part.core.uart_tx.bytes().is_empty());
+        assert!(part.core.uart_tx.lock().unwrap().bytes().is_empty());
         pump(&mut bus, &ctl, sim_kernel::Tick(625));
-        assert_eq!(part.core.uart_tx.bytes(), b"A");
+        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"A");
     }
 
     #[test]
