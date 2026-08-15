@@ -3,8 +3,8 @@
 Arch-independent simulation kernel crate.
 
 ## Modules
-- `machine`: `Machine<C: Cpu>` — CPU + boxed `MemoryBus` + `Wiring` + `VirtualClock` + `EventQueue` + breakpoints; exclusive to sim thread. `Machine::new` uses empty `Wiring`; peripherals `drive` via `SourcePort` (not `EventCtx`).
-- `wiring`: `Wire<T, Sinks, Sources>` (typenum; 1-N or N-1) / `SolidWire` / `WiringBuilder` / dummy source·sink. Immediate sink callbacks. Nested drive logged and dropped.
+- `machine`: `Machine<C: Cpu>` — CPU + boxed `MemoryBus` + `VirtualClock` + `EventQueue` + breakpoints; exclusive to sim thread.
+- `wiring`: `Wire<T, Sinks, Sources>` (typenum; 1-N or N-1) / `SourcePort`. Ports hold the wire `Arc`. Immediate sink callbacks; combinational chaining is allowed. Loop detection is not implemented.
 - `sim`: `Simulator`, `spawn` → `(SimControl, SimEvents)` mpsc; default quantum `DEFAULT_MAX_QUANTUM` = 10_000 ns, `ns_per_instruction = 1`.
 - `bus`: `MemoryMapped`, `MemoryBus`, `MemoryMapBuilder`, `Rom`/`Ram`, `UnmappedPolicy`.
 - `cpu`: `Cpu` trait, `Quantum`, `PendingStop`, `TlibExit`, `map_tlib_exit` / `resolve_after_tlib_execute`.

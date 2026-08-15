@@ -8,7 +8,6 @@ use crate::clock::{Tick, VirtualClock};
 use crate::command::SimError;
 use crate::cpu::{Cpu, RegId};
 use crate::event::{EventCtl, EventQueue};
-use crate::wiring::Wiring;
 
 /// Concrete machine owned exclusively by the simulation thread.
 ///
@@ -16,13 +15,9 @@ use crate::wiring::Wiring;
 /// with [`crate::MemoryMapBuilder`], rather than mutating regions afterward.
 /// The bus is heap-allocated so its address stays stable across `Machine` moves
 /// after the one-time [`Cpu::bind_memory`] at construction.
-///
-/// Pin wires are finished with [`crate::WiringBuilder`] and stored as [`Wiring`].
-/// [`Machine::new`] installs an empty bag. Peripherals drive via [`crate::SourcePort`].
 pub struct Machine<C: Cpu> {
     cpu: C,
     bus: Box<MemoryBus>,
-    wiring: Wiring,
     clock: VirtualClock,
     ctl: EventCtl,
     breakpoints: BreakpointStore,
@@ -31,19 +26,13 @@ pub struct Machine<C: Cpu> {
 impl<C: Cpu> Machine<C> {
     /// `ctl` must be the same [`EventCtl`] clone given to peripherals (`Arc` queue).
     #[must_use]
-    pub fn new(cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
-        Self::new_with_wiring(cpu, bus, ctl, Wiring::empty())
-    }
-
-    #[must_use]
-    pub fn new_with_wiring(mut cpu: C, bus: MemoryBus, ctl: EventCtl, wiring: Wiring) -> Self {
+    pub fn new(mut cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
         let mut bus = Box::new(bus);
         cpu.bind_memory(bus.as_mut());
         ctl.set_now(Tick::ZERO);
         Self {
             cpu,
             bus,
-            wiring,
             clock: VirtualClock::new(),
             ctl,
             breakpoints: BreakpointStore::new(),
@@ -71,15 +60,6 @@ impl<C: Cpu> Machine<C> {
 
     pub fn bus_mut(&mut self) -> &mut MemoryBus {
         &mut self.bus
-    }
-
-    #[must_use]
-    pub fn wiring(&self) -> &Wiring {
-        &self.wiring
-    }
-
-    pub fn wiring_mut(&mut self) -> &mut Wiring {
-        &mut self.wiring
     }
 
     #[must_use]
