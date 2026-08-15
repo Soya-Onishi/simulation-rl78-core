@@ -317,6 +317,11 @@ pub extern "C" fn rl78_host_abort(message: *mut c_char) {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rl78_host_on_rl78_irq_ack(index: u32) {
+    crate::peripherals::irq::on_tlib_ack(index);
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rl78_host_log(_level: i32, message: *mut c_char) {
     if message.is_null() {
         return;

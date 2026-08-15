@@ -176,6 +176,7 @@ impl Rl78Cpu {
     /// is freed (CPU is dropped before the boxed bus).
     fn unbind_memory(&mut self) {
         clear_io_bus();
+        crate::peripherals::irq::unbind_cpu_line();
         let _ = take_callback_stop();
         for page in self.io_pages.drain(..) {
             unsafe { ffi::tlib_clear_page_io_accessed(page) };
@@ -277,6 +278,7 @@ impl Drop for Rl78Cpu {
             self.unbind_memory();
         } else {
             clear_io_bus();
+            crate::peripherals::irq::unbind_cpu_line();
             let _ = take_callback_stop();
         }
     }

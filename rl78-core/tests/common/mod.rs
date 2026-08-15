@@ -1,5 +1,7 @@
 //! Shared fixtures for rl78-core integration tests.
 
+pub mod irq_inject;
+
 /// ELF `e_machine` value for Renesas RL78 (`EM_RL78`).
 pub const EM_RL78: u16 = 197;
 

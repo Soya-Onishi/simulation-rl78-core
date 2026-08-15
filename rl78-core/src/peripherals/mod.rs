@@ -2,7 +2,7 @@
 
 mod clock;
 mod g23;
-mod irq;
+pub(crate) mod irq;
 mod sau;
 mod tau;
 

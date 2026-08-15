@@ -1,11 +1,67 @@
 //! Interrupt controller (QEMU `hw/rl78/irq.c`).
 //!
-//! Absolute SFR bases are applied by the SoC map. CPU injection (`tlib_set_rl78_irq`)
-//! is not wired here; [`IrqController::pending`] exposes the selected request.
+//! Absolute SFR bases are applied by the SoC map. When a CPU line is bound
+//! ([`bind_cpu_line`]), [`IrqController::pending`] is forwarded to
+//! `tlib_set_rl78_irq`. `tlib_on_rl78_irq_ack` clears the accepted IF and
+//! re-evaluates the next request.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sim_kernel::{BusError, MemoryMapped, Resettable};
+
+use crate::ffi;
+
+fn cpu_line() -> &'static Mutex<Option<Arc<Mutex<IrqController>>>> {
+    static LINE: OnceLock<Mutex<Option<Arc<Mutex<IrqController>>>>> = OnceLock::new();
+    LINE.get_or_init(|| Mutex::new(None))
+}
+
+/// Attach this INTC to the live tlib CPU (sim thread / one `Rl78Cpu`).
+pub(crate) fn bind_cpu_line(irq: Arc<Mutex<IrqController>>) {
+    let pending = irq.lock().expect("irq").pending();
+    *cpu_line().lock().expect("irq cpu line") = Some(irq);
+    apply_tlib_irq(pending);
+}
+
+pub(crate) fn unbind_cpu_line() {
+    let mut slot = cpu_line().lock().expect("irq cpu line");
+    if slot.take().is_some() {
+        apply_tlib_irq(None);
+    }
+}
+
+fn irq_cpu_bound() -> bool {
+    cpu_line().lock().expect("irq cpu line").is_some()
+}
+
+fn drive_cpu(pending: Option<IrqRequest>) {
+    if !irq_cpu_bound() {
+        return;
+    }
+    apply_tlib_irq(pending);
+}
+
+fn apply_tlib_irq(pending: Option<IrqRequest>) {
+    unsafe {
+        match pending {
+            Some(req) => {
+                ffi::tlib_set_rl78_irq(i32::from(req.index.index()), i32::from(req.priority), 1)
+            }
+            None => ffi::tlib_set_rl78_irq(0, 0, 0),
+        }
+    }
+}
+
+pub(crate) fn on_tlib_ack(index: u32) {
+    let irq = cpu_line().lock().expect("irq cpu line").clone();
+    let Some(irq) = irq else {
+        return;
+    };
+    let Some(id) = IrqId::from_index(index as u8) else {
+        return;
+    };
+    irq.lock().expect("irq").ack(id);
+}
 
 /// Vector index (QEMU `RL78CPUIRQ`). Aliases that share a vector keep one name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -251,9 +307,11 @@ impl IrqController {
             if hits != 0 {
                 let index = IrqId(hits.trailing_zeros() as u8);
                 self.pending = Some(IrqRequest { index, priority });
+                drive_cpu(self.pending);
                 return;
             }
         }
+        drive_cpu(self.pending);
     }
 
     fn pack_lines(value: u64, group: IrqGroup) -> u16 {
