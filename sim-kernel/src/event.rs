@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::bus::MemoryBus;
 use crate::clock::Tick;
 use crate::stop::StopReason;
+use crate::wiring::Interconnect;
 
 /// Identifier of a scheduled event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +30,8 @@ pub struct EventId(pub u64);
 pub struct EventCtx<'a> {
     pub now: Tick,
     pub bus: &'a mut MemoryBus,
+    /// Pin nets; peripherals drive/sense here after M2 GPIO lands.
+    pub interconnect: &'a mut Interconnect,
     /// Event may request a stop (for example a watchdog).
     pub stop: Option<StopReason>,
 }
@@ -206,10 +209,12 @@ mod tests {
         assert_eq!(q.next_deadline(), Some(Tick(5)));
 
         let mut bus = MemoryBus::new();
+        let mut interconnect = Interconnect::empty();
         let (earlier_id, mut earlier) = q.pop_due(Tick(5)).unwrap();
         let mut ctx = EventCtx {
             now: Tick(5),
             bus: &mut bus,
+            interconnect: &mut interconnect,
             stop: None,
         };
         earlier.fire(&mut ctx);

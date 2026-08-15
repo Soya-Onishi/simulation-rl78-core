@@ -164,9 +164,11 @@ impl<C: Cpu> Simulator<C> {
                 break;
             };
             let stop = {
+                let (bus, interconnect) = self.machine.bus_and_interconnect_mut();
                 let mut ctx = EventCtx {
                     now,
-                    bus: self.machine.bus_mut(),
+                    bus,
+                    interconnect,
                     stop: None,
                 };
                 event.fire(&mut ctx);

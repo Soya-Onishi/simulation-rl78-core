@@ -215,9 +215,11 @@ mod tests {
             let Some((_, mut event)) = due else {
                 break;
             };
+            let mut interconnect = sim_kernel::Interconnect::empty();
             let mut ctx = sim_kernel::EventCtx {
                 now,
                 bus,
+                interconnect: &mut interconnect,
                 stop: None,
             };
             event.fire(&mut ctx);

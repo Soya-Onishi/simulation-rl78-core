@@ -9,7 +9,7 @@ TCG コアは [tlib](https://github.com/Soya-Onishi/tlib)（`rl78` ブランチ�
 
 | クレート | 役割 |
 |----------|------|
-| `sim-kernel` | 仮想時計・イベントキュー・`MemoryBus` / `MemoryMapped`・start/stop/quit・検査 API |
+| `sim-kernel` | 仮想時計・イベントキュー・`MemoryBus` / `MemoryMapped`・ピン／ネット配線（`WiringBuilder` / `Interconnect`）・start/stop/quit・検査 API |
 | `rl78-core` | RL78 コア（tlib 静的リンク、CPU ラッパ、最小メモリマップ、Magic probe、ELF） |
 | `simulation-rl78-core` | 薄い CLI（bin のみ）。シミュレーション本体は別スレッド |
 
@@ -44,3 +44,7 @@ cargo run -- path/to/guest.elf
 ```
 
 Magic probe はゲスト物理 `0xF0000`（`MOV !addr16, #imm` が `addr16 | 0xF0000` に到達）。
+
+## 配線（コード記述）
+
+ピン同士の結線も設定ファイルは使わない。`WiringBuilder` でダミー端点（または将来の GPIO ピン）を `connect` / `pull` し、`build` した `Interconnect` を `Machine` に渡す。既存の `Machine::new` は空配線のまま M1 パスを維持する。RL78 GPIO / UART などのペリフェラル実装は後続。

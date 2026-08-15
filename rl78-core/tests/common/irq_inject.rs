@@ -21,9 +21,11 @@ pub fn fire_due(machine: &mut Machine<rl78_core::Rl78Cpu>) {
         let Some((_, mut event)) = due else {
             break;
         };
+        let (bus, interconnect) = machine.bus_and_interconnect_mut();
         let mut ctx = EventCtx {
             now,
-            bus: machine.bus_mut(),
+            bus,
+            interconnect,
             stop: None,
         };
         event.fire(&mut ctx);
