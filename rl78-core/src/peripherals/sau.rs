@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
     BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, SourcePort, Tick,
-    WireSink,
+    Wire, WireSink,
 };
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
