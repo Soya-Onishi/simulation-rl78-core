@@ -47,4 +47,4 @@ Magic probe はゲスト物理 `0xF0000`（`MOV !addr16, #imm` が `addr16 | 0xF
 
 ## 配線（コード記述）
 
-ピン結線は設定ファイルを使わない。`Wire<T>` を typestate で 1→N または N→1 に組み立て、`WiringBuilder::build` した袋を `Machine` が持つ。`drive` は Sink コールバックをすぐ呼ぶ。GPIO enable やプル／衝突の合成は後続の回路部品。既存の `Machine::new` は空配線。
+ピン結線は設定ファイルを使わない。`Wire<T, Sinks, Sources>`（typenum）を 1→N または N→1 に組み立て、`WiringBuilder::build` した袋を `Machine` が持つ。`drive` は Sink コールバックをすぐ呼ぶ。GPIO enable やプル／衝突の合成は後続の回路部品。既存の `Machine::new` は空配線。

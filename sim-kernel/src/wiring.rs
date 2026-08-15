@@ -1,12 +1,17 @@
 //! Typed unidirectional wires and ports (no shared voltage net).
 //!
-//! Construction is typestate: a wire is either 1 source to N sinks or N sources
-//! to 1 sink. [`WiringBuilder::build`] freezes ready wires into [`SolidWire`]s
+//! Construction is typestate [`Wire<T, Sinks, Sources>`] (typenum counts):
+//! either 1 source to N sinks or N sources to 1 sink. [`WiringBuilder::build`] freezes ready wires into [`SolidWire`]s
 //! owned by [`crate::Machine`]. Peripherals keep [`SourcePort`] / sink callbacks
 //! on `Arc` to the same solid wire and `drive` without going through [`crate::EventCtx`].
 
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+
+use typenum::{Add1, B1, U2, U3, U4, U5, U6, U7, U8, Unsigned};
+
+pub use typenum::{U0, U1};
 
 thread_local! {
     static IN_DRIVE: Cell<bool> = const { Cell::new(false) };
@@ -41,7 +46,7 @@ struct Inner<T> {
     frozen: bool,
 }
 
-impl<T: Default> Inner<T> {
+impl<T> Inner<T> {
     fn new() -> Self {
         Self {
             values: Vec::new(),
@@ -160,133 +165,100 @@ fn bind_source<T>(port: &mut SourcePort<T>, inner: &Arc<Mutex<Inner<T>>>, index:
     port.index = index;
 }
 
-/// Open wire (0 sources, 0 sinks).
-pub struct Wire<T> {
+/// Building wire. `Sinks` / `Sources` are typenum unsigned counts (`U0`, `U1`, …).
+///
+/// Legal topologies: `(U0, U0)` while attaching, then 1→N (`Sources = U1`) or
+/// N→1 (`Sinks = U1`). Both counts `> U1` has no `source`/`sink` methods.
+pub struct Wire<T, Sinks: Unsigned, Sources: Unsigned> {
     inner: Arc<Mutex<Inner<T>>>,
+    _counts: PhantomData<(Sinks, Sources)>,
 }
 
-impl<T: Default + Clone + Send + 'static> Wire<T> {
+fn recast<T, Sinks, Sources, NewSinks, NewSources>(
+    wire: Wire<T, Sinks, Sources>,
+) -> Wire<T, NewSinks, NewSources>
+where
+    Sinks: Unsigned,
+    Sources: Unsigned,
+    NewSinks: Unsigned,
+    NewSources: Unsigned,
+{
+    Wire {
+        inner: wire.inner,
+        _counts: PhantomData,
+    }
+}
+
+fn attach_source<T: Default>(inner: &Arc<Mutex<Inner<T>>>, port: &mut SourcePort<T>) {
+    let mut g = inner.lock().expect("wire");
+    debug_assert!(!g.frozen);
+    let index = g.values.len();
+    g.values.push(T::default());
+    bind_source(port, inner, index);
+}
+
+impl<T> Wire<T, U0, U0> {
     #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner::new())),
+            _counts: PhantomData,
         }
-    }
-
-    #[must_use]
-    pub fn source(self, port: &mut SourcePort<T>) -> OneSource<T> {
-        {
-            let mut g = self.inner.lock().expect("wire");
-            debug_assert!(!g.frozen);
-            let index = g.values.len();
-            g.values.push(T::default());
-            bind_source(port, &self.inner, index);
-        }
-        OneSource { inner: self.inner }
-    }
-
-    #[must_use]
-    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> OneSink<T> {
-        self.inner.lock().expect("wire").sinks.push(sink);
-        OneSink { inner: self.inner }
     }
 }
 
-impl<T: Default> Default for Wire<T> {
+impl<T: Default + Clone + Send + 'static> Wire<T, U0, U0> {
+    #[must_use]
+    pub fn source(self, port: &mut SourcePort<T>) -> Wire<T, U0, U1> {
+        attach_source(&self.inner, port);
+        recast(self)
+    }
+
+    #[must_use]
+    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> Wire<T, U1, U0> {
+        self.inner.lock().expect("wire").sinks.push(sink);
+        recast(self)
+    }
+}
+
+impl<T> Default for Wire<T, U0, U0> {
     fn default() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Inner::new())),
-        }
+        Self::new()
     }
 }
 
-/// Typestate: one source, no sink yet.
-pub struct OneSource<T> {
-    inner: Arc<Mutex<Inner<T>>>,
+/// Extra source: only while there is exactly one sink (N→1, including 0→1 → 1→1).
+impl<T, Sources> Wire<T, U1, Sources>
+where
+    T: Default + Clone + Send + 'static,
+    Sources: Unsigned + core::ops::Add<B1>,
+    Add1<Sources>: Unsigned,
+{
+    #[must_use]
+    pub fn source(self, port: &mut SourcePort<T>) -> Wire<T, U1, Add1<Sources>> {
+        attach_source(&self.inner, port);
+        recast(self)
+    }
 }
 
-impl<T: Default + Clone + Send + 'static> OneSource<T> {
+/// Extra sink: only while there is exactly one source (1→N, including 1→0 → 1→1).
+impl<T, Sinks> Wire<T, Sinks, U1>
+where
+    T: Clone + Send + 'static,
+    Sinks: Unsigned + core::ops::Add<B1>,
+    Add1<Sinks>: Unsigned,
+{
     #[must_use]
-    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> OneToOne<T> {
+    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> Wire<T, Add1<Sinks>, U1> {
         self.inner.lock().expect("wire").sinks.push(sink);
-        OneToOne { inner: self.inner }
-    }
-}
-
-/// Typestate: one sink, no source yet.
-pub struct OneSink<T> {
-    inner: Arc<Mutex<Inner<T>>>,
-}
-
-impl<T: Default + Clone + Send + 'static> OneSink<T> {
-    #[must_use]
-    pub fn source(self, port: &mut SourcePort<T>) -> OneToOne<T> {
-        {
-            let mut g = self.inner.lock().expect("wire");
-            let index = g.values.len();
-            g.values.push(T::default());
-            bind_source(port, &self.inner, index);
-        }
-        OneToOne { inner: self.inner }
-    }
-}
-
-/// Typestate: (1, 1). Next source → fan-in; next sink → fan-out. Ready for [`WiringBuilder::push`].
-pub struct OneToOne<T> {
-    inner: Arc<Mutex<Inner<T>>>,
-}
-
-impl<T: Default + Clone + Send + 'static> OneToOne<T> {
-    #[must_use]
-    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> FanOut<T> {
-        self.inner.lock().expect("wire").sinks.push(sink);
-        FanOut { inner: self.inner }
-    }
-
-    #[must_use]
-    pub fn source(self, port: &mut SourcePort<T>) -> FanIn<T> {
-        {
-            let mut g = self.inner.lock().expect("wire");
-            let index = g.values.len();
-            g.values.push(T::default());
-            bind_source(port, &self.inner, index);
-        }
-        FanIn { inner: self.inner }
-    }
-}
-
-/// 1 source, N≥2 sinks. Further sources are not available on this type.
-pub struct FanOut<T> {
-    inner: Arc<Mutex<Inner<T>>>,
-}
-
-impl<T: Clone + Send + 'static> FanOut<T> {
-    #[must_use]
-    pub fn sink(self, sink: Arc<dyn WireSink<T>>) -> Self {
-        self.inner.lock().expect("wire").sinks.push(sink);
-        self
-    }
-}
-
-/// N≥2 sources, 1 sink. Further sinks are not available on this type.
-pub struct FanIn<T> {
-    inner: Arc<Mutex<Inner<T>>>,
-}
-
-impl<T: Default + Clone + Send + 'static> FanIn<T> {
-    #[must_use]
-    pub fn source(self, port: &mut SourcePort<T>) -> Self {
-        {
-            let mut g = self.inner.lock().expect("wire");
-            let index = g.values.len();
-            g.values.push(T::default());
-            bind_source(port, &self.inner, index);
-        }
-        self
+        recast(self)
     }
 }
 
 /// Wires that can enter the builder bag (1-1, 1-N, or N-1).
+///
+/// `freeze` is implemented for sink/source counts through [`typenum::U8`].
+/// Attaching more ports still type-checks; add a `ReadyWire` impl if you need to `push` them.
 pub trait ReadyWire: Sized {
     fn freeze(self) -> WiringPiece;
 }
@@ -298,23 +270,27 @@ fn freeze_inner<T: Send + 'static>(inner: Arc<Mutex<Inner<T>>>) -> WiringPiece {
     }
 }
 
-impl<T: Send + 'static> ReadyWire for OneToOne<T> {
-    fn freeze(self) -> WiringPiece {
-        freeze_inner(self.inner)
-    }
+macro_rules! impl_ready_fan_out {
+    ($($sinks:ty),*) => {
+        $(impl<T: Send + 'static> ReadyWire for Wire<T, $sinks, U1> {
+            fn freeze(self) -> WiringPiece {
+                freeze_inner(self.inner)
+            }
+        })*
+    };
 }
+impl_ready_fan_out!(U1, U2, U3, U4, U5, U6, U7, U8);
 
-impl<T: Send + 'static> ReadyWire for FanOut<T> {
-    fn freeze(self) -> WiringPiece {
-        freeze_inner(self.inner)
-    }
+macro_rules! impl_ready_fan_in {
+    ($($sources:ty),*) => {
+        $(impl<T: Send + 'static> ReadyWire for Wire<T, U1, $sources> {
+            fn freeze(self) -> WiringPiece {
+                freeze_inner(self.inner)
+            }
+        })*
+    };
 }
-
-impl<T: Send + 'static> ReadyWire for FanIn<T> {
-    fn freeze(self) -> WiringPiece {
-        freeze_inner(self.inner)
-    }
-}
+impl_ready_fan_in!(U2, U3, U4, U5, U6, U7, U8);
 
 /// Finished bag of solid wires owned by [`crate::Machine`].
 #[derive(Default)]

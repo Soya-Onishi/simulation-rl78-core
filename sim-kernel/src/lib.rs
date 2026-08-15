@@ -37,9 +37,8 @@ pub use reset::Resettable;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
 pub use stop::StopReason;
 pub use wiring::{
-    AnalogVoltage, DigitalLevel, DummySink, DummySource, FanIn, FanOut, NestedDrive, OneSink,
-    OneSource, OneToOne, ReadyWire, SolidWire, SourcePort, Wire, WireSink, Wiring, WiringBuilder,
-    WiringPiece,
+    AnalogVoltage, DigitalLevel, DummySink, DummySource, NestedDrive, ReadyWire, SolidWire,
+    SourcePort, U0, U1, Wire, WireSink, Wiring, WiringBuilder, WiringPiece,
 };
 
 #[cfg(test)]
