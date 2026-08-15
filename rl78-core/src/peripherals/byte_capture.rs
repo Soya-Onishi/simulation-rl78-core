@@ -2,6 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use sim_kernel::Resettable;
+
 /// Buffer filled by board UART TX wiring, not by a guest peripheral.
 #[derive(Default)]
 pub struct ByteCapture {
@@ -27,5 +29,11 @@ impl ByteCapture {
         if let Some(&b) = values.get(changed) {
             this.lock().expect("tx").push(b);
         }
+    }
+}
+
+impl Resettable for ByteCapture {
+    fn reset(&mut self) {
+        self.clear();
     }
 }

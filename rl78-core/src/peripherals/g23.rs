@@ -106,7 +106,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.sau.lock().expect("sau"));
         Resettable::reset(&mut *self.tau.lock().expect("tau"));
         Resettable::reset(&mut *self.irq.lock().expect("irq"));
-        self.uart_tx.lock().expect("tx").clear();
+        Resettable::reset(&mut *self.uart_tx.lock().expect("tx"));
     }
 }
 
