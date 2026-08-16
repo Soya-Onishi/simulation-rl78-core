@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use typenum::{Add1, B1, Unsigned};
 
+use crate::Tick;
+
 pub use typenum::{U0, U1};
 
 /// Digital level used as a [`Wire`] payload.
@@ -23,6 +25,50 @@ pub enum DigitalLevel {
 /// Analog voltage in microvolts, used as a [`Wire`] payload.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnalogVoltage(pub i64);
+
+/// UART stop-bit count carried on a [`UartFrame`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum UartStopBits {
+    #[default]
+    One,
+    Two,
+}
+
+/// UART parity carried on a [`UartFrame`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum UartParity {
+    #[default]
+    None,
+    Even,
+    Odd,
+}
+
+/// One UART character plus link parameters, used as a [`Wire`] payload.
+///
+/// Serial lines are not modeled as [`DigitalLevel`] bit streams. `bit_time` is
+/// the duration of one bit on the virtual clock (not a raw baud integer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UartFrame {
+    pub data: u16,
+    pub data_bits: u8,
+    pub bit_time: Tick,
+    pub stop_bits: UartStopBits,
+    pub parity: UartParity,
+    pub inverted: bool,
+}
+
+impl Default for UartFrame {
+    fn default() -> Self {
+        Self {
+            data: 0,
+            data_bits: 8,
+            bit_time: Tick::ZERO,
+            stop_bits: UartStopBits::One,
+            parity: UartParity::None,
+            inverted: false,
+        }
+    }
+}
 
 type SinkFn<T> = Arc<dyn Fn(&[T], usize) + Send + Sync>;
 
@@ -339,6 +385,19 @@ mod tests {
         let _w = Wire::new().source(&mut src.port).sink(sink.callback());
         src.port.drive(AnalogVoltage(3_300_000));
         assert_eq!(sink.last(), Some((vec![AnalogVoltage(3_300_000)], 0)));
+    }
+
+    #[test]
+    fn uart_frame_payload_reaches_sink() {
+        let mut src = DummySource::<UartFrame>::new();
+        let sink = DummySink::<UartFrame>::new();
+        let _w = Wire::new().source(&mut src.port).sink(sink.callback());
+        let frame = UartFrame {
+            data: b'A' as u16,
+            ..UartFrame::default()
+        };
+        src.port.drive(frame);
+        assert_eq!(sink.last(), Some((vec![frame], 0)));
     }
 
     #[test]

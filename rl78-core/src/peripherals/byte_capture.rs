@@ -1,33 +1,38 @@
-//! Host-side byte capture attached as a board Wire sink (not a guest peripheral).
+//! Host-side UART capture attached as a board Wire sink (not a guest peripheral).
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::Resettable;
+use sim_kernel::{Resettable, UartFrame};
 
 /// Buffer filled by board UART TX wiring, not by a guest peripheral.
 #[derive(Default)]
 pub struct ByteCapture {
-    bytes: Vec<u8>,
+    frames: Vec<UartFrame>,
 }
 
 impl ByteCapture {
     #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub fn frames(&self) -> &[UartFrame] {
+        &self.frames
     }
 
-    pub fn push(&mut self, byte: u8) {
-        self.bytes.push(byte);
+    #[must_use]
+    pub fn bytes(&self) -> Vec<u8> {
+        self.frames.iter().map(|f| (f.data & 0xFF) as u8).collect()
+    }
+
+    pub fn push(&mut self, frame: UartFrame) {
+        self.frames.push(frame);
     }
 
     pub fn clear(&mut self) {
-        self.bytes.clear();
+        self.frames.clear();
     }
 
-    /// Wire sink: append the driven byte.
-    pub fn on_input(this: &Arc<Mutex<Self>>, values: &[u8], changed: usize) {
-        if let Some(&b) = values.get(changed) {
-            this.lock().expect("tx").push(b);
+    /// Wire sink: append the driven UART frame.
+    pub fn on_input(this: &Arc<Mutex<Self>>, values: &[UartFrame], changed: usize) {
+        if let Some(&frame) = values.get(changed) {
+            this.lock().expect("tx").push(frame);
         }
     }
 }

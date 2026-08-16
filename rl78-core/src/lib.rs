@@ -108,7 +108,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::{BusError, HasMemoryMap};
+    use sim_kernel::{BusError, HasMemoryMap, SourcePort, Tick, UartFrame, Wire};
 
     fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
         let mut part = R7F100Gxl::new(ctl);
@@ -340,5 +340,104 @@ mod tests {
         let mut if0 = [0u8; 2];
         bus.read(0xFFFE0, &mut if0).unwrap();
         assert_eq!(if0[1] & 0x20, 0x20);
+    }
+
+    fn uart0_bit_time() -> Tick {
+        Hertz::from_mhz(32)
+            .cycles_to_tick(Cycles::from_count(2))
+            .unwrap()
+    }
+
+    fn matching_uart_frame(data: u8) -> UartFrame {
+        UartFrame {
+            data: u16::from(data),
+            data_bits: 8,
+            bit_time: uart0_bit_time(),
+            ..UartFrame::default()
+        }
+    }
+
+    fn bind_uart0_rx(part: &R7F100Gxl) -> SourcePort<UartFrame> {
+        let mut src = SourcePort::new();
+        let sau = Arc::clone(&part.core.sau);
+        let _wire = Wire::new()
+            .source(&mut src)
+            .sink(move |values, changed| SauUnit::on_rx(&sau, 1, values, changed));
+        src
+    }
+
+    fn enable_uart0_rx(bus: &mut MemoryBus, scr: u16) {
+        bus.write(0xF011A, &scr.to_le_bytes()).unwrap();
+        bus.write(0xF0122, &[0x02, 0x00]).unwrap();
+    }
+
+    #[test]
+    fn sau_uart_tx_capture_includes_frame_parameters() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl.clone());
+        bus.write(0xF0118, &[0x04, 0x80]).unwrap();
+        bus.write(0xF012A, &[0x01, 0x00]).unwrap();
+        bus.write(0xF0122, &[0x01, 0x00]).unwrap();
+        bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
+        pump(&mut bus, &ctl, Tick(0));
+        pump(&mut bus, &ctl, Tick(625));
+        let frames = part.core.uart_tx.lock().unwrap().frames().to_vec();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0], matching_uart_frame(b'A'));
+    }
+
+    #[test]
+    fn sau_uart_rx_loads_sdr_from_matching_frame() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl);
+        enable_uart0_rx(&mut bus, 0x4004);
+        let src = bind_uart0_rx(&part);
+        src.drive(matching_uart_frame(b'Z'));
+        let mut sdr = [0u8; 2];
+        bus.read(0xFFF12, &mut sdr).unwrap();
+        assert_eq!(sdr[0], b'Z');
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
+        assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
+    }
+
+    #[test]
+    fn sau_uart_rx_parity_mismatch_sets_pef_and_intsre() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl);
+        enable_uart0_rx(&mut bus, 0x4204);
+        let src = bind_uart0_rx(&part);
+        src.drive(matching_uart_frame(b'A'));
+        let mut ssr = [0u8; 2];
+        bus.read(0xF0102, &mut ssr).unwrap();
+        assert_eq!(ssr[0] & 0x02, 0x02);
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
+    }
+
+    #[test]
+    fn sau_uart_rx_bit_time_mismatch_sets_fef_and_intsre() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl);
+        enable_uart0_rx(&mut bus, 0x4004);
+        let src = bind_uart0_rx(&part);
+        let mut frame = matching_uart_frame(b'A');
+        frame.bit_time = Tick(1_000);
+        src.drive(frame);
+        let mut ssr = [0u8; 2];
+        bus.read(0xF0102, &mut ssr).unwrap();
+        assert_eq!(ssr[0] & 0x04, 0x04);
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
+    }
+
+    #[test]
+    fn sau_uart_rx_error_with_eoc_suppresses_intsr() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl);
+        enable_uart0_rx(&mut bus, 0x4A04);
+        let src = bind_uart0_rx(&part);
+        src.drive(matching_uart_frame(b'A'));
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
+        assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
 }
