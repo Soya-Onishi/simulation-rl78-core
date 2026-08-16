@@ -35,6 +35,7 @@ const OPTION_BYTE_ADDR: Addr = 0x000C2;
 
 const SAU_IRQ: [IrqId; sau::CHANNELS] =
     [IrqId::INTST0, IrqId::INTSR0, IrqId::INTST1, IrqId::INTSR1];
+const SAU_ERR_IRQ: [IrqId; sau::UARTS] = [IrqId::INTSRE0, IrqId::INTSRE1];
 
 const TAU_IRQ: [IrqId; tau::CHANNELS] = [
     IrqId::INTTM00,
@@ -57,6 +58,12 @@ fn wiring(
         let irq = Arc::clone(irq);
         let _wire = Wire::new()
             .source(sau.irq_source(ch))
+            .sink(move |values, changed| IrqController::on_input(&irq, id, values, changed));
+    }
+    for (uart, id) in SAU_ERR_IRQ.iter().copied().enumerate() {
+        let irq = Arc::clone(irq);
+        let _wire = Wire::new()
+            .source(sau.err_source(uart))
             .sink(move |values, changed| IrqController::on_input(&irq, id, values, changed));
     }
     let uart_tx = Arc::clone(uart_tx);

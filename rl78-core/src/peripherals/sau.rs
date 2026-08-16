@@ -6,15 +6,27 @@ use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
     BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, SourcePort, Tick,
+    UartFrame, UartParity, UartStopBits,
 };
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
 
 pub const CHANNELS: usize = 4;
+pub const UARTS: usize = 2;
 
 const SCR_TXE: u16 = 1 << 15;
-const SSR_TSF: u16 = 1 << 6;
+const SCR_RXE: u16 = 1 << 14;
+const SCR_EOC: u16 = 1 << 11;
 const SMR_CKS: u16 = 1 << 15;
+const SMR_SIS: u16 = 1 << 6;
+const SSR_TSF: u16 = 1 << 6;
+const SSR_BFF: u16 = 1 << 5;
+const SSR_FEF: u16 = 1 << 2;
+const SSR_PEF: u16 = 1 << 1;
+const SSR_OVF: u16 = 1 << 0;
+const SIR_FECT: u16 = 1 << 2;
+const SIR_PECT: u16 = 1 << 1;
+const SIR_OVFCT: u16 = 1 << 0;
 
 pub struct SauUnit {
     sdr: [u16; CHANNELS],
@@ -27,10 +39,15 @@ pub struct SauUnit {
     soe: u16,
     sol: u16,
     busy: [bool; CHANNELS],
+    bff: [bool; CHANNELS],
+    fef: [bool; CHANNELS],
+    pef: [bool; CHANNELS],
+    ovf: [bool; CHANNELS],
     ctl: EventCtl,
     clock: ClockOutputs,
     irq_out: [SourcePort<()>; CHANNELS],
-    tx_out: SourcePort<u8>,
+    err_out: [SourcePort<()>; UARTS],
+    tx_out: SourcePort<UartFrame>,
     tx_id: [Option<EventId>; CHANNELS],
 }
 
@@ -48,9 +65,14 @@ impl SauUnit {
             soe: 0,
             sol: 0,
             busy: [false; CHANNELS],
+            bff: [false; CHANNELS],
+            fef: [false; CHANNELS],
+            pef: [false; CHANNELS],
+            ovf: [false; CHANNELS],
             ctl,
             clock,
             irq_out: std::array::from_fn(|_| SourcePort::new()),
+            err_out: std::array::from_fn(|_| SourcePort::new()),
             tx_out: SourcePort::new(),
             tx_id: [None; CHANNELS],
         }
@@ -62,8 +84,21 @@ impl SauUnit {
     }
 
     #[must_use]
-    pub fn tx_source(&mut self) -> &mut SourcePort<u8> {
+    pub fn err_source(&mut self, uart: usize) -> &mut SourcePort<()> {
+        &mut self.err_out[uart]
+    }
+
+    #[must_use]
+    pub fn tx_source(&mut self) -> &mut SourcePort<UartFrame> {
         &mut self.tx_out
+    }
+
+    /// Wire sink for UART RX (`channel` is the SAU RX channel, typically 1 or 3).
+    pub fn on_rx(this: &Arc<Mutex<Self>>, channel: usize, values: &[UartFrame], changed: usize) {
+        let Some(&frame) = values.get(changed) else {
+            return;
+        };
+        this.lock().expect("sau").receive(channel, frame);
     }
 
     fn cancel_tx(&mut self, channel: usize) {
@@ -80,6 +115,71 @@ impl SauUnit {
             && !self.busy[channel]
     }
 
+    fn can_rx(&self, channel: usize) -> bool {
+        self.se & (1 << channel) != 0 && self.scr[channel] & SCR_RXE != 0
+    }
+
+    fn data_bits(scr: u16) -> u8 {
+        match scr & 0x3 {
+            1 => 7,
+            _ => 8,
+        }
+    }
+
+    fn stop_bits(scr: u16) -> UartStopBits {
+        if (scr >> 4) & 0x3 == 0x2 {
+            UartStopBits::Two
+        } else {
+            UartStopBits::One
+        }
+    }
+
+    fn parity(scr: u16) -> UartParity {
+        match (scr >> 8) & 0x3 {
+            0x2 => UartParity::Even,
+            0x3 => UartParity::Odd,
+            _ => UartParity::None,
+        }
+    }
+
+    fn tx_inverted(&self, channel: usize) -> bool {
+        let bit = if channel < 2 { 0 } else { 2 };
+        self.sol & (1 << bit) != 0
+    }
+
+    fn rx_inverted(&self, channel: usize) -> bool {
+        self.smr[channel] & SMR_SIS != 0
+    }
+
+    fn bit_count(scr: u16) -> u64 {
+        let data = u64::from(Self::data_bits(scr));
+        let parity = u64::from(Self::parity(scr) != UartParity::None);
+        let stop = match Self::stop_bits(scr) {
+            UartStopBits::One => 1,
+            UartStopBits::Two => 2,
+        };
+        1 + data + parity + stop
+    }
+
+    fn bit_time(&self, channel: usize) -> Option<Tick> {
+        let f_clk = self.clock.f_clk();
+        if f_clk.is_stopped() {
+            return None;
+        }
+        let prs_sel = if self.smr[channel] & SMR_CKS != 0 {
+            1
+        } else {
+            0
+        };
+        let prs = u32::from(self.ck_divisor[prs_sel] & 0x0F);
+        // Operation clock = f_clk / 2^prs; SDR baud divider; 2 clocks per bit
+        // (QEMU sau.c).
+        let cycles = Cycles::from_count(1u64 << prs)
+            .saturating_mul(u64::from(self.baud_div[channel]) + 1)
+            .saturating_mul(2);
+        f_clk.cycles_to_tick(cycles).filter(|t| !t.is_zero())
+    }
+
     fn frame_time(&self, channel: usize) -> Option<Tick> {
         let f_clk = self.clock.f_clk();
         if f_clk.is_stopped() {
@@ -91,13 +191,25 @@ impl SauUnit {
             0
         };
         let prs = u32::from(self.ck_divisor[prs_sel] & 0x0F);
-        // Operation clock = f_clk / 2^prs; SDR baud divider; UART 10-bit frame
-        // with 2 clocks per bit (QEMU sau.c).
         let cycles = Cycles::from_count(1u64 << prs)
             .saturating_mul(u64::from(self.baud_div[channel]) + 1)
             .saturating_mul(2)
-            .saturating_mul(10);
+            .saturating_mul(Self::bit_count(self.scr[channel]));
         f_clk.cycles_to_tick(cycles).filter(|t| !t.is_zero())
+    }
+
+    fn tx_frame(&self, channel: usize) -> Option<UartFrame> {
+        let scr = self.scr[channel];
+        let data_bits = Self::data_bits(scr);
+        let mask = (1u16 << data_bits) - 1;
+        Some(UartFrame {
+            data: self.sdr[channel] & mask,
+            data_bits,
+            bit_time: self.bit_time(channel)?,
+            stop_bits: Self::stop_bits(scr),
+            parity: Self::parity(scr),
+            inverted: self.tx_inverted(channel),
+        })
     }
 
     fn start_tx(&mut self, inner: &Arc<Mutex<SauUnit>>, channel: usize) {
@@ -120,10 +232,57 @@ impl SauUnit {
         self.tx_id[channel] = Some(id);
     }
 
-    fn read_sdr(&self, channel: usize) -> u16 {
+    fn receive(&mut self, channel: usize, frame: UartFrame) {
+        if channel >= CHANNELS || !self.can_rx(channel) {
+            return;
+        }
+        let overrun = self.bff[channel];
+        if overrun {
+            self.ovf[channel] = true;
+        }
+        let local = self.local_rx_frame(channel);
+        let framing = local.bit_time != frame.bit_time
+            || local.data_bits != frame.data_bits
+            || local.stop_bits != frame.stop_bits
+            || local.inverted != frame.inverted;
+        let parity_err = local.parity != frame.parity;
+        if framing {
+            self.fef[channel] = true;
+        }
+        if parity_err {
+            self.pef[channel] = true;
+        }
+        let mask = (1u16 << local.data_bits) - 1;
+        self.sdr[channel] = frame.data & mask;
+        self.bff[channel] = true;
+        let error = framing || parity_err || overrun;
+        if error {
+            self.err_out[channel / 2].drive(());
+            if self.scr[channel] & SCR_EOC != 0 {
+                self.irq_out[channel].drive(());
+            }
+        } else {
+            self.irq_out[channel].drive(());
+        }
+    }
+
+    fn local_rx_frame(&self, channel: usize) -> UartFrame {
+        let scr = self.scr[channel];
+        UartFrame {
+            data: 0,
+            data_bits: Self::data_bits(scr),
+            bit_time: self.bit_time(channel).unwrap_or(Tick::ZERO),
+            stop_bits: Self::stop_bits(scr),
+            parity: Self::parity(scr),
+            inverted: self.rx_inverted(channel),
+        }
+    }
+
+    fn read_sdr(&mut self, channel: usize) -> u16 {
         if self.se & (1 << channel) == 0 {
             self.sdr[channel] | (self.baud_div[channel] << 9)
         } else {
+            self.bff[channel] = false;
             self.sdr[channel] & 0x1FF
         }
     }
@@ -140,7 +299,7 @@ impl SauUnit {
         match offset {
             0x00 | 0x02 | 0x04 | 0x06 => {
                 let ch = (offset / 2) as usize;
-                if self.busy[ch] { SSR_TSF } else { 0 }
+                self.read_ssr(ch)
             }
             0x08 | 0x0A | 0x0C | 0x0E => 0,
             0x10 | 0x12 | 0x14 | 0x16 => self.smr[((offset - 0x10) / 2) as usize],
@@ -157,8 +316,40 @@ impl SauUnit {
         }
     }
 
+    fn read_ssr(&self, ch: usize) -> u16 {
+        let mut v = 0;
+        if self.busy[ch] {
+            v |= SSR_TSF;
+        }
+        if self.bff[ch] {
+            v |= SSR_BFF;
+        }
+        if self.fef[ch] {
+            v |= SSR_FEF;
+        }
+        if self.pef[ch] {
+            v |= SSR_PEF;
+        }
+        if self.ovf[ch] {
+            v |= SSR_OVF;
+        }
+        v
+    }
+
     fn write_ctrl(&mut self, offset: u64, value: u16) {
         match offset {
+            0x08 | 0x0A | 0x0C | 0x0E => {
+                let ch = ((offset - 0x08) / 2) as usize;
+                if value & SIR_FECT != 0 {
+                    self.fef[ch] = false;
+                }
+                if value & SIR_PECT != 0 {
+                    self.pef[ch] = false;
+                }
+                if value & SIR_OVFCT != 0 {
+                    self.ovf[ch] = false;
+                }
+            }
             0x10 | 0x12 | 0x14 | 0x16 => {
                 self.smr[((offset - 0x10) / 2) as usize] = value;
             }
@@ -200,6 +391,10 @@ impl Resettable for SauUnit {
         self.so = 0;
         self.soe = 0;
         self.sol = 0;
+        self.bff = [false; CHANNELS];
+        self.fef = [false; CHANNELS];
+        self.pef = [false; CHANNELS];
+        self.ovf = [false; CHANNELS];
     }
 }
 
@@ -214,8 +409,9 @@ impl SimEvent for SauTxDone {
         let ch = self.channel as usize;
         g.busy[ch] = false;
         g.tx_id[ch] = None;
-        let byte = (g.sdr[ch] & 0xFF) as u8;
-        g.tx_out.drive(byte);
+        if let Some(frame) = g.tx_frame(ch) {
+            g.tx_out.drive(frame);
+        }
         g.irq_out[ch].drive(());
     }
 }
@@ -232,7 +428,7 @@ fn read_word_reg(
     offset: u64,
     buf: &mut [u8],
     size: u64,
-    read16: impl Fn(u64) -> u16,
+    mut read16: impl FnMut(u64) -> u16,
 ) -> Result<(), BusError> {
     match buf.len() {
         2 if offset % 2 == 0 && offset.saturating_add(2) <= size => {
@@ -284,7 +480,7 @@ impl MemoryMapped for SauSdrMmio {
     }
 
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), BusError> {
-        let g = self.inner.lock().expect("sau");
+        let mut g = self.inner.lock().expect("sau");
         let base = self.channel_base;
         read_word_reg(offset, buf, 4, |o| g.read_sdr(base + (o / 2) as usize))
     }
