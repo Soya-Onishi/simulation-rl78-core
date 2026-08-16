@@ -1,7 +1,7 @@
 //! Architecture-independent simulation kernel.
 //!
 //! Owns virtual time, the event queue, the memory bus contract, typed pin
-//! wires, and the
+//! wires, off-board [`ExternalSource`] / [`ExternalSink`] endpoints, and the
 //! start/stop/quit control surface. Architecture crates implement [`Cpu`] and
 //! assemble a [`Machine`]; host front-ends (CLI now, GDB later) talk only
 //! through [`Command`] / [`Response`] on the simulation thread.
@@ -12,6 +12,7 @@ mod clock;
 mod command;
 mod cpu;
 mod event;
+mod external;
 mod machine;
 mod reset;
 mod sim;
@@ -32,6 +33,7 @@ pub use cpu::{
     Cpu, PendingStop, Quantum, RegId, TlibExit, map_tlib_exit, resolve_after_tlib_execute,
 };
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
+pub use external::{ExternalError, ExternalId, ExternalSink, ExternalSource};
 pub use machine::Machine;
 pub use reset::Resettable;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
