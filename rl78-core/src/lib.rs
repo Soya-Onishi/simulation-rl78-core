@@ -387,6 +387,30 @@ mod tests {
     }
 
     #[test]
+    fn sau_uart_tx_second_sdr_write_starts_after_first_frame() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl.clone());
+        bus.write(0xF0118, &[0x04, 0x80]).unwrap();
+        bus.write(0xF012A, &[0x01, 0x00]).unwrap();
+        bus.write(0xF0122, &[0x01, 0x00]).unwrap();
+        bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
+        bus.write(0xFFF10, &[b'B', 0x00]).unwrap();
+        pump(&mut bus, &ctl, Tick(0));
+        pump(&mut bus, &ctl, Tick(624));
+        assert!(part.core.uart_tx.lock().unwrap().bytes().is_empty());
+        pump(&mut bus, &ctl, Tick(625));
+        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"A");
+        pump(&mut bus, &ctl, Tick(1249));
+        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"A");
+        pump(&mut bus, &ctl, Tick(1250));
+        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"AB");
+        assert_eq!(
+            part.core.uart_tx.lock().unwrap().frames(),
+            [matching_uart_frame(b'A'), matching_uart_frame(b'B')]
+        );
+    }
+
+    #[test]
     fn sau_uart_rx_loads_sdr_from_matching_frame() {
         let ctl = EventCtl::new();
         let (part, mut bus) = g23_part(ctl);
