@@ -258,10 +258,9 @@ impl SauUnit {
         let error = framing || parity_err || overrun;
         if error {
             self.err_out[channel / 2].drive(());
-            if self.scr[channel] & SCR_EOC != 0 {
-                self.irq_out[channel].drive(());
-            }
-        } else {
+        }
+        // EOCmn=1 suppresses INTSRmn on error (INTSREmn only). EOCmn=0 still raises INTSRmn.
+        if !error || self.scr[channel] & SCR_EOC == 0 {
             self.irq_out[channel].drive(());
         }
     }

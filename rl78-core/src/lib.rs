@@ -411,7 +411,7 @@ mod tests {
         bus.read(0xF0102, &mut ssr).unwrap();
         assert_eq!(ssr[0] & 0x02, 0x02);
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
-        assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
 
     #[test]
@@ -426,6 +426,17 @@ mod tests {
         let mut ssr = [0u8; 2];
         bus.read(0xF0102, &mut ssr).unwrap();
         assert_eq!(ssr[0] & 0x04, 0x04);
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
+    }
+
+    #[test]
+    fn sau_uart_rx_error_with_eoc_suppresses_intsr() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl);
+        enable_uart0_rx(&mut bus, 0x4A04);
+        let src = bind_uart0_rx(&part);
+        src.drive(matching_uart_frame(b'A'));
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
         assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
