@@ -12,6 +12,13 @@ use crate::bus::Addr;
 pub enum StopReason {
     Halt,
     ExternalStop,
-    Breakpoint { id: BreakpointId },
-    Unmapped { addr: Addr, write: bool },
+    /// Finished a [`crate::Command::Step`] without another stop reason.
+    Step,
+    Breakpoint {
+        id: BreakpointId,
+    },
+    Unmapped {
+        addr: Addr,
+        write: bool,
+    },
 }

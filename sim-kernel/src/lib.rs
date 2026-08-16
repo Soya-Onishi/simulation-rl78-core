@@ -3,8 +3,9 @@
 //! Owns virtual time, the event queue, the memory bus contract, typed pin
 //! wires, off-board [`ExternalSource`] / [`ExternalSink`] endpoints, and the
 //! start/stop/quit control surface. Architecture crates implement [`Cpu`] and
-//! assemble a [`Machine`]; host front-ends (CLI now, GDB later) talk only
-//! through [`Command`] / [`Response`] on the simulation thread.
+//! assemble a [`Machine`]; host front-ends (CLI, GDB) talk through
+//! [`Command`] / [`Response`] on the simulation thread. The optional GDB
+//! stub lives in this crate and uses the same control plane.
 
 mod breakpoint;
 mod bus;
@@ -13,6 +14,7 @@ mod command;
 mod cpu;
 mod event;
 mod external;
+mod gdb;
 mod machine;
 mod reset;
 mod sim;
@@ -34,6 +36,7 @@ pub use cpu::{
 };
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use external::{ExternalError, ExternalId, ExternalSink, ExternalSource};
+pub use gdb::{GdbBindError, listen_gdb, parse_gdb_dev};
 pub use machine::Machine;
 pub use reset::Resettable;
 pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};

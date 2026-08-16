@@ -241,6 +241,43 @@ fn ns_per_instruction_scales_virtual_time() {
 }
 
 #[test]
+fn stays_halted_until_start() {
+    let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(8)), SimConfig::default());
+    assert_eq!(sim.poll(), None);
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.machine().clock().now(), Tick(0));
+}
+
+#[test]
+fn step_runs_one_instruction_then_stops() {
+    let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(8)), SimConfig::default());
+    assert_eq!(sim.command(Command::Step), Response::Started);
+    let mut response = None;
+    for _ in 0..8 {
+        if let Some(r) = sim.poll() {
+            response = Some(r);
+            break;
+        }
+    }
+    assert_eq!(response, Some(Response::Stopped(StopReason::Step)));
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.machine().clock().now(), Tick(1));
+}
+
+#[test]
+fn notify_halt_does_not_change_state() {
+    let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(8)), SimConfig::default());
+    assert_eq!(
+        sim.command(Command::NotifyHalt {
+            reason: StopReason::Halt
+        }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.poll(), None);
+}
+
+#[test]
 fn spawn_start_stop_quit() {
     let (ctrl, events) = spawn(
         empty_machine(ScriptedCpu::nops(1_000_000)),
