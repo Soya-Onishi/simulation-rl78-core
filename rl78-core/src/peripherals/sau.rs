@@ -49,6 +49,7 @@ pub struct SauUnit {
     err_out: [SourcePort<()>; UARTS],
     tx_out: SourcePort<UartFrame>,
     tx_id: [Option<EventId>; CHANNELS],
+    tx_shift: [Option<UartFrame>; CHANNELS],
 }
 
 impl SauUnit {
@@ -75,6 +76,7 @@ impl SauUnit {
             err_out: std::array::from_fn(|_| SourcePort::new()),
             tx_out: SourcePort::new(),
             tx_id: [None; CHANNELS],
+            tx_shift: [None; CHANNELS],
         }
     }
 
@@ -106,6 +108,7 @@ impl SauUnit {
             self.ctl.cancel(id);
         }
         self.busy[channel] = false;
+        self.tx_shift[channel] = None;
     }
 
     fn can_start_tx(&self, channel: usize) -> bool {
@@ -113,6 +116,7 @@ impl SauUnit {
             && self.soe & (1 << channel) != 0
             && self.scr[channel] & SCR_TXE != 0
             && !self.busy[channel]
+            && self.bff[channel]
     }
 
     fn can_rx(&self, channel: usize) -> bool {
@@ -219,7 +223,12 @@ impl SauUnit {
         let Some(period) = self.frame_time(channel) else {
             return;
         };
+        let Some(frame) = self.tx_frame(channel) else {
+            return;
+        };
         self.cancel_tx(channel);
+        self.tx_shift[channel] = Some(frame);
+        self.bff[channel] = false;
         self.busy[channel] = true;
         let at = self.ctl.now().saturating_add(period);
         let id = self.ctl.schedule(
@@ -291,6 +300,9 @@ impl SauUnit {
             self.baud_div[channel] = value >> 9;
         }
         self.sdr[channel] = value & 0x1FF;
+        if self.se & (1 << channel) != 0 {
+            self.bff[channel] = true;
+        }
         self.start_tx(inner, channel);
     }
 
@@ -391,6 +403,7 @@ impl Resettable for SauUnit {
         self.soe = 0;
         self.sol = 0;
         self.bff = [false; CHANNELS];
+        self.tx_shift = [None; CHANNELS];
         self.fef = [false; CHANNELS];
         self.pef = [false; CHANNELS];
         self.ovf = [false; CHANNELS];
@@ -408,10 +421,11 @@ impl SimEvent for SauTxDone {
         let ch = self.channel as usize;
         g.busy[ch] = false;
         g.tx_id[ch] = None;
-        if let Some(frame) = g.tx_frame(ch) {
+        if let Some(frame) = g.tx_shift[ch].take() {
             g.tx_out.drive(frame);
         }
         g.irq_out[ch].drive(());
+        g.start_tx(&self.inner, ch);
     }
 }
 
