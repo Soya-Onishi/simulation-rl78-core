@@ -103,8 +103,10 @@ impl<C: Cpu> Simulator<C> {
                 Response::Quit
             }
             Command::NotifyHalt { reason: _ } => {
-                // TODO: multi-board arbiter — forward halt over IPC and wait for
-                // cluster-wide ack before the GDB stub sends a stop reply.
+                // TODO(multi-board): when wired from the kernel stop path, forward
+                // debugger/cluster-relevant stops over IPC and wait for cluster
+                // ack. Do not cluster-halt on guest-local [`StopReason::Halt`]
+                // (RL78 STOP / WFI). GDB must not own this hook.
                 Response::Inspect(InspectResult::Ok)
             }
             other => self.inspect(other),

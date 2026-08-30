@@ -52,20 +52,6 @@ impl SimGdbTarget {
         Err("timed out waiting for sim response")
     }
 
-    pub(super) fn notify_halt(&mut self, reason: StopReason) {
-        let _ = self.ctrl.send(Command::NotifyHalt {
-            reason: reason.clone(),
-        });
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while std::time::Instant::now() < deadline {
-            match self.events.recv_timeout(Duration::from_millis(50)) {
-                Ok(Response::Inspect(InspectResult::Ok) | Response::Error(_)) => return,
-                Ok(_) => {}
-                Err(_) => return,
-            }
-        }
-    }
-
     pub(super) fn request_stop(&mut self) -> Result<(), &'static str> {
         self.ctrl.stop().map_err(|_| "sim command channel closed")
     }

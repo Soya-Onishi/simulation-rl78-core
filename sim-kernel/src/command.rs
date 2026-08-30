@@ -37,6 +37,13 @@ pub enum Command {
         id: BreakpointId,
     },
     /// Placeholder for a future multi-board arbiter. Currently a no-op.
+    ///
+    /// TODO: Invoke this from the kernel when a stop is *committed* (not from
+    /// the GDB stub). Only debugger / cluster-relevant reasons should notify
+    /// other board processes — e.g. [`StopReason::Breakpoint`],
+    /// [`StopReason::ExternalStop`], [`StopReason::Step`]. Guest-local halts
+    /// such as RL78 `STOP` / WFI ([`StopReason::Halt`]) must **not** freeze
+    /// peer simulations.
     NotifyHalt {
         reason: StopReason,
     },

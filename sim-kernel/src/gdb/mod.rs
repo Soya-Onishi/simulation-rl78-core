@@ -1,8 +1,8 @@
 //! GDB Remote Serial Protocol stub via [`gdbstub`].
 //!
 //! Front-ends still talk to the simulation only through [`crate::Command`] /
-//! [`crate::Response`]. [`crate::Command::NotifyHalt`] is issued on guest stop
-//! but remains a no-op until a multi-board arbiter exists.
+//! [`crate::Response`]. Cluster-wide halt notification is not driven from this
+//! stub; see [`crate::Command::NotifyHalt`].
 
 mod arch;
 mod target;
@@ -143,7 +143,6 @@ impl BlockingEventLoop for SimGdbEventLoop {
             // Guest stop notifications from the sim thread (fan-out Response).
             match target.events_mut().recv_timeout(Duration::from_millis(20)) {
                 Ok(Response::Stopped(reason)) => {
-                    target.notify_halt(reason.clone());
                     let _ = conn.set_read_timeout(None);
                     return Ok(Event::TargetStopped(map_stop_reason(&reason)));
                 }
@@ -161,10 +160,7 @@ impl BlockingEventLoop for SimGdbEventLoop {
     ) -> Result<Option<SingleThreadStopReason<u64>>, <SimGdbTarget as Target>::Error> {
         target.request_stop()?;
         match target.wait_stopped(Duration::from_secs(2))? {
-            Some(reason) => {
-                target.notify_halt(reason.clone());
-                Ok(Some(map_stop_reason(&reason)))
-            }
+            Some(reason) => Ok(Some(map_stop_reason(&reason))),
             None => Ok(Some(SingleThreadStopReason::Signal(Signal::SIGINT))),
         }
     }
