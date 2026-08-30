@@ -95,6 +95,24 @@ impl BlockingEventLoop for SimGdbEventLoop {
     type Connection = TcpStream;
     type StopReason = SingleThreadStopReason<u64>;
 
+    /// Wait until either the guest stops or the GDB client sends data.
+    ///
+    /// The simulation runs on a dedicated thread. `resume` / `step` only send
+    /// `Command::{Start,Step}`; this callback does not advance guest time.
+    /// Instead it multiplexes two inputs:
+    ///
+    /// - **`conn.peek` / `conn.read`**: bytes from the GDB TCP socket while the
+    ///   guest is running (typically Ctrl-C / `0x03`). Without this, interrupt
+    ///   would sit unread until a natural stop. A short read timeout keeps the
+    ///   socket wait from blocking forever so `SimEvents` can still be polled;
+    ///   the timeout is cleared before returning so gdbstub's normal packet
+    ///   reads are not affected.
+    /// - **`SimEvents` (via `ResponseFanout`)**: `Response::Stopped` from the
+    ///   sim thread when a breakpoint, step, halt, or external stop occurs.
+    ///   Socket watching alone cannot observe those.
+    ///
+    /// `WouldBlock` is accepted alongside `TimedOut` because some platforms
+    /// report a blocking-socket read timeout that way.
     fn wait_for_stop_reason(
         target: &mut SimGdbTarget,
         conn: &mut Self::Connection,
@@ -105,8 +123,10 @@ impl BlockingEventLoop for SimGdbEventLoop {
             <Self::Connection as Connection>::Error,
         >,
     > {
+        // Temporary: allow peek/read to return so we can also poll SimEvents.
         let _ = conn.set_read_timeout(Some(Duration::from_millis(20)));
         loop {
+            // GDB client traffic (e.g. interrupt) while the sim thread is running.
             match conn.peek() {
                 Ok(Some(_)) => {
                     let byte = conn.read().map_err(WaitForStopReasonError::Connection)?;
@@ -120,6 +140,7 @@ impl BlockingEventLoop for SimGdbEventLoop {
                 Err(err) => return Err(WaitForStopReasonError::Connection(err)),
             }
 
+            // Guest stop notifications from the sim thread (fan-out Response).
             match target.events_mut().recv_timeout(Duration::from_millis(20)) {
                 Ok(Response::Stopped(reason)) => {
                     target.notify_halt(reason.clone());
