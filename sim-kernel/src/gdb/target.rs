@@ -37,6 +37,11 @@ impl SimGdbTarget {
         }
     }
 
+    /// Drop any Responses already queued on this subscription (e.g. REPL stop).
+    fn drain_pending_responses(&mut self) {
+        while self.events.try_recv().is_ok() {}
+    }
+
     fn rpc(&mut self, cmd: Command) -> Result<Response, &'static str> {
         self.ctrl
             .send(cmd)
@@ -52,7 +57,38 @@ impl SimGdbTarget {
         Err("timed out waiting for sim response")
     }
 
+    /// Clear kernel + local SW breakpoints for a fresh GDB session.
+    pub(super) fn reset_session_breakpoints(&mut self) -> Result<(), &'static str> {
+        self.breakpoints.clear();
+        match self.rpc(Command::ClearBreakpoints) {
+            Ok(Response::Inspect(InspectResult::Ok)) => Ok(()),
+            _ => Err("failed to clear breakpoints"),
+        }
+    }
+
+    /// Start or step after discarding stale fan-out stops, then wait for `Started`
+    /// so `wait_for_stop_reason` only observes stops from this resume.
+    fn begin_run(&mut self, cmd: Command) -> Result<(), &'static str> {
+        self.drain_pending_responses();
+        self.ctrl
+            .send(cmd)
+            .map_err(|_| "sim command channel closed")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match self.events.recv_timeout(Duration::from_millis(50)) {
+                Ok(Response::Started) => return Ok(()),
+                Ok(Response::Quit) => return Err("simulation quit"),
+                // Stale or concurrent stops from before this resume — ignore.
+                Ok(Response::Stopped(_)) => {}
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        Err("timed out waiting for Started")
+    }
+
     pub(super) fn request_stop(&mut self) -> Result<(), &'static str> {
+        self.drain_pending_responses();
         self.ctrl.stop().map_err(|_| "sim command channel closed")
     }
 
@@ -172,10 +208,7 @@ impl SingleThreadResume for SimGdbTarget {
         if signal.is_some() {
             return Err("continuing with a signal is not supported");
         }
-        self.ctrl
-            .start()
-            .map_err(|_| "sim command channel closed")?;
-        Ok(())
+        self.begin_run(Command::Start)
     }
 
     #[inline(always)]
@@ -191,8 +224,7 @@ impl SingleThreadSingleStep for SimGdbTarget {
         if signal.is_some() {
             return Err("stepping with a signal is not supported");
         }
-        self.ctrl.step().map_err(|_| "sim command channel closed")?;
-        Ok(())
+        self.begin_run(Command::Step)
     }
 }
 

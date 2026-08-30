@@ -75,6 +75,10 @@ fn gdb_accept_loop(ctrl: SimControl, listener: TcpListener) {
         let _ = stream.set_nodelay(true);
         let events = ctrl.subscribe();
         let mut target = SimGdbTarget::new(ctrl.clone(), events);
+        // GDB will re-install Z0 breakpoints; drop leftovers from a prior session.
+        if target.reset_session_breakpoints().is_err() {
+            continue;
+        }
         let gdb = GdbStub::new(stream);
         match gdb.run_blocking::<SimGdbEventLoop>(&mut target) {
             Ok(

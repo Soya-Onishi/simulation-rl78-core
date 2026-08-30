@@ -36,6 +36,8 @@ pub enum Command {
     RemoveBreakpoint {
         id: BreakpointId,
     },
+    /// Drop every software breakpoint (e.g. new GDB session).
+    ClearBreakpoints,
     /// Placeholder for a future multi-board arbiter. Currently a no-op.
     ///
     /// TODO: Invoke this from the kernel when a stop is *committed* (not from

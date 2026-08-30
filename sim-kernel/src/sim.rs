@@ -248,6 +248,11 @@ impl<C: Cpu> Simulator<C> {
                     Response::Error(SimError::UnknownBreakpoint(id))
                 }
             }
+            Command::ClearBreakpoints => {
+                self.machine.breakpoints_mut().clear();
+                self.sync_breakpoints();
+                Response::Inspect(InspectResult::Ok)
+            }
             Command::Start
             | Command::Step
             | Command::Stop

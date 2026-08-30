@@ -278,6 +278,24 @@ fn notify_halt_does_not_change_state() {
 }
 
 #[test]
+fn clear_breakpoints_removes_all() {
+    let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(8)), SimConfig::default());
+    assert!(matches!(
+        sim.command(Command::AddBreakpoint { addr: 0x10 }),
+        Response::Inspect(InspectResult::Breakpoint { .. })
+    ));
+    assert!(matches!(
+        sim.command(Command::AddBreakpoint { addr: 0x20 }),
+        Response::Inspect(InspectResult::Breakpoint { .. })
+    ));
+    assert_eq!(
+        sim.command(Command::ClearBreakpoints),
+        Response::Inspect(InspectResult::Ok)
+    );
+    assert!(sim.machine().breakpoints().as_slice().is_empty());
+}
+
+#[test]
 fn spawn_start_stop_quit() {
     let (ctrl, events) = spawn(
         empty_machine(ScriptedCpu::nops(1_000_000)),
