@@ -47,6 +47,10 @@ impl BreakpointStore {
         self.items.len() != before
     }
 
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
     #[must_use]
     pub fn get(&self, id: BreakpointId) -> Option<&Breakpoint> {
         self.items.iter().find(|bp| bp.id == id)
@@ -77,6 +81,16 @@ mod tests {
         assert_eq!(store.hit_at(0x100), Some(id));
         assert_eq!(store.hit_at(0x101), None);
         assert!(store.remove(id));
+        assert_eq!(store.hit_at(0x100), None);
+    }
+
+    #[test]
+    fn clear_removes_all() {
+        let mut store = BreakpointStore::new();
+        let _ = store.insert(0x100);
+        let _ = store.insert(0x200);
+        store.clear();
+        assert!(store.as_slice().is_empty());
         assert_eq!(store.hit_at(0x100), None);
     }
 }

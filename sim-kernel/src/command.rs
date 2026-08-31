@@ -11,14 +11,44 @@ use crate::stop::StopReason;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Start,
+    /// Run exactly one instruction (or until a nested stop), then stop.
+    Step,
     Stop,
     Quit,
-    ReadReg { id: RegId },
-    WriteReg { id: RegId, value: u64 },
-    ReadMem { addr: Addr, len: u32 },
-    WriteMem { addr: Addr, data: Vec<u8> },
-    AddBreakpoint { addr: Addr },
-    RemoveBreakpoint { id: BreakpointId },
+    ReadReg {
+        id: RegId,
+    },
+    WriteReg {
+        id: RegId,
+        value: u64,
+    },
+    ReadMem {
+        addr: Addr,
+        len: u32,
+    },
+    WriteMem {
+        addr: Addr,
+        data: Vec<u8>,
+    },
+    AddBreakpoint {
+        addr: Addr,
+    },
+    RemoveBreakpoint {
+        id: BreakpointId,
+    },
+    /// Drop every software breakpoint (e.g. new GDB session).
+    ClearBreakpoints,
+    /// Placeholder for a future multi-board arbiter. Currently a no-op.
+    ///
+    /// TODO: Invoke this from the kernel when a stop is *committed* (not from
+    /// the GDB stub). Only debugger / cluster-relevant reasons should notify
+    /// other board processes — e.g. [`StopReason::Breakpoint`],
+    /// [`StopReason::ExternalStop`], [`StopReason::Step`]. Guest-local halts
+    /// such as RL78 `STOP` / WFI ([`StopReason::Halt`]) must **not** freeze
+    /// peer simulations.
+    NotifyHalt {
+        reason: StopReason,
+    },
 }
 
 /// Successful inspect / mutation payload.
@@ -95,6 +125,7 @@ impl fmt::Display for StopReason {
         match self {
             StopReason::Halt => write!(f, "halt"),
             StopReason::ExternalStop => write!(f, "external"),
+            StopReason::Step => write!(f, "step"),
             StopReason::Breakpoint { id } => write!(f, "breakpoint {}", id.0),
             StopReason::Unmapped { addr, write } => {
                 let kind = if *write { "write" } else { "read" };

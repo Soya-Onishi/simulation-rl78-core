@@ -1,32 +1,59 @@
 //! Thin CLI around the simulation library.
 //!
-//! The process owns two threads: this REPL and the simulation thread. The CLI
-//! only parses `start` / `stop` / `quit` and prints responses.
+//! The process owns a REPL thread, an optional GDB stub, and the simulation
+//! thread. Virtual time stays stopped until `start` (REPL) or GDB continue.
+
+mod cli_args;
 
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::Path;
 use std::thread;
 
 use rl78_core::{MinimalMachineConfig, load_elf_into_machine, minimal_machine};
-use sim_kernel::{Command, spawn};
+use sim_kernel::{Command, listen_gdb, spawn};
+
+use cli_args::{CliError, parse_cli, usage};
 
 fn main() {
+    let argv: Vec<String> = env::args().collect();
+    let args = match parse_cli(&argv) {
+        Ok(args) => args,
+        Err(CliError::Help) => {
+            print!("{}", usage(&argv[0]));
+            return;
+        }
+        Err(CliError::Message(msg)) => {
+            eprintln!("{msg}");
+            eprint!("{}", usage(&argv[0]));
+            std::process::exit(2);
+        }
+    };
+
     let mut machine = minimal_machine(MinimalMachineConfig::default());
-    if let Some(path) = env::args().nth(1) {
-        let image = fs::read(Path::new(&path)).unwrap_or_else(|err| {
-            eprintln!("failed to read ELF {path}: {err}");
+    if let Some(path) = &args.elf {
+        let image = fs::read(path).unwrap_or_else(|err| {
+            eprintln!("failed to read ELF {}: {err}", path.display());
             std::process::exit(1);
         });
         if let Err(err) = load_elf_into_machine(&image, &mut machine) {
-            eprintln!("failed to load ELF {path}: {err}");
+            eprintln!("failed to load ELF {}: {err}", path.display());
             std::process::exit(1);
         }
-        println!("loaded {path}");
+        println!("loaded {}", path.display());
     }
 
     let (ctrl, events) = spawn(machine, sim_kernel::SimConfig::default());
+
+    if let Some(bind) = args.gdb {
+        match listen_gdb(ctrl.clone(), bind) {
+            Ok((local, _)) => println!("gdb listening on {local}"),
+            Err(err) => {
+                eprintln!("failed to bind GDB socket {bind}: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let printer = thread::Builder::new()
         .name("cli-events".into())
