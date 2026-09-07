@@ -161,6 +161,10 @@ fn run_while_running(
             Err(err)
                 if err.kind() == std::io::ErrorKind::TimedOut
                     || err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                *state = NodeState::Stopped;
+                break;
+            }
             Err(err) => return Err(NodeError::Io(err)),
         }
 
