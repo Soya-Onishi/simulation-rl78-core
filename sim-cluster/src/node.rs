@@ -174,13 +174,23 @@ fn run_while_running(
         }
         let headroom = allowed_ns.saturating_sub(*virtual_time_ns);
         if headroom < headroom_threshold_ns {
-            write_message(
+            match write_message(
                 stream,
                 &ControlMessage::TimeReport {
                     board_id: board_id.to_string(),
                     virtual_time_ns: *virtual_time_ns,
                 },
-            )?;
+            ) {
+                Ok(()) => {}
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::BrokenPipe
+                        || err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    *state = NodeState::Stopped;
+                    break;
+                }
+                Err(err) => return Err(NodeError::Io(err)),
+            }
         }
         thread::sleep(Duration::from_millis(5));
     }
