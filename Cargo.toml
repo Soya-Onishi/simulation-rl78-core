@@ -1,5 +1,5 @@
 [workspace]
-members = ["sim-kernel", "rl78-core"]
+members = ["sim-kernel", "rl78-core", "sim-cluster"]
 resolver = "3"
 
 [workspace.package]

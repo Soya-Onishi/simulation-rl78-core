@@ -1,0 +1,26 @@
+[package]
+name = "sim-cluster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Multi-board cluster: topology, server, arbiter, and IPC helpers"
+
+[[bin]]
+name = "cluster-server"
+path = "src/bin/cluster_server.rs"
+
+[[bin]]
+name = "cluster-arbiter"
+path = "src/bin/cluster_arbiter.rs"
+
+[[bin]]
+name = "cluster-node"
+path = "src/bin/cluster_node.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

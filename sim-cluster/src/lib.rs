@@ -1,0 +1,20 @@
+//! Multi-board cluster support: logical topology, singleton server, and
+//! arbiter/node process helpers.
+//!
+//! Process IPC (UDS / SHM) lives here so [`sim_kernel`] stays free of transport
+//! dependencies. Architecture crates and the single-board CLI are unchanged.
+
+pub mod arbiter;
+pub mod control;
+pub mod node;
+pub mod server;
+pub mod topology;
+
+pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
+pub use control::{ControlMessage, ShmBinding, ShmRole};
+pub use node::{NodeError, NodeOptions, run_node};
+pub use server::{ServerError, ServerOptions, run_server};
+pub use topology::{
+    BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
+    TopologyError, parse_logical_topology,
+};

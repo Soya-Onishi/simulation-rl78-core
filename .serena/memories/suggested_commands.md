@@ -7,6 +7,9 @@ cargo run                                 # CLI: stdin start|stop|quit
 cargo run -- path/to/guest.elf
 cargo fmt
 cargo clippy --all-targets -- -D warnings
+cargo test -p sim-cluster
+cargo build -p sim-cluster --bins
+cargo run -p sim-cluster --bin cluster-server -- python/examples/two_board_uart.py
 ```
 
 Prereqs: `cmake`, C toolchain, `pthread`. tlib rebuild is driven by `rl78-core/build.rs` (`cargo:rerun-if-changed` on whole `tlib/` tree).
