@@ -178,39 +178,56 @@ fn discover_python_package_root() -> Result<PathBuf, ServerError> {
     ))
 }
 
-/// Exclusive lock via `create_new` + hold open; removed on drop.
+/// Exclusive singleton lock via `flock(LOCK_EX)`.
+///
+/// The lock is released when the process exits (including crash / SIGKILL),
+/// so a leftover lock file cannot permanently block a new `cluster-server`.
+#[derive(Debug)]
 struct ServerLock {
     path: PathBuf,
-    _file: fs::File,
+    file: fs::File,
 }
 
 impl ServerLock {
     fn acquire(path: &Path) -> Result<Self, ServerError> {
+        use std::os::unix::io::AsRawFd;
+
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        match fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(path)
-        {
-            Ok(mut file) => {
-                writeln!(file, "{}", std::process::id())?;
-                Ok(Self {
-                    path: path.to_path_buf(),
-                    _file: file,
-                })
+            .map_err(ServerError::Io)?;
+
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock
+                || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                || err.raw_os_error() == Some(libc::EAGAIN)
+            {
+                return Err(ServerError::AlreadyRunning(path.to_path_buf()));
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(ServerError::AlreadyRunning(path.to_path_buf()))
-            }
-            Err(err) => Err(ServerError::Io(err)),
+            return Err(ServerError::Io(err));
         }
+
+        file.set_len(0).map_err(ServerError::Io)?;
+        writeln!(file, "{}", std::process::id()).map_err(ServerError::Io)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+        })
     }
 }
 
 impl Drop for ServerLock {
     fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
         let _ = fs::remove_file(&self.path);
     }
 }
@@ -278,7 +295,7 @@ emit(t)
 
         let lock = tempfile::NamedTempFile::new().unwrap();
         let lock_path = lock.path().to_path_buf();
-        drop(lock); // path must not exist for create_new
+        drop(lock);
 
         let opts = ServerOptions {
             script,
@@ -289,5 +306,17 @@ emit(t)
         };
         let code = run_server(&opts).expect("run_server");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn stale_lock_file_is_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.lock");
+        fs::write(&path, "1\n").unwrap();
+        let lock = ServerLock::acquire(&path).expect("reclaim stale lock file");
+        let err = ServerLock::acquire(&path).unwrap_err();
+        assert!(matches!(err, ServerError::AlreadyRunning(_)));
+        drop(lock);
+        let _relock = ServerLock::acquire(&path).expect("lock after drop");
     }
 }

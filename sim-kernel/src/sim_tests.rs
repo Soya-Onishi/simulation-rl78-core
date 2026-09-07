@@ -286,10 +286,12 @@ fn allowed_ceiling_hard_blocks_until_raised() {
     }
     assert_eq!(sim.machine().clock().now(), Tick(3));
     assert_eq!(sim.poll(), None); // blocked at ceiling
+    assert!(sim.waiting_on_allowed_ceiling());
     assert_eq!(
         sim.command(Command::SetAllowed { tick: Tick(10) }),
         Response::Inspect(InspectResult::Ok)
     );
+    assert!(!sim.waiting_on_allowed_ceiling());
     let _ = sim.poll();
     assert!(sim.machine().clock().now() > Tick(3));
 }

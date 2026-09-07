@@ -101,6 +101,8 @@ fn rx_loop(flink: &Path, inbox: Arc<UartInbox>, edge_id: &str, stop: &AtomicBool
             return;
         }
     };
+    // `drops()` is cumulative; only latch when the counter increases.
+    let mut seen_drops = 0_u64;
     while !stop.load(Ordering::Relaxed) {
         match endpoint.wait(Duration::from_millis(50)) {
             Ok(()) => {}
@@ -111,8 +113,10 @@ fn rx_loop(flink: &Path, inbox: Arc<UartInbox>, edge_id: &str, stop: &AtomicBool
         loop {
             match endpoint.try_pop() {
                 Ok(Some(frame)) => {
-                    if endpoint.drops() > 0 {
+                    let drops = endpoint.drops();
+                    if drops > seen_drops {
                         inbox.overflow_warns.store(true, Ordering::Relaxed);
+                        seen_drops = drops;
                     }
                     inbox.push(frame);
                 }
@@ -159,6 +163,41 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         let got = inbox.drain(8);
         assert_eq!(got, vec![frame]);
+        rx.stop();
+    }
+
+    #[test]
+    fn overflow_warning_latches_only_on_new_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let flink = dir.path().join("blit_ovf.shm");
+        let owner = UartShmOwner::create(&flink, 4).unwrap();
+        let prod = UartShmEndpoint::open(owner.flink()).unwrap();
+
+        // Overflow the ring before the RX thread attaches so drops are visible.
+        for i in 0..4 {
+            let _ = prod.push(ShmUartFrame {
+                data: i,
+                ..ShmUartFrame::default()
+            });
+        }
+        assert!(prod.drops() >= 1);
+
+        let inbox = UartInbox::new(32);
+        let rx = UartRxThread::spawn(owner.flink(), Arc::clone(&inbox), "e0".into()).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let _ = inbox.drain(8);
+        assert!(inbox.take_overflow_warning());
+        assert!(!inbox.take_overflow_warning());
+
+        // Further frames without additional drops must not re-latch.
+        prod.push(ShmUartFrame {
+            data: 9,
+            ..ShmUartFrame::default()
+        })
+        .unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let _ = inbox.drain(8);
+        assert!(!inbox.take_overflow_warning());
         rx.stop();
     }
 }

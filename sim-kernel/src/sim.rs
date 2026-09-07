@@ -87,6 +87,21 @@ impl<C: Cpu> Simulator<C> {
         self.allowed
     }
 
+    /// True when Running and virtual time has reached the multi-board ceiling.
+    ///
+    /// The sim thread must park on the command channel in this state; returning
+    /// from [`Self::poll`] alone would busy-spin until the next `SetAllowed`.
+    #[must_use]
+    pub fn waiting_on_allowed_ceiling(&self) -> bool {
+        if self.state != SimState::Running {
+            return false;
+        }
+        let Some(allowed) = self.allowed else {
+            return false;
+        };
+        allowed.saturating_sub(self.machine.clock().now()).is_zero()
+    }
+
     #[must_use]
     pub fn state(&self) -> SimState {
         self.state
@@ -457,6 +472,17 @@ fn sim_thread<C: Cpu>(
                 && !fanout.send(response)
             {
                 return;
+            }
+            // Multi-board ceiling: wait for SetAllowed/Stop instead of pegging a core.
+            if sim.waiting_on_allowed_ceiling() {
+                match cmd_rx.recv() {
+                    Ok(cmd) => {
+                        if !fanout.send(sim.command(cmd)) {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
             }
         } else {
             match cmd_rx.recv() {

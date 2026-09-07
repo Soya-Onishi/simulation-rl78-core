@@ -594,6 +594,7 @@ name = "sim-cluster"
 version = "0.1.0"
 dependencies = [
  "crossbeam-queue",
+ "libc",
  "raw_sync",
  "serde",
  "serde_json",
