@@ -219,6 +219,8 @@ fn ready_barrier_and_start(
                 let startup = ControlMessage::StartupRecord {
                     board_id: board_id.clone(),
                     shm_segments,
+                    margin_ns: topo.margin_ns,
+                    headroom_threshold_ns: topo.headroom_threshold_ns,
                 };
                 write_message(&mut stream, &startup)?;
                 slot.state = next;
@@ -284,6 +286,84 @@ fn ready_barrier_and_start(
         eprintln!("cluster-arbiter: peer '{board_id}' -> {:?}", slot.state);
     }
     eprintln!("cluster-arbiter: Start broadcast");
+
+    run_time_sync(topo, &mut peers)?;
+    Ok(())
+}
+
+fn run_time_sync(
+    topo: &LogicalTopology,
+    peers: &mut HashMap<String, PeerSlot>,
+) -> Result<(), ArbiterError> {
+    use crate::time_sync::TimeCeiling;
+
+    let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
+    let mut allowed = ceiling.allowed_ns();
+    for slot in peers.values_mut() {
+        if let Some(stream) = slot.stream.as_mut() {
+            if let Err(err) = write_message(
+                stream,
+                &ControlMessage::Allowed {
+                    allowed_ns: allowed,
+                },
+            ) {
+                eprintln!("cluster-arbiter: warning: Allowed send failed: {err}");
+            }
+        }
+    }
+    eprintln!("cluster-arbiter: initial Allowed={allowed}");
+
+    // Brief sync window before Phase 2 teardown; later phases keep this loop.
+    let deadline = Instant::now() + Duration::from_millis(150);
+    while Instant::now() < deadline {
+        let mut changed = false;
+        for (board_id, slot) in peers.iter_mut() {
+            let Some(stream) = slot.stream.as_mut() else {
+                continue;
+            };
+            match read_message_timeout(stream, Duration::from_millis(10)) {
+                Ok(msg) => {
+                    let (next, effect) = slot.state.on_message(board_id, msg);
+                    if let Some(PeerEffect::TimeReport {
+                        board_id: id,
+                        virtual_time_ns,
+                    }) = effect.clone()
+                    {
+                        ceiling.report(&id, virtual_time_ns);
+                        changed = true;
+                    } else {
+                        warn_peer(board_id, effect);
+                    }
+                    slot.state = next;
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::TimedOut
+                        || err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    // Peer gone; keep last report in the ceiling.
+                }
+            }
+        }
+        if changed {
+            let next_allowed = ceiling.allowed_ns();
+            if next_allowed != allowed {
+                allowed = next_allowed;
+                for slot in peers.values_mut() {
+                    if let Some(stream) = slot.stream.as_mut() {
+                        if let Err(err) = write_message(
+                            stream,
+                            &ControlMessage::Allowed {
+                                allowed_ns: allowed,
+                            },
+                        ) {
+                            eprintln!("cluster-arbiter: warning: Allowed send failed: {err}");
+                        }
+                    }
+                }
+                eprintln!("cluster-arbiter: Allowed={allowed}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -304,8 +384,12 @@ fn ready_timeout(
 }
 
 fn warn_peer(board_id: &str, effect: Option<PeerEffect>) {
-    if let Some(PeerEffect::Warn(msg)) = effect {
-        eprintln!("cluster-arbiter: warning [{board_id}]: {msg}");
+    match effect {
+        Some(PeerEffect::Warn(msg)) => {
+            eprintln!("cluster-arbiter: warning [{board_id}]: {msg}");
+        }
+        Some(PeerEffect::TimeReport { .. }) => {}
+        None => {}
     }
 }
 
@@ -416,6 +500,11 @@ mod tests {
             .unwrap();
             let start = crate::control::read_message(&mut stream).unwrap();
             assert!(matches!(start, ControlMessage::Start));
+            // Stay connected through the arbiter's short time-sync window.
+            let end = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < end {
+                let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
+            }
         } else {
             let _ = crate::control::read_message(&mut stream);
         }

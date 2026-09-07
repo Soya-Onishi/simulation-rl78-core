@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::breakpoint::BreakpointId;
 use crate::bus::{Addr, BusError};
+use crate::clock::Tick;
 use crate::cpu::RegId;
 use crate::stop::StopReason;
 
@@ -38,6 +39,10 @@ pub enum Command {
     },
     /// Drop every software breakpoint (e.g. new GDB session).
     ClearBreakpoints,
+    /// Multi-board virtual-time ceiling: do not advance past `tick`.
+    SetAllowed {
+        tick: Tick,
+    },
     /// Placeholder for a future multi-board arbiter. Currently a no-op.
     ///
     /// TODO: Invoke this from the kernel when a stop is *committed* (not from

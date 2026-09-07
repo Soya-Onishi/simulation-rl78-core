@@ -59,6 +59,8 @@ pub struct Simulator<C: Cpu> {
     /// When true, the next quantum is capped to one instruction and then stops.
     step_once: bool,
     before_quantum: Option<Box<dyn BeforeQuantum>>,
+    /// Multi-board ceiling: virtual time must not advance past this tick.
+    allowed: Option<Tick>,
 }
 
 impl<C: Cpu> Simulator<C> {
@@ -70,12 +72,19 @@ impl<C: Cpu> Simulator<C> {
             cfg,
             step_once: false,
             before_quantum: None,
+            allowed: None,
         }
     }
 
     /// Install a quantum-entry hook (e.g. B-lite mailbox drain).
     pub fn set_before_quantum(&mut self, hook: impl BeforeQuantum + 'static) {
         self.before_quantum = Some(Box::new(hook));
+    }
+
+    /// Current virtual-time ceiling, if any.
+    #[must_use]
+    pub fn allowed(&self) -> Option<Tick> {
+        self.allowed
     }
 
     #[must_use]
@@ -117,6 +126,10 @@ impl<C: Cpu> Simulator<C> {
                 self.state = SimState::Quit;
                 Response::Quit
             }
+            Command::SetAllowed { tick } => {
+                self.allowed = Some(tick);
+                Response::Inspect(InspectResult::Ok)
+            }
             Command::NotifyHalt { reason: _ } => {
                 // TODO(multi-board): when wired from the kernel stop path, forward
                 // debugger/cluster-relevant stops over IPC and wait for cluster
@@ -142,15 +155,27 @@ impl<C: Cpu> Simulator<C> {
             return Some(response);
         }
 
+        let now = self.machine.clock().now();
+        if let Some(allowed) = self.allowed
+            && allowed.saturating_sub(now).is_zero()
+        {
+            // Hard block at the multi-board ceiling until a new Allowed arrives.
+            return None;
+        }
+
         let ns_per_insn = self.cfg.ns_per_instruction.max(Tick(1));
         let budget_ns = {
-            let now = self.machine.clock().now();
-            self.machine
+            let mut budget = self
+                .machine
                 .events_mut()
                 .next_deadline()
                 .unwrap_or(Tick::MAX)
                 .saturating_sub(now)
-                .min(self.cfg.max_quantum)
+                .min(self.cfg.max_quantum);
+            if let Some(allowed) = self.allowed {
+                budget = budget.min(allowed.saturating_sub(now));
+            }
+            budget
         };
         let max_instructions = if self.step_once {
             1
@@ -276,6 +301,7 @@ impl<C: Cpu> Simulator<C> {
             | Command::Step
             | Command::Stop
             | Command::Quit
+            | Command::SetAllowed { .. }
             | Command::NotifyHalt { .. } => {
                 unreachable!("lifecycle commands are handled in command()")
             }

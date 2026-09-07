@@ -250,11 +250,11 @@ fn stays_halted_until_start() {
 
 #[test]
 fn before_quantum_hook_runs_while_running() {
+    use crate::BeforeQuantum;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use crate::BeforeQuantum;
 
     struct Counter(Arc<AtomicUsize>);
     impl BeforeQuantum for Counter {
@@ -271,6 +271,27 @@ fn before_quantum_hook_runs_while_running() {
     assert_eq!(sim.command(Command::Start), Response::Started);
     let _ = sim.poll();
     assert!(count.load(Ordering::Relaxed) >= 1);
+}
+
+#[test]
+fn allowed_ceiling_hard_blocks_until_raised() {
+    let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(100)), SimConfig::default());
+    assert_eq!(
+        sim.command(Command::SetAllowed { tick: Tick(3) }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    assert_eq!(sim.command(Command::Start), Response::Started);
+    for _ in 0..8 {
+        let _ = sim.poll();
+    }
+    assert_eq!(sim.machine().clock().now(), Tick(3));
+    assert_eq!(sim.poll(), None); // blocked at ceiling
+    assert_eq!(
+        sim.command(Command::SetAllowed { tick: Tick(10) }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    let _ = sim.poll();
+    assert!(sim.machine().clock().now() > Tick(3));
 }
 
 #[test]

@@ -24,6 +24,8 @@ pub enum NodeState {
 pub enum NodeEffect {
     /// Send [`ControlMessage::Ready`] to the arbiter.
     SendReady,
+    /// Apply a new virtual-time ceiling locally.
+    SetAllowed { allowed_ns: u64 },
     /// Log-only; state is unchanged aside from the warning.
     Warn(String),
 }
@@ -41,6 +43,7 @@ impl NodeState {
                 ControlMessage::StartupRecord {
                     board_id: id,
                     shm_segments,
+                    ..
                 },
             ) => {
                 if id != board_id {
@@ -55,6 +58,10 @@ impl NodeState {
                 (NodeState::AwaitingStart, Some(NodeEffect::SendReady))
             }
             (NodeState::AwaitingStart, ControlMessage::Start) => (NodeState::Running, None),
+            (NodeState::Running, ControlMessage::Allowed { allowed_ns }) => (
+                NodeState::Running,
+                Some(NodeEffect::SetAllowed { allowed_ns }),
+            ),
             (
                 NodeState::Running | NodeState::AwaitingStart | NodeState::AwaitingStartup,
                 ControlMessage::ClusterStop { reason },
@@ -92,6 +99,10 @@ pub enum PeerState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerEffect {
     Warn(String),
+    TimeReport {
+        board_id: String,
+        virtual_time_ns: u64,
+    },
 }
 
 impl PeerState {
@@ -134,9 +145,28 @@ impl PeerState {
                     "duplicate Ready from '{board_id}'; ignoring"
                 ))),
             ),
-            (PeerState::Running, ControlMessage::TimeReport { .. }) => {
-                // Phase 4 will act on this; for now accept silently.
-                (PeerState::Running, None)
+            (
+                PeerState::Running,
+                ControlMessage::TimeReport {
+                    board_id,
+                    virtual_time_ns,
+                },
+            ) => {
+                if board_id != expected_board {
+                    return (
+                        self,
+                        Some(PeerEffect::Warn(format!(
+                            "TimeReport board_id '{board_id}' != '{expected_board}'; ignoring"
+                        ))),
+                    );
+                }
+                (
+                    PeerState::Running,
+                    Some(PeerEffect::TimeReport {
+                        board_id,
+                        virtual_time_ns,
+                    }),
+                )
             }
             (state, msg) => (
                 state,
@@ -169,6 +199,8 @@ mod tests {
             ControlMessage::StartupRecord {
                 board_id: "a".into(),
                 shm_segments: vec![],
+                margin_ns: 1000,
+                headroom_threshold_ns: 100,
             },
         );
         assert_eq!(n, NodeState::AwaitingStart);
@@ -187,6 +219,8 @@ mod tests {
             ControlMessage::StartupRecord {
                 board_id: "a".into(),
                 shm_segments: vec![],
+                margin_ns: 1000,
+                headroom_threshold_ns: 100,
             },
         );
         assert_eq!(n, NodeState::Running);

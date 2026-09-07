@@ -19,6 +19,10 @@ pub enum ControlMessage {
         board_id: String,
         /// SHM link names this node must attach (Phase 3 fills these).
         shm_segments: Vec<ShmBinding>,
+        /// Virtual-time skew margin (ns); copied from topology for the node.
+        margin_ns: u64,
+        /// Report when `allowed - now` falls below this (ns).
+        headroom_threshold_ns: u64,
     },
     /// Node → arbiter: control + SHM attach complete.
     Ready { board_id: String },

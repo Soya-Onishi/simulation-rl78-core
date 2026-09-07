@@ -11,6 +11,7 @@ pub mod lifecycle;
 pub mod node;
 pub mod server;
 pub mod shm_uart;
+pub mod time_sync;
 pub mod topology;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
@@ -20,6 +21,7 @@ pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use node::{NodeError, NodeOptions, run_node};
 pub use server::{ServerError, ServerOptions, run_server};
 pub use shm_uart::{ShmUartError, ShmUartFrame, UartShmEndpoint, UartShmOwner};
+pub use time_sync::TimeCeiling;
 pub use topology::{
     BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
     TopologyError, parse_logical_topology,
