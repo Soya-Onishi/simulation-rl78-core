@@ -6,12 +6,14 @@
 
 pub mod arbiter;
 pub mod control;
+pub mod lifecycle;
 pub mod node;
 pub mod server;
 pub mod topology;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use control::{ControlMessage, ShmBinding, ShmRole};
+pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use node::{NodeError, NodeOptions, run_node};
 pub use server::{ServerError, ServerOptions, run_server};
 pub use topology::{

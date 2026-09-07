@@ -1,4 +1,8 @@
 //! Arbiter: bind control resources, spawn nodes, Ready barrier, Start.
+//!
+//! Per-peer progress is an event-driven [`PeerState`] machine. Unexpected
+//! messages warn and are ignored; only Ready-barrier timeout is fatal for
+//! starting the simulation.
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,6 +14,7 @@ use crate::control::{
     ControlMessage, accept_timeout, bind_listener, default_control_dir, read_message_timeout,
     write_message,
 };
+use crate::lifecycle::{PeerEffect, PeerState};
 use crate::topology::{LogicalTopology, TopologyError};
 
 /// Arbiter failures.
@@ -111,6 +116,11 @@ pub fn run_arbiter_with_topology(
     result
 }
 
+struct PeerSlot {
+    state: PeerState,
+    stream: Option<std::os::unix::net::UnixStream>,
+}
+
 fn ready_barrier_and_start(
     topo: &LogicalTopology,
     listeners: &mut [(String, PathBuf, std::os::unix::net::UnixListener)],
@@ -118,95 +128,128 @@ fn ready_barrier_and_start(
     let timeout = Duration::from_millis(topo.ready_timeout_ms);
     let deadline = Instant::now() + timeout;
     let expected: Vec<String> = topo.boards.iter().map(|b| b.id.clone()).collect();
-    let mut streams = HashMap::new();
+    let mut peers: HashMap<String, PeerSlot> = expected
+        .iter()
+        .map(|id| {
+            (
+                id.clone(),
+                PeerSlot {
+                    state: PeerState::Accepting,
+                    stream: None,
+                },
+            )
+        })
+        .collect();
 
-    // Accept one connection per board (nodes connect to their dedicated socket).
-    for (board_id, _sock, listener) in listeners.iter() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let Some(mut stream) = accept_timeout(listener, remaining)? else {
-            let missing = expected
-                .iter()
-                .filter(|id| !streams.contains_key(*id))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",");
-            return Err(ArbiterError::ReadyTimeout {
-                timeout_ms: topo.ready_timeout_ms,
-                missing,
-            });
-        };
-
-        let startup = ControlMessage::StartupRecord {
-            board_id: board_id.clone(),
-            shm_segments: Vec::new(),
-        };
-        write_message(&mut stream, &startup)?;
-        streams.insert(board_id.clone(), stream);
-    }
-
-    // Collect Ready from every connected node.
-    let mut ready = std::collections::HashSet::new();
-    while ready.len() < expected.len() {
+    // Accept connections (event: connect) until every peer is AwaitingReady or timeout.
+    while peers.values().any(|p| p.state == PeerState::Accepting) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            let missing = expected
-                .iter()
-                .filter(|id| !ready.contains(*id))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",");
-            return Err(ArbiterError::ReadyTimeout {
-                timeout_ms: topo.ready_timeout_ms,
-                missing,
-            });
+            return ready_timeout(topo, &peers);
         }
-
-        let mut progress = false;
-        for (board_id, stream) in streams.iter_mut() {
-            if ready.contains(board_id) {
+        let mut progressed = false;
+        for (board_id, _sock, listener) in listeners.iter() {
+            let Some(slot) = peers.get_mut(board_id) else {
+                continue;
+            };
+            if slot.state != PeerState::Accepting {
                 continue;
             }
-            // Short poll per socket so we can rotate among peers.
+            let slice = remaining.min(Duration::from_millis(20));
+            if let Some(mut stream) = accept_timeout(listener, slice)? {
+                let (next, effect) = slot.state.on_connected();
+                warn_peer(board_id, effect);
+                let startup = ControlMessage::StartupRecord {
+                    board_id: board_id.clone(),
+                    shm_segments: Vec::new(),
+                };
+                write_message(&mut stream, &startup)?;
+                slot.state = next;
+                slot.stream = Some(stream);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    // Collect Ready events until all peers are Ready or timeout.
+    while peers.values().any(|p| p.state != PeerState::Ready) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return ready_timeout(topo, &peers);
+        }
+
+        let mut progressed = false;
+        for (board_id, slot) in peers.iter_mut() {
+            if slot.state == PeerState::Ready {
+                continue;
+            }
+            let Some(stream) = slot.stream.as_mut() else {
+                continue;
+            };
             let slice = remaining.min(Duration::from_millis(50));
             match read_message_timeout(stream, slice) {
-                Ok(ControlMessage::Ready { board_id: id }) => {
-                    if &id != board_id {
-                        return Err(ArbiterError::Message(format!(
-                            "ready from unexpected board '{id}' on socket for '{board_id}'"
-                        )));
+                Ok(msg) => {
+                    let (next, effect) = slot.state.on_message(board_id, msg);
+                    warn_peer(board_id, effect);
+                    if next != slot.state {
+                        eprintln!(
+                            "cluster-arbiter: peer '{board_id}' {:?} -> {next:?}",
+                            slot.state
+                        );
                     }
-                    ready.insert(id);
-                    progress = true;
-                }
-                Ok(other) => {
-                    return Err(ArbiterError::Message(format!(
-                        "expected Ready from '{board_id}', got {other:?}"
-                    )));
+                    slot.state = next;
+                    progressed = true;
                 }
                 Err(err)
                     if err.kind() == std::io::ErrorKind::TimedOut
-                        || err.kind() == std::io::ErrorKind::WouldBlock =>
-                {
-                    // try next peer
-                }
+                        || err.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(err) => return Err(ArbiterError::Io(err)),
             }
         }
-        if !progress {
+        if !progressed {
             std::thread::sleep(Duration::from_millis(5));
         }
     }
 
     eprintln!(
         "cluster-arbiter: Ready barrier complete ({} nodes)",
-        ready.len()
+        peers.len()
     );
 
-    for stream in streams.values_mut() {
-        write_message(stream, &ControlMessage::Start)?;
+    for (board_id, slot) in peers.iter_mut() {
+        if let Some(stream) = slot.stream.as_mut() {
+            write_message(stream, &ControlMessage::Start)?;
+        }
+        slot.state = slot.state.on_start_broadcast();
+        eprintln!("cluster-arbiter: peer '{board_id}' -> {:?}", slot.state);
     }
     eprintln!("cluster-arbiter: Start broadcast");
     Ok(())
+}
+
+fn ready_timeout(
+    topo: &LogicalTopology,
+    peers: &HashMap<String, PeerSlot>,
+) -> Result<(), ArbiterError> {
+    let missing = peers
+        .iter()
+        .filter(|(_, p)| p.state != PeerState::Ready)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    Err(ArbiterError::ReadyTimeout {
+        timeout_ms: topo.ready_timeout_ms,
+        missing,
+    })
+}
+
+fn warn_peer(board_id: &str, effect: Option<PeerEffect>) {
+    if let Some(PeerEffect::Warn(msg)) = effect {
+        eprintln!("cluster-arbiter: warning [{board_id}]: {msg}");
+    }
 }
 
 /// Convenience for the binary: topology path only.
@@ -285,7 +328,6 @@ mod tests {
     }
 
     fn fake_node(sock: PathBuf, board_id: String, send_ready: bool) {
-        // Retry connect until the listener exists.
         let mut stream = loop {
             match UnixStream::connect(&sock) {
                 Ok(s) => break s,
@@ -300,6 +342,14 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         if send_ready {
+            // Duplicate Ready should be warned, not fatal.
+            write_message(
+                &mut stream,
+                &ControlMessage::Ready {
+                    board_id: board_id.clone(),
+                },
+            )
+            .unwrap();
             write_message(
                 &mut stream,
                 &ControlMessage::Ready {
@@ -310,7 +360,6 @@ mod tests {
             let start = crate::control::read_message(&mut stream).unwrap();
             assert!(matches!(start, ControlMessage::Start));
         } else {
-            // Stay quiet until the arbiter drops the socket on timeout.
             let _ = crate::control::read_message(&mut stream);
         }
     }
@@ -346,7 +395,7 @@ mod tests {
             let listener = bind_listener(&sock).unwrap();
             let sock2 = sock.clone();
             let id = board.id.clone();
-            let send = i == 0; // only first board sends Ready
+            let send = i == 0;
             joins.push(thread::spawn(move || fake_node(sock2, id, send)));
             listeners.push((board.id.clone(), sock, listener));
         }

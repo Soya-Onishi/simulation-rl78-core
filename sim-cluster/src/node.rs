@@ -1,4 +1,4 @@
-//! Minimal cluster node (Phase 2): control connect, Ready, wait for Start.
+//! Minimal cluster node: event-driven control handshake, then hold.
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -6,8 +6,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::control::{ControlMessage, read_message, write_message};
+use crate::lifecycle::{NodeEffect, NodeState};
 
-/// Node-side failures.
+/// Node-side failures (I/O / unrecoverable only).
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
     #[error("I/O error: {0}")]
@@ -16,54 +17,52 @@ pub enum NodeError {
     Message(String),
 }
 
-/// Connect to the arbiter control socket and complete the Ready / Start handshake.
+/// Connect to the arbiter control socket and drive the node state machine.
 ///
-/// Phase 2: exits after Start. Later phases keep the simulation thread running.
+/// Phase 2: exits shortly after reaching [`NodeState::Running`]. Later phases
+/// keep the simulation thread alive inside Running.
 pub fn run_node(board_id: &str, control: &Path) -> Result<(), NodeError> {
     let mut stream = connect_with_retry(control, Duration::from_secs(5))?;
-    let startup = read_message(&mut stream)?;
-    match startup {
-        ControlMessage::StartupRecord {
-            board_id: id,
-            shm_segments,
-        } => {
-            if id != board_id {
-                return Err(NodeError::Message(format!(
-                    "startup board_id '{id}' != --board-id '{board_id}'"
-                )));
-            }
-            eprintln!(
-                "cluster-node[{board_id}]: StartupRecord ({} shm segments)",
-                shm_segments.len()
-            );
+    let mut state = NodeState::AwaitingStartup;
+
+    while !matches!(state, NodeState::Running | NodeState::Stopped) {
+        let msg = read_message(&mut stream)?;
+        let (next, effect) = state.on_message(board_id, msg);
+        if let Some(effect) = effect {
+            apply_effect(board_id, &mut stream, effect)?;
         }
-        other => {
-            return Err(NodeError::Message(format!(
-                "expected StartupRecord, got {other:?}"
-            )));
+        if next != state {
+            eprintln!("cluster-node[{board_id}]: {state:?} -> {next:?}");
         }
+        state = next;
     }
 
-    write_message(
-        &mut stream,
-        &ControlMessage::Ready {
-            board_id: board_id.to_string(),
-        },
-    )?;
-    eprintln!("cluster-node[{board_id}]: Ready");
+    if state == NodeState::Running {
+        // Hold briefly so the arbiter can observe a live child.
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
 
-    let start = read_message(&mut stream)?;
-    match start {
-        ControlMessage::Start => {
-            eprintln!("cluster-node[{board_id}]: Start");
+fn apply_effect(
+    board_id: &str,
+    stream: &mut UnixStream,
+    effect: NodeEffect,
+) -> Result<(), NodeError> {
+    match effect {
+        NodeEffect::SendReady => {
+            write_message(
+                stream,
+                &ControlMessage::Ready {
+                    board_id: board_id.to_string(),
+                },
+            )?;
+            eprintln!("cluster-node[{board_id}]: Ready");
         }
-        other => {
-            return Err(NodeError::Message(format!("expected Start, got {other:?}")));
+        NodeEffect::Warn(msg) => {
+            eprintln!("cluster-node[{board_id}]: warning: {msg}");
         }
     }
-
-    // Hold the process briefly so the arbiter can observe a live child.
-    thread::sleep(Duration::from_millis(100));
     Ok(())
 }
 
