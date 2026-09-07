@@ -295,6 +295,7 @@ fn run_time_sync(
     topo: &LogicalTopology,
     peers: &mut HashMap<String, PeerSlot>,
 ) -> Result<(), ArbiterError> {
+    use crate::cluster_stop::is_cluster_relevant_reason;
     use crate::time_sync::TimeCeiling;
 
     let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
@@ -313,10 +314,11 @@ fn run_time_sync(
     }
     eprintln!("cluster-arbiter: initial Allowed={allowed}");
 
-    // Brief sync window before Phase 2 teardown; later phases keep this loop.
-    let deadline = Instant::now() + Duration::from_millis(150);
+    // Post-start event loop: time ceiling + cluster stop. Brief window for MVP.
+    let deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < deadline {
         let mut changed = false;
+        let mut cluster_stop: Option<(String, String)> = None;
         for (board_id, slot) in peers.iter_mut() {
             let Some(stream) = slot.stream.as_mut() else {
                 continue;
@@ -324,15 +326,27 @@ fn run_time_sync(
             match read_message_timeout(stream, Duration::from_millis(10)) {
                 Ok(msg) => {
                     let (next, effect) = slot.state.on_message(board_id, msg);
-                    if let Some(PeerEffect::TimeReport {
-                        board_id: id,
-                        virtual_time_ns,
-                    }) = effect.clone()
-                    {
-                        ceiling.report(&id, virtual_time_ns);
-                        changed = true;
-                    } else {
-                        warn_peer(board_id, effect);
+                    match effect.clone() {
+                        Some(PeerEffect::TimeReport {
+                            board_id: id,
+                            virtual_time_ns,
+                        }) => {
+                            ceiling.report(&id, virtual_time_ns);
+                            changed = true;
+                        }
+                        Some(PeerEffect::HostStop {
+                            board_id: id,
+                            reason,
+                        }) => {
+                            if is_cluster_relevant_reason(&reason) {
+                                cluster_stop = Some((id, reason));
+                            } else {
+                                eprintln!(
+                                    "cluster-arbiter: ignoring non-cluster HostStop from '{id}': {reason}"
+                                );
+                            }
+                        }
+                        other => warn_peer(board_id, other),
                     }
                     slot.state = next;
                 }
@@ -343,6 +357,13 @@ fn run_time_sync(
                     // Peer gone; keep last report in the ceiling.
                 }
             }
+        }
+        if let Some((source, reason)) = cluster_stop {
+            eprintln!(
+                "cluster-arbiter: HostStop from '{source}' ({reason}); broadcasting ClusterStop"
+            );
+            broadcast_cluster_stop(peers, &source, &reason);
+            return Ok(());
         }
         if changed {
             let next_allowed = ceiling.allowed_ns();
@@ -367,6 +388,24 @@ fn run_time_sync(
     Ok(())
 }
 
+fn broadcast_cluster_stop(peers: &mut HashMap<String, PeerSlot>, source: &str, reason: &str) {
+    let msg = ControlMessage::ClusterStop {
+        reason: reason.to_string(),
+    };
+    for (board_id, slot) in peers.iter_mut() {
+        if board_id == source {
+            slot.state = PeerState::Stopped;
+            continue;
+        }
+        if let Some(stream) = slot.stream.as_mut() {
+            if let Err(err) = write_message(stream, &msg) {
+                eprintln!("cluster-arbiter: warning: ClusterStop to '{board_id}' failed: {err}");
+            }
+        }
+        slot.state = PeerState::Stopped;
+    }
+}
+
 fn ready_timeout(
     topo: &LogicalTopology,
     peers: &HashMap<String, PeerSlot>,
@@ -388,8 +427,7 @@ fn warn_peer(board_id: &str, effect: Option<PeerEffect>) {
         Some(PeerEffect::Warn(msg)) => {
             eprintln!("cluster-arbiter: warning [{board_id}]: {msg}");
         }
-        Some(PeerEffect::TimeReport { .. }) => {}
-        None => {}
+        Some(PeerEffect::TimeReport { .. }) | Some(PeerEffect::HostStop { .. }) | None => {}
     }
 }
 
@@ -469,6 +507,15 @@ mod tests {
     }
 
     fn fake_node(sock: PathBuf, board_id: String, send_ready: bool) {
+        fake_node_behavior(sock, board_id, send_ready, false);
+    }
+
+    fn fake_node_behavior(
+        sock: PathBuf,
+        board_id: String,
+        send_ready: bool,
+        inject_host_stop: bool,
+    ) {
         let mut stream = loop {
             match UnixStream::connect(&sock) {
                 Ok(s) => break s,
@@ -491,19 +538,38 @@ mod tests {
                 },
             )
             .unwrap();
-            write_message(
+            let _ = write_message(
                 &mut stream,
                 &ControlMessage::Ready {
                     board_id: board_id.clone(),
                 },
-            )
-            .unwrap();
-            let start = crate::control::read_message(&mut stream).unwrap();
+            );
+            // Ready-timeout tests may drop the peer before Start arrives.
+            let Ok(start) = crate::control::read_message(&mut stream) else {
+                return;
+            };
             assert!(matches!(start, ControlMessage::Start));
-            // Stay connected through the arbiter's short time-sync window.
-            let end = Instant::now() + Duration::from_millis(250);
-            while Instant::now() < end {
-                let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
+            if inject_host_stop {
+                // Drain initial Allowed, then HostStop.
+                let _ = read_message_timeout(&mut stream, Duration::from_millis(50));
+                write_message(
+                    &mut stream,
+                    &ControlMessage::HostStop {
+                        board_id: board_id.clone(),
+                        reason: "breakpoint".into(),
+                    },
+                )
+                .unwrap();
+                let end = Instant::now() + Duration::from_millis(200);
+                while Instant::now() < end {
+                    let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
+                }
+            } else {
+                // Stay connected through the arbiter's short time-sync window.
+                let end = Instant::now() + Duration::from_millis(350);
+                while Instant::now() < end {
+                    let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
+                }
             }
         } else {
             let _ = crate::control::read_message(&mut stream);
@@ -550,5 +616,85 @@ mod tests {
         for j in joins {
             let _ = j.join();
         }
+    }
+
+    #[test]
+    fn host_stop_broadcasts_cluster_stop() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let topo = two_board_topo(2_000);
+        let mut listeners = Vec::new();
+        let mut joins = Vec::new();
+        let saw_cluster_stop = Arc::new(Mutex::new(false));
+
+        for board in &topo.boards {
+            let sock = dir.path().join(format!("{}.sock", board.id));
+            let listener = bind_listener(&sock).unwrap();
+            let sock2 = sock.clone();
+            let id = board.id.clone();
+            let flag = Arc::clone(&saw_cluster_stop);
+            let inject = id == "a";
+            joins.push(thread::spawn(move || {
+                let mut stream = loop {
+                    match UnixStream::connect(&sock2) {
+                        Ok(s) => break s,
+                        Err(_) => thread::sleep(Duration::from_millis(5)),
+                    }
+                };
+                let startup = crate::control::read_message(&mut stream).unwrap();
+                assert!(matches!(
+                    startup,
+                    ControlMessage::StartupRecord { board_id: ref bid, .. } if *bid == id
+                ));
+                write_message(
+                    &mut stream,
+                    &ControlMessage::Ready {
+                        board_id: id.clone(),
+                    },
+                )
+                .unwrap();
+                let start = crate::control::read_message(&mut stream).unwrap();
+                assert!(matches!(start, ControlMessage::Start));
+                if inject {
+                    let _ = read_message_timeout(&mut stream, Duration::from_millis(50));
+                    write_message(
+                        &mut stream,
+                        &ControlMessage::HostStop {
+                            board_id: id.clone(),
+                            reason: "breakpoint".into(),
+                        },
+                    )
+                    .unwrap();
+                    let end = Instant::now() + Duration::from_millis(200);
+                    while Instant::now() < end {
+                        let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
+                    }
+                } else {
+                    let end = Instant::now() + Duration::from_millis(400);
+                    while Instant::now() < end {
+                        match read_message_timeout(&mut stream, Duration::from_millis(20)) {
+                            Ok(ControlMessage::ClusterStop { reason }) => {
+                                assert_eq!(reason, "breakpoint");
+                                *flag.lock().unwrap() = true;
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }));
+            listeners.push((board.id.clone(), sock, listener));
+        }
+
+        ready_barrier_and_start(&topo, &mut listeners, &HashMap::new()).unwrap();
+        for j in joins {
+            j.join().unwrap();
+        }
+        assert!(
+            *saw_cluster_stop.lock().unwrap(),
+            "peer should receive ClusterStop after HostStop"
+        );
     }
 }

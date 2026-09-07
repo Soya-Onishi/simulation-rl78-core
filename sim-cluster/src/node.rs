@@ -93,9 +93,26 @@ impl NodeAttachments {
     }
 }
 
+/// Optional HostStop injection for smoke / E2E without a wired Machine.
+#[derive(Clone, Debug)]
+pub struct InjectHostStop {
+    pub after_ms: u64,
+    pub reason: String,
+}
+
 /// Connect to the arbiter control socket and drive the node state machine.
 pub fn run_node(board_id: &str, control: &Path) -> Result<(), NodeError> {
-    let mut stream = connect_with_retry(control, Duration::from_secs(5))?;
+    run_node_with_options(NodeOptions {
+        board_id: board_id.to_string(),
+        control: control.to_path_buf(),
+        inject_host_stop: None,
+    })
+}
+
+/// Same as [`run_node`], with optional HostStop injection after Start.
+pub fn run_node_with_options(opts: NodeOptions) -> Result<(), NodeError> {
+    let board_id = opts.board_id.as_str();
+    let mut stream = connect_with_retry(&opts.control, Duration::from_secs(5))?;
     let mut state = NodeState::AwaitingStartup;
     let mut attachments: Option<NodeAttachments> = None;
     let mut headroom_threshold_ns = 0_u64;
@@ -135,9 +152,33 @@ pub fn run_node(board_id: &str, control: &Path) -> Result<(), NodeError> {
             &mut allowed_ns,
             &mut virtual_time_ns,
             headroom_threshold_ns,
+            opts.inject_host_stop.as_ref(),
         )?;
     }
     Ok(())
+}
+
+/// Notify the arbiter of a host-initiated stop when the reason is cluster-relevant.
+///
+/// Returns `Ok(true)` if [`ControlMessage::HostStop`] was sent.
+pub fn notify_host_stop(
+    stream: &mut UnixStream,
+    board_id: &str,
+    reason: &str,
+) -> Result<bool, NodeError> {
+    use crate::cluster_stop::is_cluster_relevant_reason;
+
+    if !is_cluster_relevant_reason(reason) {
+        return Ok(false);
+    }
+    write_message(
+        stream,
+        &ControlMessage::HostStop {
+            board_id: board_id.to_string(),
+            reason: reason.to_string(),
+        },
+    )?;
+    Ok(true)
 }
 
 fn run_while_running(
@@ -147,9 +188,35 @@ fn run_while_running(
     allowed_ns: &mut u64,
     virtual_time_ns: &mut u64,
     headroom_threshold_ns: u64,
+    inject: Option<&InjectHostStop>,
 ) -> Result<(), NodeError> {
-    let deadline = Instant::now() + Duration::from_millis(200);
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(200);
+    let mut host_stop_sent = false;
     while Instant::now() < deadline && *state == NodeState::Running {
+        if let Some(inj) = inject
+            && !host_stop_sent
+            && started.elapsed() >= Duration::from_millis(inj.after_ms)
+        {
+            match notify_host_stop(stream, board_id, &inj.reason)? {
+                true => {
+                    eprintln!(
+                        "cluster-node[{board_id}]: HostStop injected ({})",
+                        inj.reason
+                    );
+                    *state = NodeState::Stopped;
+                    break;
+                }
+                false => {
+                    eprintln!(
+                        "cluster-node[{board_id}]: inject HostStop ignored (non-cluster reason {})",
+                        inj.reason
+                    );
+                    host_stop_sent = true;
+                }
+            }
+        }
+
         match read_message_timeout(stream, Duration::from_millis(10)) {
             Ok(msg) => {
                 let (next, effect) = state.on_message(board_id, msg);
@@ -244,4 +311,6 @@ fn connect_with_retry(path: &Path, budget: Duration) -> Result<UnixStream, NodeE
 pub struct NodeOptions {
     pub board_id: String,
     pub control: PathBuf,
+    /// When set, send HostStop after Start (MVP smoke without Machine).
+    pub inject_host_stop: Option<InjectHostStop>,
 }

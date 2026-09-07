@@ -103,6 +103,10 @@ pub enum PeerEffect {
         board_id: String,
         virtual_time_ns: u64,
     },
+    HostStop {
+        board_id: String,
+        reason: String,
+    },
 }
 
 impl PeerState {
@@ -166,6 +170,20 @@ impl PeerState {
                         board_id,
                         virtual_time_ns,
                     }),
+                )
+            }
+            (PeerState::Running, ControlMessage::HostStop { board_id, reason }) => {
+                if board_id != expected_board {
+                    return (
+                        self,
+                        Some(PeerEffect::Warn(format!(
+                            "HostStop board_id '{board_id}' != '{expected_board}'; ignoring"
+                        ))),
+                    );
+                }
+                (
+                    PeerState::Stopped,
+                    Some(PeerEffect::HostStop { board_id, reason }),
                 )
             }
             (state, msg) => (
@@ -250,5 +268,38 @@ mod tests {
         );
         assert_eq!(n, PeerState::Ready);
         assert!(matches!(eff, Some(PeerEffect::Warn(_))));
+    }
+
+    #[test]
+    fn peer_host_stop_while_running() {
+        let s = PeerState::Running;
+        let (n, eff) = s.on_message(
+            "a",
+            ControlMessage::HostStop {
+                board_id: "a".into(),
+                reason: "breakpoint".into(),
+            },
+        );
+        assert_eq!(n, PeerState::Stopped);
+        assert_eq!(
+            eff,
+            Some(PeerEffect::HostStop {
+                board_id: "a".into(),
+                reason: "breakpoint".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn node_cluster_stop_while_running() {
+        let s = NodeState::Running;
+        let (n, eff) = s.on_message(
+            "b",
+            ControlMessage::ClusterStop {
+                reason: "breakpoint".into(),
+            },
+        );
+        assert_eq!(n, NodeState::Stopped);
+        assert!(matches!(eff, Some(NodeEffect::Warn(_))));
     }
 }

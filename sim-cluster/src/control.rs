@@ -35,6 +35,9 @@ pub enum ControlMessage {
     },
     /// Arbiter → node: new virtual-time ceiling.
     Allowed { allowed_ns: u64 },
+    /// Node → arbiter: host-initiated stop (BP / external / step / unmapped).
+    /// Guest-local Halt must not be sent.
+    HostStop { board_id: String, reason: String },
     /// Arbiter → node: host-initiated cluster stop (no ack on same host).
     ClusterStop { reason: String },
 }
