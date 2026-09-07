@@ -43,6 +43,14 @@ pub enum SimState {
     Quit,
 }
 
+/// Optional hook invoked at the start of each [`Simulator::poll`] quantum.
+///
+/// Used by multi-board nodes to drain B-lite receive mailboxes into
+/// `ExternalSource` on the simulation thread only.
+pub trait BeforeQuantum: Send {
+    fn before_quantum(&mut self);
+}
+
 /// In-thread simulator. [`spawn`] runs this on a dedicated thread.
 pub struct Simulator<C: Cpu> {
     machine: Machine<C>,
@@ -50,6 +58,7 @@ pub struct Simulator<C: Cpu> {
     cfg: SimConfig,
     /// When true, the next quantum is capped to one instruction and then stops.
     step_once: bool,
+    before_quantum: Option<Box<dyn BeforeQuantum>>,
 }
 
 impl<C: Cpu> Simulator<C> {
@@ -60,7 +69,13 @@ impl<C: Cpu> Simulator<C> {
             state: SimState::Stopped,
             cfg,
             step_once: false,
+            before_quantum: None,
         }
+    }
+
+    /// Install a quantum-entry hook (e.g. B-lite mailbox drain).
+    pub fn set_before_quantum(&mut self, hook: impl BeforeQuantum + 'static) {
+        self.before_quantum = Some(Box::new(hook));
     }
 
     #[must_use]
@@ -117,6 +132,10 @@ impl<C: Cpu> Simulator<C> {
     pub fn poll(&mut self) -> Option<Response> {
         if self.state != SimState::Running {
             return None;
+        }
+
+        if let Some(hook) = self.before_quantum.as_mut() {
+            hook.before_quantum();
         }
 
         if let Some(response) = self.fire_due_events() {

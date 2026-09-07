@@ -278,6 +278,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     struct DummySink<T> {
         last: Arc<Mutex<Option<(Vec<T>, usize)>>>,
     }

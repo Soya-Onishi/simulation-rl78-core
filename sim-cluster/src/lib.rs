@@ -5,17 +5,21 @@
 //! dependencies. Architecture crates and the single-board CLI are unchanged.
 
 pub mod arbiter;
+pub mod blit;
 pub mod control;
 pub mod lifecycle;
 pub mod node;
 pub mod server;
+pub mod shm_uart;
 pub mod topology;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
+pub use blit::{UartInbox, UartRxThread};
 pub use control::{ControlMessage, ShmBinding, ShmRole};
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use node::{NodeError, NodeOptions, run_node};
 pub use server::{ServerError, ServerOptions, run_server};
+pub use shm_uart::{ShmUartError, ShmUartFrame, UartShmEndpoint, UartShmOwner};
 pub use topology::{
     BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
     TopologyError, parse_logical_topology,

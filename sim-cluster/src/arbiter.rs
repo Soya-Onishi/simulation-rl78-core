@@ -11,11 +11,12 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::control::{
-    ControlMessage, accept_timeout, bind_listener, default_control_dir, read_message_timeout,
-    write_message,
+    ControlMessage, ShmBinding, ShmRole, accept_timeout, bind_listener, default_control_dir,
+    read_message_timeout, write_message,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
-use crate::topology::{LogicalTopology, TopologyError};
+use crate::shm_uart::{ShmUartError, UartShmOwner};
+use crate::topology::{DirectedEdge, LogicalTopology, PayloadKind, TopologyError};
 
 /// Arbiter failures.
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +27,8 @@ pub enum ArbiterError {
     Topology(#[from] TopologyError),
     #[error("ready barrier timed out after {timeout_ms}ms; missing boards: {missing}")]
     ReadyTimeout { timeout_ms: u64, missing: String },
+    #[error("shm error: {0}")]
+    Shm(#[from] ShmUartError),
     #[error("{0}")]
     Message(String),
 }
@@ -81,6 +84,10 @@ pub fn run_arbiter_with_topology(
 
     fs::create_dir_all(&opts.control_dir)?;
 
+    let edge_bindings = create_edge_shm(topo, &opts.control_dir)?;
+    // Keep owners alive for the cluster lifetime (Drop unlinks flinks).
+    let _shm_owners: Vec<UartShmOwner> = edge_bindings.owners;
+
     let mut children: Vec<Child> = Vec::new();
     let mut listeners = Vec::new();
 
@@ -101,7 +108,7 @@ pub fn run_arbiter_with_topology(
         children.push(child);
     }
 
-    let result = ready_barrier_and_start(topo, &mut listeners);
+    let result = ready_barrier_and_start(topo, &mut listeners, &edge_bindings.by_board);
     if result.is_ok() {
         // Phase 2: Start delivered; leave nodes running briefly then stop.
         // Later phases keep the arbiter event loop alive.
@@ -121,9 +128,58 @@ struct PeerSlot {
     stream: Option<std::os::unix::net::UnixStream>,
 }
 
+struct EdgeShmBundle {
+    owners: Vec<UartShmOwner>,
+    by_board: HashMap<String, Vec<ShmBinding>>,
+}
+
+fn edge_id(edge: &DirectedEdge) -> String {
+    format!(
+        "{}:{}->{}:{}",
+        edge.from_board, edge.from_endpoint, edge.to_board, edge.to_endpoint
+    )
+}
+
+fn create_edge_shm(
+    topo: &LogicalTopology,
+    control_dir: &Path,
+) -> Result<EdgeShmBundle, ArbiterError> {
+    let mut owners = Vec::new();
+    let mut by_board: HashMap<String, Vec<ShmBinding>> = HashMap::new();
+    for (i, edge) in topo.edges.iter().enumerate() {
+        if edge.payload != PayloadKind::Uart {
+            continue;
+        }
+        let id = edge_id(edge);
+        let flink = control_dir.join(format!("uart-edge-{i}.shm"));
+        let capacity = LogicalTopology::uart_ring_len(edge);
+        let owner = UartShmOwner::create(&flink, capacity)?;
+        let flink_name = owner.flink().display().to_string();
+        by_board
+            .entry(edge.from_board.clone())
+            .or_default()
+            .push(ShmBinding {
+                edge_id: id.clone(),
+                flink_name: flink_name.clone(),
+                role: ShmRole::Producer,
+            });
+        by_board
+            .entry(edge.to_board.clone())
+            .or_default()
+            .push(ShmBinding {
+                edge_id: id,
+                flink_name,
+                role: ShmRole::Consumer,
+            });
+        owners.push(owner);
+    }
+    Ok(EdgeShmBundle { owners, by_board })
+}
+
 fn ready_barrier_and_start(
     topo: &LogicalTopology,
     listeners: &mut [(String, PathBuf, std::os::unix::net::UnixListener)],
+    bindings_by_board: &HashMap<String, Vec<ShmBinding>>,
 ) -> Result<(), ArbiterError> {
     let timeout = Duration::from_millis(topo.ready_timeout_ms);
     let deadline = Instant::now() + timeout;
@@ -159,9 +215,10 @@ fn ready_barrier_and_start(
             if let Some(mut stream) = accept_timeout(listener, slice)? {
                 let (next, effect) = slot.state.on_connected();
                 warn_peer(board_id, effect);
+                let shm_segments = bindings_by_board.get(board_id).cloned().unwrap_or_default();
                 let startup = ControlMessage::StartupRecord {
                     board_id: board_id.clone(),
-                    shm_segments: Vec::new(),
+                    shm_segments,
                 };
                 write_message(&mut stream, &startup)?;
                 slot.state = next;
@@ -378,7 +435,7 @@ mod tests {
             joins.push(thread::spawn(move || fake_node(sock2, id, true)));
             listeners.push((board.id.clone(), sock, listener));
         }
-        ready_barrier_and_start(&topo, &mut listeners).unwrap();
+        ready_barrier_and_start(&topo, &mut listeners, &HashMap::new()).unwrap();
         for j in joins {
             j.join().unwrap();
         }
@@ -399,7 +456,7 @@ mod tests {
             joins.push(thread::spawn(move || fake_node(sock2, id, send)));
             listeners.push((board.id.clone(), sock, listener));
         }
-        let err = ready_barrier_and_start(&topo, &mut listeners).unwrap_err();
+        let err = ready_barrier_and_start(&topo, &mut listeners, &HashMap::new()).unwrap_err();
         assert!(matches!(err, ArbiterError::ReadyTimeout { .. }));
         for j in joins {
             let _ = j.join();

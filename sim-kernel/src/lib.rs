@@ -39,7 +39,10 @@ pub use external::{ExternalError, ExternalId, ExternalSink, ExternalSource};
 pub use gdb::{GdbBindError, listen_gdb, parse_gdb_dev};
 pub use machine::Machine;
 pub use reset::Resettable;
-pub use sim::{SimConfig, SimControl, SimEvents, SimState, Simulator, spawn};
+pub use sim::{
+    BeforeQuantum, DEFAULT_MAX_QUANTUM, SimConfig, SimControl, SimEvents, SimState, Simulator,
+    spawn,
+};
 pub use stop::StopReason;
 pub use wiring::{
     AnalogVoltage, DigitalLevel, SolidWire, SourcePort, U0, U1, UartFrame, UartParity,

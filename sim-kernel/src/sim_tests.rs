@@ -249,6 +249,31 @@ fn stays_halted_until_start() {
 }
 
 #[test]
+fn before_quantum_hook_runs_while_running() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use crate::BeforeQuantum;
+
+    struct Counter(Arc<AtomicUsize>);
+    impl BeforeQuantum for Counter {
+        fn before_quantum(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(8)), SimConfig::default());
+    sim.set_before_quantum(Counter(Arc::clone(&count)));
+    assert_eq!(sim.poll(), None); // Stopped: hook must not run
+    assert_eq!(count.load(Ordering::Relaxed), 0);
+    assert_eq!(sim.command(Command::Start), Response::Started);
+    let _ = sim.poll();
+    assert!(count.load(Ordering::Relaxed) >= 1);
+}
+
+#[test]
 fn step_runs_one_instruction_then_stops() {
     let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(8)), SimConfig::default());
     assert_eq!(sim.command(Command::Step), Response::Started);
