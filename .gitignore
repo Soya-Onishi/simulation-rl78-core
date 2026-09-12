@@ -2,3 +2,7 @@
 **/*.rs.bk
 # CMake / tlib build trees if created in-tree by hand
 **/cmake-build-*/
+# Python bytecode (topology DSL under python/)
+**/__pycache__/
+*.py[cod]
+*$py.class

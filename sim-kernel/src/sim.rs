@@ -43,6 +43,14 @@ pub enum SimState {
     Quit,
 }
 
+/// Optional hook invoked at the start of each [`Simulator::poll`] quantum.
+///
+/// Used by multi-board nodes to drain B-lite receive mailboxes into
+/// `ExternalSource` on the simulation thread only.
+pub trait BeforeQuantum: Send {
+    fn before_quantum(&mut self);
+}
+
 /// In-thread simulator. [`spawn`] runs this on a dedicated thread.
 pub struct Simulator<C: Cpu> {
     machine: Machine<C>,
@@ -50,6 +58,9 @@ pub struct Simulator<C: Cpu> {
     cfg: SimConfig,
     /// When true, the next quantum is capped to one instruction and then stops.
     step_once: bool,
+    before_quantum: Option<Box<dyn BeforeQuantum>>,
+    /// Multi-board ceiling: virtual time must not advance past this tick.
+    allowed: Option<Tick>,
 }
 
 impl<C: Cpu> Simulator<C> {
@@ -60,7 +71,35 @@ impl<C: Cpu> Simulator<C> {
             state: SimState::Stopped,
             cfg,
             step_once: false,
+            before_quantum: None,
+            allowed: None,
         }
+    }
+
+    /// Install a quantum-entry hook (e.g. B-lite mailbox drain).
+    pub fn set_before_quantum(&mut self, hook: impl BeforeQuantum + 'static) {
+        self.before_quantum = Some(Box::new(hook));
+    }
+
+    /// Current virtual-time ceiling, if any.
+    #[must_use]
+    pub fn allowed(&self) -> Option<Tick> {
+        self.allowed
+    }
+
+    /// True when Running and virtual time has reached the multi-board ceiling.
+    ///
+    /// The sim thread must park on the command channel in this state; returning
+    /// from [`Self::poll`] alone would busy-spin until the next `SetAllowed`.
+    #[must_use]
+    pub fn waiting_on_allowed_ceiling(&self) -> bool {
+        if self.state != SimState::Running {
+            return false;
+        }
+        let Some(allowed) = self.allowed else {
+            return false;
+        };
+        allowed.saturating_sub(self.machine.clock().now()).is_zero()
     }
 
     #[must_use]
@@ -102,6 +141,10 @@ impl<C: Cpu> Simulator<C> {
                 self.state = SimState::Quit;
                 Response::Quit
             }
+            Command::SetAllowed { tick } => {
+                self.allowed = Some(tick);
+                Response::Inspect(InspectResult::Ok)
+            }
             Command::NotifyHalt { reason: _ } => {
                 // TODO(multi-board): when wired from the kernel stop path, forward
                 // debugger/cluster-relevant stops over IPC and wait for cluster
@@ -119,19 +162,35 @@ impl<C: Cpu> Simulator<C> {
             return None;
         }
 
+        if let Some(hook) = self.before_quantum.as_mut() {
+            hook.before_quantum();
+        }
+
         if let Some(response) = self.fire_due_events() {
             return Some(response);
         }
 
+        let now = self.machine.clock().now();
+        if let Some(allowed) = self.allowed
+            && allowed.saturating_sub(now).is_zero()
+        {
+            // Hard block at the multi-board ceiling until a new Allowed arrives.
+            return None;
+        }
+
         let ns_per_insn = self.cfg.ns_per_instruction.max(Tick(1));
         let budget_ns = {
-            let now = self.machine.clock().now();
-            self.machine
+            let mut budget = self
+                .machine
                 .events_mut()
                 .next_deadline()
                 .unwrap_or(Tick::MAX)
                 .saturating_sub(now)
-                .min(self.cfg.max_quantum)
+                .min(self.cfg.max_quantum);
+            if let Some(allowed) = self.allowed {
+                budget = budget.min(allowed.saturating_sub(now));
+            }
+            budget
         };
         let max_instructions = if self.step_once {
             1
@@ -257,6 +316,7 @@ impl<C: Cpu> Simulator<C> {
             | Command::Step
             | Command::Stop
             | Command::Quit
+            | Command::SetAllowed { .. }
             | Command::NotifyHalt { .. } => {
                 unreachable!("lifecycle commands are handled in command()")
             }
@@ -412,6 +472,17 @@ fn sim_thread<C: Cpu>(
                 && !fanout.send(response)
             {
                 return;
+            }
+            // Multi-board ceiling: wait for SetAllowed/Stop instead of pegging a core.
+            if sim.waiting_on_allowed_ceiling() {
+                match cmd_rx.recv() {
+                    Ok(cmd) => {
+                        if !fanout.send(sim.command(cmd)) {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
             }
         } else {
             match cmd_rx.recv() {

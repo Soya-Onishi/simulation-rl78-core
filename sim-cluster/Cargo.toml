@@ -1,0 +1,33 @@
+[package]
+name = "sim-cluster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Multi-board cluster: topology, server, arbiter, and IPC helpers"
+
+[[bin]]
+name = "cluster-server"
+path = "src/bin/cluster_server.rs"
+
+[[bin]]
+name = "cluster-arbiter"
+path = "src/bin/cluster_arbiter.rs"
+
+[[bin]]
+name = "cluster-node"
+path = "src/bin/cluster_node.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# TODO(ipc): provisional SHM + Event stack (issue #37 MVP). Prefer replacing
+# `raw_sync` (unmaintained) with an actively developed wait/wake; see
+# `src/shm_uart.rs` module docs for swap touch points.
+shared_memory = "0.12"
+raw_sync = "0.1"
+crossbeam-queue = "0.3"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
