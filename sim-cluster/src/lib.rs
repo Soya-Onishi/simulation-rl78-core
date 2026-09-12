@@ -21,7 +21,7 @@ pub use cluster_stop::is_cluster_relevant_reason;
 pub use control::{ControlMessage, ShmBinding, ShmRole};
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use node::{
-    InjectHostStop, NodeError, NodeOptions, notify_host_stop, run_node, run_node_with_options,
+    InjectHostStop, NodeError, NodeOptions, notify_host_stop, run_node,
 };
 pub use server::{ServerError, ServerOptions, run_server};
 pub use shm_uart::{ShmUartError, ShmUartFrame, UartShmEndpoint, UartShmOwner};

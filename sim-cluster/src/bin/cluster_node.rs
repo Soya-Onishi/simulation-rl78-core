@@ -4,7 +4,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
-use sim_cluster::{InjectHostStop, NodeOptions, run_node_with_options};
+use sim_cluster::{InjectHostStop, NodeOptions, run_node};
 
 fn main() {
     let mut board_id: Option<String> = None;
@@ -64,7 +64,7 @@ fn main() {
         reason,
     });
 
-    if let Err(err) = run_node_with_options(NodeOptions {
+    if let Err(err) = run_node(NodeOptions {
         board_id,
         control,
         inject_host_stop,

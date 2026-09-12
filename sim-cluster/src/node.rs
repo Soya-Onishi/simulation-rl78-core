@@ -101,16 +101,7 @@ pub struct InjectHostStop {
 }
 
 /// Connect to the arbiter control socket and drive the node state machine.
-pub fn run_node(board_id: &str, control: &Path) -> Result<(), NodeError> {
-    run_node_with_options(NodeOptions {
-        board_id: board_id.to_string(),
-        control: control.to_path_buf(),
-        inject_host_stop: None,
-    })
-}
-
-/// Same as [`run_node`], with optional HostStop injection after Start.
-pub fn run_node_with_options(opts: NodeOptions) -> Result<(), NodeError> {
+pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let board_id = opts.board_id.as_str();
     let mut stream = connect_with_retry(&opts.control, Duration::from_secs(5))?;
     let mut state = NodeState::AwaitingStartup;
