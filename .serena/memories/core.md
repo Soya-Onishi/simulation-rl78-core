@@ -6,7 +6,7 @@ RL78 guest sim: Rust workspace + tlib (TCG) submodule. No config files — machi
 - `simulation-rl78-core` (`src/main.rs`): thin CLI bin; REPL thread + sim thread via `sim_kernel::spawn`.
 - `sim-kernel`: arch-independent kernel — virtual clock, event queue, `MemoryBus`/`MemoryMapped`, start/stop/quit, inspect API. See `mem:sim-kernel/core`.
 - `rl78-core`: RL78 assembly — tlib static link (`build.rs`+CMake), `Rl78Cpu`, minimal map, Magic probe, ELF load. See `mem:rl78-core/core`.
-- `sim-cluster`: multi-board cluster — logical topology JSON, singleton `cluster-server` (runs Python DSL → spawns arbiter), `cluster-arbiter` (UDS Ready/SHM UART/time ceiling/`HostStop`→`ClusterStop`), `cluster-node` (per-board). Python DSL under `python/topology_dsl/`. Issue #37 (Phases 1–5).
+- `sim-cluster`: multi-board cluster — logical topology JSON, singleton `cluster-server` (runs Python DSL → spawns arbiter), `cluster-arbiter` (UDS Ready/SHM UART/time ceiling/`HostStop`→`ClusterStop`), `cluster-node` (per-board). Python DSL under `python/topology_dsl/`. Issue #37 (Phases 1–5). SHM wake uses provisional `raw_sync`+`shared_memory` (`TODO(ipc)` in `shm_uart.rs`).
 
 ## Source map (exclude vendored tlib tree unless changing FFI)
 - Root: `Cargo.toml` workspace, `tests/cli_lifecycle.rs`, `python/topology_dsl/`, `python/examples/`.

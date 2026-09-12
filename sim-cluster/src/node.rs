@@ -226,7 +226,9 @@ fn run_while_running(
             Err(err) => return Err(NodeError::Io(err)),
         }
 
-        // Placeholder local clock until Machine is wired: creep toward allowed.
+        // TODO(phase6): Remove this placeholder clock once Machine is wired; virtual
+        // time must come from sim-kernel's clock, not a local creep.
+        // Placeholder so Allowed/TimeReport can be exercised without Machine.
         if *virtual_time_ns < *allowed_ns {
             *virtual_time_ns = (*virtual_time_ns + 1).min(*allowed_ns);
         }

@@ -1,4 +1,4 @@
-//! UART SHM ring with `raw_sync` Event wake (one directed edge per segment).
+//! UART SHM ring with process-shared Event wake (one directed edge per segment).
 //!
 //! Layout (creator initializes; peers attach):
 //! ```text
@@ -7,11 +7,20 @@
 //!
 //! Single-producer / single-consumer. On overflow the oldest frame is dropped
 //! and [`RingHeader::drops`] is incremented (caller should warn).
+//!
+//! # TODO(ipc): replace provisional wait/wake stack
+//!
+//! Wake uses `raw_sync` + `shared_memory` as an MVP stand-in (issue #37 example).
+//! `raw_sync` is effectively unmaintained — keep call sites narrow so we can
+//! swap to an actively developed alternative (thin futex wrapper, iceoryx2,
+//! etc.) without rewriting the ring layout. Touch points: `Event::new` /
+//! `from_existing` / `wait` / `set`, plus the `evt_bytes` prefix size.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
+// TODO(ipc): drop `raw_sync` when wait/wake is replaced (see module docs).
 use raw_sync::Timeout;
 use raw_sync::events::{Event, EventInit, EventState};
 use shared_memory::{Shmem, ShmemConf};
@@ -82,6 +91,7 @@ impl UartShmOwner {
 
         unsafe {
             let base = shmem.as_ptr();
+            // TODO(ipc): Event::new is a raw_sync-specific create; isolate on swap.
             let (evt, evt_bytes) =
                 Event::new(base, true).map_err(|e| ShmUartError::Event(e.to_string()))?;
             // Ensure clear initial state.
@@ -194,6 +204,7 @@ impl UartShmEndpoint {
                     break;
                 }
             }
+            // TODO(ipc): wake path — replace raw_sync Event::set.
             let (evt, _) =
                 Event::from_existing(base).map_err(|e| ShmUartError::Event(e.to_string()))?;
             evt.set(EventState::Signaled)
@@ -233,6 +244,7 @@ impl UartShmEndpoint {
 
     /// Block until signaled (or timeout), then drain is left to the caller.
     pub fn wait(&self, timeout: Duration) -> Result<(), ShmUartError> {
+        // TODO(ipc): wait path — replace raw_sync Event::wait.
         unsafe {
             let (evt, _) = Event::from_existing(self._shmem.as_ptr())
                 .map_err(|e| ShmUartError::Event(e.to_string()))?;
