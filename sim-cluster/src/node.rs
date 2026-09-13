@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::ipc::{
@@ -32,18 +32,6 @@ pub enum NodeError {
     Message(String),
 }
 
-/// Optional HostStop injection for smoke / E2E without a wired Machine.
-///
-/// TODO(inject-host-stop): Timed `--inject-after-ms` is brittle (handshake vs
-/// Running races). Prefer a barrier-style smoke path: nodes wait stopped until
-/// arbiter Start after all peers are Ready — no wall-clock inject delay.
-/// Tracking: https://github.com/Soya-Onishi/simulation-rl78-core/issues/41
-#[derive(Clone, Debug)]
-pub struct InjectHostStop {
-    pub after_ms: u64,
-    pub reason: String,
-}
-
 /// Helper used by the binary for typed args.
 #[derive(Clone, Debug)]
 pub struct NodeOptions {
@@ -51,11 +39,13 @@ pub struct NodeOptions {
     pub cluster_key: String,
     pub iox_root: PathBuf,
     pub topology_path: PathBuf,
-    /// When set, send HostStop after Start (MVP smoke without Machine).
-    pub inject_host_stop: Option<InjectHostStop>,
 }
 
-/// Drive the node outer loop until Stopped.
+/// Drive the node outer loop.
+///
+/// Starts in [`NodeState::AwaitingStartup`], moves to [`NodeState::Stopped`]
+/// after StartupRecord (same idle as after breakpoint / ClusterStop), and only
+/// performs UART / placeholder quantum work while [`NodeState::Running`].
 pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let board_id = opts.board_id.as_str();
     let board_hash = board_id_hash(board_id);
@@ -73,14 +63,10 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut virtual_time_ns = 0_u64;
-    let mut host_stop_sent = false;
-    // Instant when we first entered Running (base for --inject-after-ms).
-    let mut running_started: Option<Instant> = None;
-    // Overall smoke window once Running (matches prior MVP brief run).
-    let mut running_deadline: Option<Instant> = None;
     let mut last_time_report: Option<u64> = None;
 
-    while state != NodeState::Stopped {
+    // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
+    loop {
         // Control receive every iteration.
         while let Some(msg) = control.try_recv()? {
             if let ControlToNode::StartupRecord {
@@ -98,11 +84,6 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
                 eprintln!("cluster-node[{board_id}]: {state:?} -> {next:?}");
             }
             state = next;
-            if state == NodeState::Running && running_started.is_none() {
-                let now = Instant::now();
-                running_started = Some(now);
-                running_deadline = Some(now + Duration::from_millis(200));
-            }
         }
 
         if state == NodeState::Running {
@@ -114,29 +95,6 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
                         "cluster-node[{board_id}]: uart recv {} frames on {edge_id}",
                         frames.len()
                     );
-                }
-            }
-
-            if let Some(inj) = opts.inject_host_stop.as_ref()
-                && !host_stop_sent
-                && let Some(started) = running_started
-                && started.elapsed() >= Duration::from_millis(inj.after_ms)
-            {
-                match notify_host_stop(&control, board_id, &inj.reason)? {
-                    true => {
-                        eprintln!(
-                            "cluster-node[{board_id}]: HostStop injected ({})",
-                            inj.reason
-                        );
-                        break;
-                    }
-                    false => {
-                        eprintln!(
-                            "cluster-node[{board_id}]: inject HostStop ignored (non-cluster reason {})",
-                            inj.reason
-                        );
-                        host_stop_sent = true;
-                    }
                 }
             }
 
@@ -161,16 +119,12 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
                 last_time_report = Some(virtual_time_ns);
             }
 
-            // Final form will call run_quantum here; MVP exits after short window.
-            if running_deadline.is_some_and(|d| Instant::now() >= d) {
-                break;
-            }
+            // Final form will call run_quantum here.
             thread::sleep(NODE_RUNNING_POLL);
         } else {
             thread::sleep(NODE_IDLE_POLL);
         }
     }
-    Ok(())
 }
 
 /// Notify the arbiter of a host-initiated stop when the reason is cluster-relevant.

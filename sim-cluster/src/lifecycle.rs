@@ -7,16 +7,20 @@
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 
 /// Per-node control-plane state.
+///
+/// Starts in [`AwaitingStartup`](Self::AwaitingStartup) until the first
+/// [`ControlToNode::StartupRecord`]. After Ready, idle/halt uses
+/// [`Stopped`](Self::Stopped) — the same state as after a breakpoint /
+/// [`ControlToNode::ClusterStop`]. Simulation work runs only in
+/// [`Running`](Self::Running).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeState {
     /// Waiting for the first usable [`ControlToNode::StartupRecord`].
     AwaitingStartup,
-    /// Ready sent; waiting for [`ControlToNode::Start`].
-    AwaitingStart,
+    /// Idle: Ready sent and waiting for Start, or halted after ClusterStop / host stop.
+    Stopped,
     /// Simulation may run.
     Running,
-    /// Host-initiated or local stop.
-    Stopped,
 }
 
 /// Side effects requested by [`NodeState::on_message`].
@@ -39,20 +43,25 @@ impl NodeState {
     pub fn on_message(self, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
         match (self, msg) {
             (NodeState::AwaitingStartup, ControlToNode::StartupRecord { .. }) => {
-                (NodeState::AwaitingStart, Some(NodeEffect::SendReady))
+                (NodeState::Stopped, Some(NodeEffect::SendReady))
             }
-            (NodeState::AwaitingStart, ControlToNode::Start) => (NodeState::Running, None),
+            // Late / republished StartupRecord while idle: re-send Ready for the barrier.
+            (NodeState::Stopped, ControlToNode::StartupRecord { .. }) => {
+                (NodeState::Stopped, Some(NodeEffect::SendReady))
+            }
+            (NodeState::Stopped, ControlToNode::Start) => (NodeState::Running, None),
             (NodeState::Running, ControlToNode::Allowed { allowed_ns }) => (
                 NodeState::Running,
                 Some(NodeEffect::SetAllowed { allowed_ns }),
             ),
-            (
-                NodeState::Running | NodeState::AwaitingStart | NodeState::AwaitingStartup,
-                ControlToNode::ClusterStop { reason },
-            ) => (
+            (NodeState::Running, ControlToNode::ClusterStop { reason }) => (
                 NodeState::Stopped,
                 Some(NodeEffect::Warn(format!("ClusterStop ({reason})"))),
             ),
+            (
+                NodeState::AwaitingStartup | NodeState::Stopped,
+                ControlToNode::ClusterStop { .. },
+            ) => (NodeState::Stopped, None),
             // Duplicate / late / early messages: warn and stay.
             (state, msg) => (
                 state,
@@ -148,8 +157,21 @@ mod tests {
             margin_ns: 1000,
             headroom_threshold_ns: 100,
         });
-        assert_eq!(n, NodeState::AwaitingStart);
+        assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::SendReady));
+        s = n;
+        let (n, eff) = s.on_message(ControlToNode::Start);
+        assert_eq!(n, NodeState::Running);
+        assert!(eff.is_none());
+    }
+
+    #[test]
+    fn node_start_from_stopped_after_cluster_stop() {
+        let mut s = NodeState::Running;
+        let (n, _) = s.on_message(ControlToNode::ClusterStop {
+            reason: HostStopReason::Breakpoint,
+        });
+        assert_eq!(n, NodeState::Stopped);
         s = n;
         let (n, eff) = s.on_message(ControlToNode::Start);
         assert_eq!(n, NodeState::Running);
