@@ -152,13 +152,19 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
                 }
             }
 
-            // TODO(phase6): Remove placeholder clock once Machine is wired.
+            // TODO(phase6): Remove placeholder clock once Machine is wired; virtual
+            // time must come from sim-kernel's clock via run_quantum in this
+            // Running branch. Always account for the quantum that actually ran
+            // (do not only creep while virtual_time_ns < allowed_ns); TimeReport
+            // / ceiling sync then use that real virtual time, with arbiter still
+            // taking min(reports)+margin.
             if virtual_time_ns < allowed_ns {
                 virtual_time_ns = (virtual_time_ns + 1).min(allowed_ns);
             }
             let headroom = allowed_ns.saturating_sub(virtual_time_ns);
-            // Publish TimeReport only when virtual time advances past the last report,
-            // so a tight poll cannot saturate n2a and drop HostStop.
+            // MVP: placeholder +1 makes "last virtual_time" dedupe ineffective;
+            // sleep above limits spin. Real run_quantum advances in larger steps
+            // and should drive TimeReport from the sim clock / headroom policy.
             if headroom < headroom_threshold_ns && last_time_report != Some(virtual_time_ns) {
                 let _ = control.publish(&ControlMessage::TimeReport {
                     board_id: board_id.to_string(),
