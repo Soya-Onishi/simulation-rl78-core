@@ -185,7 +185,6 @@ mod tests {
         let (n, eff) = s.on_message(
             hash_a,
             ControlToNode::StartupRecord {
-                target: BoardTarget::Broadcast,
                 margin_ns: 1000,
                 headroom_threshold_ns: 100,
             },
@@ -199,22 +198,14 @@ mod tests {
     }
 
     #[test]
-    fn node_silently_ignores_other_board_unicast() {
+    fn board_target_unicast_mismatch_is_not_included() {
         let hash_a = board_id_hash("a");
         let hash_b = board_id_hash("b");
-        let s = NodeState::AwaitingStartup;
-        let (n, eff) = s.on_message(
-            hash_a,
-            ControlToNode::StartupRecord {
-                target: BoardTarget::Unicast {
-                    board_id_hash: hash_b,
-                },
-                margin_ns: 1000,
-                headroom_threshold_ns: 100,
-            },
-        );
-        assert_eq!(n, NodeState::AwaitingStartup);
-        assert!(eff.is_none());
+        assert!(!BoardTarget::Unicast {
+            board_id_hash: hash_b
+        }
+        .includes(hash_a));
+        assert!(BoardTarget::Broadcast.includes(hash_a));
     }
 
     #[test]
@@ -224,7 +215,6 @@ mod tests {
         let (n, eff) = s.on_message(
             hash_a,
             ControlToNode::StartupRecord {
-                target: BoardTarget::Broadcast,
                 margin_ns: 1000,
                 headroom_threshold_ns: 100,
             },

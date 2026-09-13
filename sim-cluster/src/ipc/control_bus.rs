@@ -259,7 +259,6 @@ mod tests {
 
         let hash_a = board_id_hash("a");
         arb.publish(&ControlToNode::StartupRecord {
-            target: BoardTarget::Broadcast,
             margin_ns: 1,
             headroom_threshold_ns: 1,
         })
@@ -267,9 +266,7 @@ mod tests {
 
         let mut got_startup = false;
         for _ in 0..200 {
-            if let Some(ControlToNode::StartupRecord { target, .. }) = nctl.try_recv().unwrap()
-                && target == BoardTarget::Broadcast
-            {
+            if let Some(ControlToNode::StartupRecord { .. }) = nctl.try_recv().unwrap() {
                 got_startup = true;
                 break;
             }

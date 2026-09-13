@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::control::{BoardTarget, ControlToArbiter, ControlToNode, HostStopReason};
+use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::ipc::{
     ArbiterControl, IpcError, board_hash_table, create_node, isolated_config, new_cluster_key,
     root_path_for_cluster,
@@ -140,7 +140,6 @@ fn ready_barrier_and_start(
 
     // Broadcast one StartupRecord (nodes may still be opening).
     let startup = ControlToNode::StartupRecord {
-        target: BoardTarget::Broadcast,
         margin_ns: topo.margin_ns,
         headroom_threshold_ns: topo.headroom_threshold_ns,
     };

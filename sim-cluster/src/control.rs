@@ -79,9 +79,8 @@ impl BoardTarget {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub enum ControlToNode {
-    /// Shared startup parameters (logical broadcast; see issue #43).
+    /// Shared startup parameters (always broadcast; see issue #43).
     StartupRecord {
-        target: BoardTarget,
         /// Virtual-time skew margin (ns); copied from topology for the node.
         margin_ns: u64,
         /// Report when `allowed - now` falls below this (ns).
@@ -100,8 +99,10 @@ impl ControlToNode {
     #[must_use]
     pub fn destination(self) -> BoardTarget {
         match self {
-            Self::StartupRecord { target, .. } => target,
-            Self::Start | Self::Allowed { .. } | Self::ClusterStop { .. } => BoardTarget::Broadcast,
+            Self::StartupRecord { .. }
+            | Self::Start
+            | Self::Allowed { .. }
+            | Self::ClusterStop { .. } => BoardTarget::Broadcast,
         }
     }
 
