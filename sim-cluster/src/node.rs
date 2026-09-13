@@ -16,6 +16,9 @@ use crate::topology::{LogicalTopology, TopologyError};
 /// Idle sleep when not Running (Q21: timed sleep + try_receive).
 pub const NODE_IDLE_POLL: Duration = Duration::from_millis(1);
 
+/// Sleep while Running so control/UART polling does not spin the CPU or flood n2a.
+const NODE_RUNNING_POLL: Duration = Duration::from_millis(5);
+
 /// Node-side failures.
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
@@ -30,6 +33,11 @@ pub enum NodeError {
 }
 
 /// Optional HostStop injection for smoke / E2E without a wired Machine.
+///
+/// TODO(inject-host-stop): Timed `--inject-after-ms` is brittle (handshake vs
+/// Running races). Prefer a barrier-style smoke path: nodes wait stopped until
+/// arbiter Start after all peers are Ready — no wall-clock inject delay.
+/// Tracking: https://github.com/Soya-Onishi/simulation-rl78-core/issues/41
 #[derive(Clone, Debug)]
 pub struct InjectHostStop {
     pub after_ms: u64,
@@ -76,9 +84,11 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let mut allowed_ns = 0_u64;
     let mut virtual_time_ns = 0_u64;
     let mut host_stop_sent = false;
-    let running_started = Instant::now();
+    // Instant when we first entered Running (base for --inject-after-ms).
+    let mut running_started: Option<Instant> = None;
     // Overall smoke window once Running (matches prior MVP brief run).
     let mut running_deadline: Option<Instant> = None;
+    let mut last_time_report: Option<u64> = None;
 
     while state != NodeState::Stopped {
         // Control receive every iteration.
@@ -100,8 +110,10 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
                 eprintln!("cluster-node[{board_id}]: {state:?} -> {next:?}");
             }
             state = next;
-            if state == NodeState::Running && running_deadline.is_none() {
-                running_deadline = Some(Instant::now() + Duration::from_millis(200));
+            if state == NodeState::Running && running_started.is_none() {
+                let now = Instant::now();
+                running_started = Some(now);
+                running_deadline = Some(now + Duration::from_millis(200));
             }
         }
 
@@ -119,7 +131,8 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
 
             if let Some(inj) = opts.inject_host_stop.as_ref()
                 && !host_stop_sent
-                && running_started.elapsed() >= Duration::from_millis(inj.after_ms)
+                && let Some(started) = running_started
+                && started.elapsed() >= Duration::from_millis(inj.after_ms)
             {
                 match notify_host_stop(&control, board_id, &inj.reason)? {
                     true => {
@@ -144,17 +157,21 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
                 virtual_time_ns = (virtual_time_ns + 1).min(allowed_ns);
             }
             let headroom = allowed_ns.saturating_sub(virtual_time_ns);
-            if headroom < headroom_threshold_ns {
+            // Publish TimeReport only when virtual time advances past the last report,
+            // so a tight poll cannot saturate n2a and drop HostStop.
+            if headroom < headroom_threshold_ns && last_time_report != Some(virtual_time_ns) {
                 let _ = control.publish(&ControlMessage::TimeReport {
                     board_id: board_id.to_string(),
                     virtual_time_ns,
                 });
+                last_time_report = Some(virtual_time_ns);
             }
 
             // Final form will call run_quantum here; MVP exits after short window.
             if running_deadline.is_some_and(|d| Instant::now() >= d) {
                 break;
             }
+            thread::sleep(NODE_RUNNING_POLL);
         } else {
             thread::sleep(NODE_IDLE_POLL);
         }
