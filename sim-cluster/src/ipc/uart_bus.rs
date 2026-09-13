@@ -1,4 +1,4 @@
-//! Per-edge UART pub/sub.
+//! Per-edge UART pub/sub (nodes `open_or_create` with topology QoS).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
-use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 
 use crate::topology::{DirectedEdge, LogicalTopology, PayloadKind};
 
@@ -16,62 +15,11 @@ use super::wire::UartFrame;
 
 type UartPub = Publisher<ipc::Service, UartFrame, ()>;
 type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
-type UartFactory = PortFactory<ipc::Service, UartFrame, ()>;
-
-/// Arbiter-held UART service factories (must stay alive for the cluster lifetime).
-pub struct UartServicesCreated {
-    /// Edge ids that were created.
-    pub edge_ids: Vec<String>,
-    _factories: Vec<UartFactory>,
-}
-
-impl UartServicesCreated {
-    /// Create one pubsub service per UART directed edge (SPSC QoS).
-    pub fn create_all(
-        node: &Node<ipc::Service>,
-        cluster_key: &str,
-        topo: &LogicalTopology,
-    ) -> Result<Self, IpcError> {
-        let mut edge_ids = Vec::new();
-        let mut factories = Vec::new();
-        for edge in &topo.edges {
-            if edge.payload != PayloadKind::Uart {
-                continue;
-            }
-            let id = names::edge_id(
-                &edge.from_board,
-                &edge.from_endpoint,
-                &edge.to_board,
-                &edge.to_endpoint,
-            );
-            let svc_name = names::uart_edge(cluster_key, &id);
-            let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
-            let factory = node
-                .service_builder(
-                    &svc_name
-                        .as_str()
-                        .try_into()
-                        .map_err(|e| IpcError::Message(format!("bad uart name {svc_name}: {e:?}")))?,
-                )
-                .publish_subscribe::<UartFrame>()
-                .max_publishers(1)
-                .max_subscribers(1)
-                .max_nodes(16)
-                .subscriber_max_buffer_size(capacity)
-                .enable_safe_overflow(true)
-                .create()
-                .map_err(|e| IpcError::Message(format!("create uart {svc_name}: {e:?}")))?;
-            edge_ids.push(id);
-            factories.push(factory);
-        }
-        Ok(Self {
-            edge_ids,
-            _factories: factories,
-        })
-    }
-}
 
 /// Node UART endpoints for this board.
+///
+/// TX and RX both use `open_or_create` with identical SPSC QoS derived from the
+/// topology; whichever side arrives first creates the service and holds the port.
 pub struct NodeUartPorts {
     pub producers: HashMap<String, UartPub>,
     pub consumers: HashMap<String, UartSub>,
@@ -99,11 +47,12 @@ impl NodeUartPorts {
                 &edge.to_endpoint,
             );
             let svc_name = names::uart_edge(cluster_key, &id);
+            let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
             if edge.from_board == board_id {
-                let puber = open_uart_publisher(node, &svc_name, deadline)?;
+                let puber = open_or_create_uart_publisher(node, &svc_name, capacity, deadline)?;
                 producers.insert(id, puber);
             } else if edge.to_board == board_id {
-                let sub = open_uart_subscriber(node, &svc_name, deadline)?;
+                let sub = open_or_create_uart_subscriber(node, &svc_name, capacity, deadline)?;
                 consumers.insert(id, sub);
             }
         }
@@ -145,9 +94,10 @@ impl NodeUartPorts {
     }
 }
 
-fn open_uart_publisher(
+fn open_or_create_uart_publisher(
     node: &Node<ipc::Service>,
     name: &str,
+    capacity: usize,
     deadline: Instant,
 ) -> Result<UartPub, IpcError> {
     let svc_name: ServiceName = name
@@ -157,7 +107,12 @@ fn open_uart_publisher(
         match node
             .service_builder(&svc_name)
             .publish_subscribe::<UartFrame>()
-            .open()
+            .max_publishers(1)
+            .max_subscribers(1)
+            .max_nodes(16)
+            .subscriber_max_buffer_size(capacity)
+            .enable_safe_overflow(true)
+            .open_or_create()
         {
             Ok(svc) => {
                 return svc
@@ -166,14 +121,19 @@ fn open_uart_publisher(
                     .map_err(|e| IpcError::Message(format!("uart publisher {name}: {e:?}")));
             }
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-            Err(e) => return Err(IpcError::Message(format!("open uart pub {name}: {e:?}"))),
+            Err(e) => {
+                return Err(IpcError::Message(format!(
+                    "open_or_create uart pub {name}: {e:?}"
+                )));
+            }
         }
     }
 }
 
-fn open_uart_subscriber(
+fn open_or_create_uart_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
+    capacity: usize,
     deadline: Instant,
 ) -> Result<UartSub, IpcError> {
     let svc_name: ServiceName = name
@@ -183,7 +143,12 @@ fn open_uart_subscriber(
         match node
             .service_builder(&svc_name)
             .publish_subscribe::<UartFrame>()
-            .open()
+            .max_publishers(1)
+            .max_subscribers(1)
+            .max_nodes(16)
+            .subscriber_max_buffer_size(capacity)
+            .enable_safe_overflow(true)
+            .open_or_create()
         {
             Ok(svc) => {
                 return svc
@@ -192,7 +157,11 @@ fn open_uart_subscriber(
                     .map_err(|e| IpcError::Message(format!("uart subscriber {name}: {e:?}")));
             }
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-            Err(e) => return Err(IpcError::Message(format!("open uart sub {name}: {e:?}"))),
+            Err(e) => {
+                return Err(IpcError::Message(format!(
+                    "open_or_create uart sub {name}: {e:?}"
+                )));
+            }
         }
     }
 }
@@ -209,7 +178,6 @@ mod tests {
         let key = new_cluster_key();
         let root = dir.path().join("iox");
         let config = isolated_config(&root).unwrap();
-        let arb = create_node(&config, "uart-arb").unwrap();
         let topo = LogicalTopology {
             boards: vec![
                 BoardSpec {
@@ -245,7 +213,7 @@ mod tests {
             headroom_threshold_ns: 1,
             ready_timeout_ms: 1000,
         };
-        let _svc = UartServicesCreated::create_all(&arb, &key, &topo).unwrap();
+        // No arbiter-side create: TX/RX nodes open_or_create themselves.
         let na = create_node(&config, "uart-a").unwrap();
         let nb = create_node(&config, "uart-b").unwrap();
         let porta =

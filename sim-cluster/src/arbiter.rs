@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::control::ControlMessage;
 use crate::ipc::{
     board_hash_table, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
-    ArbiterControl, IpcError, UartServicesCreated,
+    ArbiterControl, IpcError,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::topology::{LogicalTopology, TopologyError};
@@ -93,7 +93,7 @@ pub fn run_arbiter_with_topology(
     let config = isolated_config(&opts.iox_root)?;
     let node = create_node(&config, &format!("arbiter-{}", opts.cluster_key))?;
     let control = ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards)?;
-    let _uart = UartServicesCreated::create_all(&node, &opts.cluster_key, topo)?;
+    // UART services are open_or_create'd by the TX/RX nodes (topology QoS).
 
     let mut children: Vec<Child> = Vec::new();
     for board in &topo.boards {
@@ -344,7 +344,6 @@ mod tests {
     use super::*;
     use crate::ipc::{
         board_hash_table, create_node, isolated_config, ArbiterControl, NodeControl,
-        UartServicesCreated,
     };
     use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
     use std::sync::{Arc, Mutex};
@@ -481,7 +480,6 @@ mod tests {
         let node = create_node(&config, "arb-test-ready").unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
-        let _uart = UartServicesCreated::create_all(&node, &cluster_key, &topo).unwrap();
 
         let mut joins = Vec::new();
         for board in &topo.boards {
@@ -510,7 +508,6 @@ mod tests {
         let node = create_node(&config, "arb-test-timeout").unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
-        let _uart = UartServicesCreated::create_all(&node, &cluster_key, &topo).unwrap();
 
         let mut joins = Vec::new();
         for (i, board) in topo.boards.iter().enumerate() {
@@ -541,7 +538,6 @@ mod tests {
         let node = create_node(&config, "arb-test-hoststop").unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
-        let _uart = UartServicesCreated::create_all(&node, &cluster_key, &topo).unwrap();
 
         let saw_cluster_stop = Arc::new(Mutex::new(false));
         let mut joins = Vec::new();

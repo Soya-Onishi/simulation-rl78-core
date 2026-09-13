@@ -1,7 +1,6 @@
 //! Arbiter/node control pubsub (a2n / n2a).
 
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::time::{Duration, Instant};
 
 use iceoryx2::port::publisher::Publisher;
@@ -111,7 +110,7 @@ impl ArbiterControl {
     }
 }
 
-/// Node-side control ports (opens existing services).
+/// Node-side control ports (`open_or_create` with the same QoS as arbiter create).
 pub struct NodeControl {
     pub a2n_sub: CtrlSub,
     pub n2a_pub: CtrlPub,
@@ -125,12 +124,13 @@ impl NodeControl {
         boards: HashMap<u64, String>,
         open_budget: Duration,
     ) -> Result<Self, IpcError> {
+        let max_nodes = boards.len().max(1);
         let a2n_name = names::ctrl_a2n(cluster_key);
         let n2a_name = names::ctrl_n2a(cluster_key);
         let deadline = Instant::now() + open_budget;
 
-        let a2n_sub = open_subscriber::<ControlWire>(node, &a2n_name, deadline)?;
-        let n2a_pub = open_publisher::<ControlWire>(node, &n2a_name, deadline)?;
+        let a2n_sub = open_or_create_a2n_subscriber(node, &a2n_name, max_nodes, deadline)?;
+        let n2a_pub = open_or_create_n2a_publisher(node, &n2a_name, max_nodes, deadline)?;
 
         Ok(Self {
             a2n_sub,
@@ -221,61 +221,79 @@ mod tests {
     }
 }
 
-fn open_subscriber<T: Debug + ZeroCopySend + 'static>(
+fn open_or_create_a2n_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
+    max_nodes: usize,
     deadline: Instant,
-) -> Result<Subscriber<ipc::Service, T, ()>, IpcError> {
+) -> Result<CtrlSub, IpcError> {
     let svc_name: ServiceName = name
         .try_into()
         .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
     loop {
         match node
             .service_builder(&svc_name)
-            .publish_subscribe::<T>()
-            .open()
+            .publish_subscribe::<ControlWire>()
+            .max_publishers(1)
+            .max_subscribers(max_nodes)
+            .max_nodes(max_nodes + 4)
+            .subscriber_max_buffer_size(32)
+            .history_size(16)
+            .enable_safe_overflow(true)
+            .open_or_create()
         {
             Ok(svc) => {
                 return svc
                     .subscriber_builder()
                     .create()
-                    .map_err(|e| IpcError::Message(format!("subscriber {name}: {e:?}")));
+                    .map_err(|e| IpcError::Message(format!("a2n subscriber {name}: {e:?}")));
             }
             Err(_) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(e) => {
-                return Err(IpcError::Message(format!("open subscriber {name}: {e:?}")));
+                return Err(IpcError::Message(format!(
+                    "open_or_create a2n subscriber {name}: {e:?}"
+                )));
             }
         }
     }
 }
 
-fn open_publisher<T: Debug + ZeroCopySend + 'static>(
+fn open_or_create_n2a_publisher(
     node: &Node<ipc::Service>,
     name: &str,
+    max_nodes: usize,
     deadline: Instant,
-) -> Result<Publisher<ipc::Service, T, ()>, IpcError> {
+) -> Result<CtrlPub, IpcError> {
     let svc_name: ServiceName = name
         .try_into()
         .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
     loop {
         match node
             .service_builder(&svc_name)
-            .publish_subscribe::<T>()
-            .open()
+            .publish_subscribe::<ControlWire>()
+            .max_publishers(max_nodes)
+            .max_subscribers(1)
+            .max_nodes(max_nodes + 4)
+            .subscriber_max_buffer_size(64)
+            .history_size(16)
+            .enable_safe_overflow(true)
+            .open_or_create()
         {
             Ok(svc) => {
                 return svc
                     .publisher_builder()
                     .create()
-                    .map_err(|e| IpcError::Message(format!("publisher {name}: {e:?}")));
+                    .map_err(|e| IpcError::Message(format!("n2a publisher {name}: {e:?}")));
             }
             Err(_) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(e) => {
-                return Err(IpcError::Message(format!("open publisher {name}: {e:?}")));
+                return Err(IpcError::Message(format!(
+                    "open_or_create n2a publisher {name}: {e:?}"
+                )));
             }
         }
     }
