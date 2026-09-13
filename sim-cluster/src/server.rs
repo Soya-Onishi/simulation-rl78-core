@@ -1,8 +1,4 @@
-//! Singleton cluster server: run Python DSL, validate topology, spawn arbiter.
-//!
-//! Process exclusivity for a given iceoryx cluster is enforced when the arbiter
-//! creates control services (duplicate create fails). This binary no longer
-//! uses `flock`.
+//! Cluster server: run Python DSL, validate topology, spawn arbiter.
 
 use std::fs;
 use std::io::Write;
