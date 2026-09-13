@@ -70,7 +70,10 @@ impl NodeUartPorts {
     }
 
     /// Non-blocking drain of all consumer edges.
-    pub fn drain_all(&self, limit_per_edge: usize) -> Result<Vec<(String, Vec<UartFrame>)>, IpcError> {
+    pub fn drain_all(
+        &self,
+        limit_per_edge: usize,
+    ) -> Result<Vec<(String, Vec<UartFrame>)>, IpcError> {
         let mut out = Vec::new();
         for (id, sub) in &self.consumers {
             let mut frames = Vec::new();
