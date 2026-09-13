@@ -6,18 +6,20 @@ use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
 
-use crate::control::ControlMessage;
+use crate::control::{ControlToArbiter, ControlToNode};
 
 use super::names;
 use super::runtime::IpcError;
 
-type CtrlPub = Publisher<ipc::Service, ControlMessage, ()>;
-type CtrlSub = Subscriber<ipc::Service, ControlMessage, ()>;
+type A2nPub = Publisher<ipc::Service, ControlToNode, ()>;
+type A2nSub = Subscriber<ipc::Service, ControlToNode, ()>;
+type N2aPub = Publisher<ipc::Service, ControlToArbiter, ()>;
+type N2aSub = Subscriber<ipc::Service, ControlToArbiter, ()>;
 
 /// Arbiter-side control ports (owns create).
 pub struct ArbiterControl {
-    pub a2n_pub: CtrlPub,
-    pub n2a_sub: CtrlSub,
+    pub a2n_pub: A2nPub,
+    pub n2a_sub: N2aSub,
     boards: HashMap<u64, String>,
 }
 
@@ -38,7 +40,7 @@ impl ArbiterControl {
                     IpcError::Message(format!("bad service name {a2n_name}: {e:?}"))
                 })?,
             )
-            .publish_subscribe::<ControlMessage>()
+            .publish_subscribe::<ControlToNode>()
             .max_publishers(1)
             .max_subscribers(max_nodes)
             .max_nodes(max_nodes + 4)
@@ -54,7 +56,7 @@ impl ArbiterControl {
                     IpcError::Message(format!("bad service name {n2a_name}: {e:?}"))
                 })?,
             )
-            .publish_subscribe::<ControlMessage>()
+            .publish_subscribe::<ControlToArbiter>()
             .max_publishers(max_nodes)
             .max_subscribers(1)
             .max_nodes(max_nodes + 4)
@@ -86,22 +88,22 @@ impl ArbiterControl {
         self.boards.get(&board_id_hash).map(String::as_str)
     }
 
-    pub fn publish(&self, msg: &ControlMessage) -> Result<(), IpcError> {
+    pub fn publish(&self, msg: &ControlToNode) -> Result<(), IpcError> {
         self.a2n_pub
             .send_copy(*msg)
             .map_err(|e| IpcError::Message(format!("a2n send: {e:?}")))?;
         Ok(())
     }
 
-    pub fn try_recv(&self) -> Result<Option<ControlMessage>, IpcError> {
+    pub fn try_recv(&self) -> Result<Option<ControlToArbiter>, IpcError> {
         match self
             .n2a_sub
             .receive()
             .map_err(|e| IpcError::Message(format!("n2a receive: {e:?}")))?
         {
             Some(sample) => {
-                let msg: ControlMessage = *sample;
-                match filter_known_board(&self.boards, msg) {
+                let msg: ControlToArbiter = *sample;
+                match filter_known_sender(&self.boards, msg) {
                     Some(msg) => Ok(Some(msg)),
                     None => Err(IpcError::Message(format!(
                         "n2a unknown board hash in message={msg:?}"
@@ -115,9 +117,8 @@ impl ArbiterControl {
 
 /// Node-side control ports (`open_or_create` with the same QoS as arbiter create).
 pub struct NodeControl {
-    pub a2n_sub: CtrlSub,
-    pub n2a_pub: CtrlPub,
-    boards: HashMap<u64, String>,
+    pub a2n_sub: A2nSub,
+    pub n2a_pub: N2aPub,
 }
 
 impl NodeControl {
@@ -133,53 +134,37 @@ impl NodeControl {
         let a2n_sub = open_or_create_a2n_subscriber(node, &a2n_name, max_nodes)?;
         let n2a_pub = open_or_create_n2a_publisher(node, &n2a_name, max_nodes)?;
 
-        Ok(Self {
-            a2n_sub,
-            n2a_pub,
-            boards,
-        })
+        Ok(Self { a2n_sub, n2a_pub })
     }
 
-    pub fn publish(&self, msg: &ControlMessage) -> Result<(), IpcError> {
+    pub fn publish(&self, msg: &ControlToArbiter) -> Result<(), IpcError> {
         self.n2a_pub
             .send_copy(*msg)
             .map_err(|e| IpcError::Message(format!("n2a send: {e:?}")))?;
         Ok(())
     }
 
-    pub fn try_recv(&self) -> Result<Option<ControlMessage>, IpcError> {
+    pub fn try_recv(&self) -> Result<Option<ControlToNode>, IpcError> {
         match self
             .a2n_sub
             .receive()
             .map_err(|e| IpcError::Message(format!("a2n receive: {e:?}")))?
         {
-            Some(sample) => {
-                let msg: ControlMessage = *sample;
-                // Unknown board hashes are ignored quietly.
-                Ok(filter_known_board(&self.boards, msg))
-            }
+            Some(sample) => Ok(Some(*sample)),
             None => Ok(None),
         }
     }
 }
 
-/// Drop messages whose `board_id_hash` is not in the local board table.
-fn filter_known_board(
+/// Drop n2a messages whose sender hash is not in the local board table.
+fn filter_known_sender(
     boards: &HashMap<u64, String>,
-    msg: ControlMessage,
-) -> Option<ControlMessage> {
-    let hash = match msg {
-        ControlMessage::StartupRecord { board_id_hash, .. }
-        | ControlMessage::Ready { board_id_hash }
-        | ControlMessage::TimeReport { board_id_hash, .. }
-        | ControlMessage::HostStop { board_id_hash, .. } => Some(board_id_hash),
-        ControlMessage::Start
-        | ControlMessage::Allowed { .. }
-        | ControlMessage::ClusterStop { .. } => None,
-    };
-    match hash {
-        Some(h) if !boards.contains_key(&h) => None,
-        _ => Some(msg),
+    msg: ControlToArbiter,
+) -> Option<ControlToArbiter> {
+    if boards.contains_key(&msg.from_board()) {
+        Some(msg)
+    } else {
+        None
     }
 }
 
@@ -187,13 +172,13 @@ fn open_or_create_a2n_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
     max_nodes: usize,
-) -> Result<CtrlSub, IpcError> {
+) -> Result<A2nSub, IpcError> {
     let svc_name: ServiceName = name
         .try_into()
         .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
     let svc = node
         .service_builder(&svc_name)
-        .publish_subscribe::<ControlMessage>()
+        .publish_subscribe::<ControlToNode>()
         .max_publishers(1)
         .max_subscribers(max_nodes)
         .max_nodes(max_nodes + 4)
@@ -211,13 +196,13 @@ fn open_or_create_n2a_publisher(
     node: &Node<ipc::Service>,
     name: &str,
     max_nodes: usize,
-) -> Result<CtrlPub, IpcError> {
+) -> Result<N2aPub, IpcError> {
     let svc_name: ServiceName = name
         .try_into()
         .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
     let svc = node
         .service_builder(&svc_name)
-        .publish_subscribe::<ControlMessage>()
+        .publish_subscribe::<ControlToArbiter>()
         .max_publishers(max_nodes)
         .max_subscribers(1)
         .max_nodes(max_nodes + 4)
@@ -252,8 +237,7 @@ mod tests {
         let nctl = NodeControl::open(&node, &key, boards).unwrap();
 
         let hash_a = board_id_hash("a");
-        arb.publish(&ControlMessage::StartupRecord {
-            board_id_hash: hash_a,
+        arb.publish(&ControlToNode::StartupRecord {
             margin_ns: 1,
             headroom_threshold_ns: 1,
         })
@@ -261,10 +245,7 @@ mod tests {
 
         let mut got_startup = false;
         for _ in 0..200 {
-            if let Some(ControlMessage::StartupRecord { board_id_hash, .. }) =
-                nctl.try_recv().unwrap()
-                && board_id_hash == hash_a
-            {
+            if let Some(ControlToNode::StartupRecord { .. }) = nctl.try_recv().unwrap() {
                 got_startup = true;
                 break;
             }
@@ -272,15 +253,13 @@ mod tests {
         }
         assert!(got_startup, "node did not receive StartupRecord");
 
-        nctl.publish(&ControlMessage::Ready {
-            board_id_hash: hash_a,
-        })
-        .unwrap();
+        nctl.publish(&ControlToArbiter::Ready { from: hash_a })
+            .unwrap();
 
         let mut got_ready = false;
         for _ in 0..200 {
-            if let Some(ControlMessage::Ready { board_id_hash }) = arb.try_recv().unwrap()
-                && board_id_hash == hash_a
+            if let Some(ControlToArbiter::Ready { from }) = arb.try_recv().unwrap()
+                && from == hash_a
             {
                 got_ready = true;
                 break;

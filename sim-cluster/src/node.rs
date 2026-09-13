@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::control::{ControlMessage, HostStopReason};
+use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::ipc::{
     IpcError, NodeControl, NodeUartPorts, board_hash_table, board_id_hash, create_node,
     isolated_config,
@@ -83,16 +83,14 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     while state != NodeState::Stopped {
         // Control receive every iteration.
         while let Some(msg) = control.try_recv()? {
-            if let ControlMessage::StartupRecord {
-                board_id_hash: id_hash,
+            if let ControlToNode::StartupRecord {
                 headroom_threshold_ns: thr,
                 ..
             } = msg
-                && id_hash == board_hash
             {
                 headroom_threshold_ns = thr;
             }
-            let (next, effect) = state.on_message(board_hash, msg);
+            let (next, effect) = state.on_message(msg);
             if let Some(effect) = effect {
                 apply_effect(board_id, board_hash, &control, effect, &mut allowed_ns)?;
             }
@@ -156,8 +154,8 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
             // sleep above limits spin. Real run_quantum advances in larger steps
             // and should drive TimeReport from the sim clock / headroom policy.
             if headroom < headroom_threshold_ns && last_time_report != Some(virtual_time_ns) {
-                let _ = control.publish(&ControlMessage::TimeReport {
-                    board_id_hash: board_hash,
+                let _ = control.publish(&ControlToArbiter::TimeReport {
+                    from: board_hash,
                     virtual_time_ns,
                 });
                 last_time_report = Some(virtual_time_ns);
@@ -177,7 +175,7 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
 
 /// Notify the arbiter of a host-initiated stop when the reason is cluster-relevant.
 ///
-/// Returns `Ok(true)` if [`ControlMessage::HostStop`] was sent.
+/// Returns `Ok(true)` if [`ControlToArbiter::HostStop`] was sent.
 pub fn notify_host_stop(
     control: &NodeControl,
     board_id: &str,
@@ -186,8 +184,8 @@ pub fn notify_host_stop(
     let Some(reason) = HostStopReason::from_label(reason) else {
         return Ok(false);
     };
-    control.publish(&ControlMessage::HostStop {
-        board_id_hash: board_id_hash(board_id),
+    control.publish(&ControlToArbiter::HostStop {
+        from: board_id_hash(board_id),
         reason,
     })?;
     Ok(true)
@@ -202,9 +200,7 @@ fn apply_effect(
 ) -> Result<(), NodeError> {
     match effect {
         NodeEffect::SendReady => {
-            control.publish(&ControlMessage::Ready {
-                board_id_hash: board_hash,
-            })?;
+            control.publish(&ControlToArbiter::Ready { from: board_hash })?;
             eprintln!("cluster-node[{board_id}]: Ready");
         }
         NodeEffect::SetAllowed { allowed_ns: next } => {

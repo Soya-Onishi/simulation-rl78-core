@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::control::{ControlMessage, HostStopReason};
+use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::ipc::{
-    ArbiterControl, IpcError, board_hash_table, board_id_hash, create_node, isolated_config,
-    new_cluster_key, root_path_for_cluster,
+    ArbiterControl, IpcError, board_hash_table, create_node, isolated_config, new_cluster_key,
+    root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::topology::{LogicalTopology, TopologyError};
@@ -138,14 +138,12 @@ fn ready_barrier_and_start(
         .map(|b| (b.id.clone(), PeerState::AwaitingReady))
         .collect();
 
-    // Publish StartupRecord for every board (nodes may still be opening).
-    for board in &topo.boards {
-        control.publish(&ControlMessage::StartupRecord {
-            board_id_hash: board_id_hash(&board.id),
-            margin_ns: topo.margin_ns,
-            headroom_threshold_ns: topo.headroom_threshold_ns,
-        })?;
-    }
+    // Broadcast one StartupRecord (nodes may still be opening).
+    let startup = ControlToNode::StartupRecord {
+        margin_ns: topo.margin_ns,
+        headroom_threshold_ns: topo.headroom_threshold_ns,
+    };
+    control.publish(&startup)?;
     // Re-publish periodically until Ready so late openers still see Startup.
     let mut last_startup = Instant::now();
 
@@ -153,31 +151,24 @@ fn ready_barrier_and_start(
         if Instant::now() >= deadline {
             return ready_timeout(topo, &peers);
         }
-        if last_startup.elapsed() > Duration::from_millis(50) {
-            for board in &topo.boards {
-                if peers.get(&board.id) == Some(&PeerState::AwaitingReady) {
-                    let _ = control.publish(&ControlMessage::StartupRecord {
-                        board_id_hash: board_id_hash(&board.id),
-                        margin_ns: topo.margin_ns,
-                        headroom_threshold_ns: topo.headroom_threshold_ns,
-                    });
-                }
-            }
+        if last_startup.elapsed() > Duration::from_millis(50)
+            && peers.values().any(|p| *p == PeerState::AwaitingReady)
+        {
+            let _ = control.publish(&startup);
             last_startup = Instant::now();
         }
 
         let mut progressed = false;
         while let Some(msg) = control.try_recv()? {
             match msg {
-                ControlMessage::Ready { board_id_hash } => {
-                    let Some(board_id) = control.resolve_board(board_id_hash).map(str::to_owned)
-                    else {
+                ControlToArbiter::Ready { from } => {
+                    let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
                         continue;
                     };
                     let Some(state) = peers.get_mut(&board_id) else {
                         continue;
                     };
-                    let (next, effect) = state.on_message(board_id_hash, msg);
+                    let (next, effect) = state.on_message(msg);
                     warn_peer(&board_id, effect);
                     if next != *state {
                         eprintln!("cluster-arbiter: peer '{board_id}' {state:?} -> {next:?}");
@@ -200,7 +191,7 @@ fn ready_barrier_and_start(
         peers.len()
     );
 
-    control.publish(&ControlMessage::Start)?;
+    control.publish(&ControlToNode::Start)?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
@@ -219,7 +210,7 @@ fn run_time_sync(
 
     let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
     let mut allowed = ceiling.allowed_ns();
-    control.publish(&ControlMessage::Allowed {
+    control.publish(&ControlToNode::Allowed {
         allowed_ns: allowed,
     })?;
     eprintln!("cluster-arbiter: initial Allowed={allowed}");
@@ -233,34 +224,23 @@ fn run_time_sync(
         let mut changed = false;
         let mut cluster_stop: Option<(String, HostStopReason)> = None;
         while let Some(msg) = control.try_recv()? {
-            let board_id_hash = match msg {
-                ControlMessage::TimeReport { board_id_hash, .. }
-                | ControlMessage::HostStop { board_id_hash, .. }
-                | ControlMessage::Ready { board_id_hash } => board_id_hash,
-                _ => {
-                    eprintln!("cluster-arbiter: ignoring {msg:?} in time-sync");
-                    continue;
-                }
-            };
-            let Some(board_id) = control.resolve_board(board_id_hash).map(str::to_owned) else {
+            let from = msg.from_board();
+            let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
                 continue;
             };
             let Some(state) = peers.get_mut(&board_id) else {
                 continue;
             };
-            let (next, effect) = state.on_message(board_id_hash, msg);
+            let (next, effect) = state.on_message(msg);
             match effect.clone() {
                 Some(PeerEffect::TimeReport {
-                    board_id_hash: _,
+                    from: _,
                     virtual_time_ns,
                 }) => {
                     ceiling.report(&board_id, virtual_time_ns);
                     changed = true;
                 }
-                Some(PeerEffect::HostStop {
-                    board_id_hash: _,
-                    reason,
-                }) => {
+                Some(PeerEffect::HostStop { from: _, reason }) => {
                     // HostStopReason variants are all cluster-relevant by construction.
                     cluster_stop = Some((board_id.clone(), reason));
                 }
@@ -279,7 +259,7 @@ fn run_time_sync(
             let next_allowed = ceiling.allowed_ns();
             if next_allowed != allowed {
                 allowed = next_allowed;
-                control.publish(&ControlMessage::Allowed {
+                control.publish(&ControlToNode::Allowed {
                     allowed_ns: allowed,
                 })?;
                 eprintln!("cluster-arbiter: Allowed={allowed}");
@@ -296,7 +276,7 @@ fn broadcast_cluster_stop(
     _source: &str,
     reason: HostStopReason,
 ) -> Result<(), ArbiterError> {
-    control.publish(&ControlMessage::ClusterStop { reason })?;
+    control.publish(&ControlToNode::ClusterStop { reason })?;
     for state in peers.values_mut() {
         *state = PeerState::Stopped;
     }
@@ -337,7 +317,9 @@ pub fn run_arbiter_from_path(topology_path: &Path) -> Result<(), ArbiterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::{ArbiterControl, NodeControl, board_hash_table, create_node, isolated_config};
+    use crate::ipc::{
+        ArbiterControl, NodeControl, board_hash_table, board_id_hash, create_node, isolated_config,
+    };
     use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -425,28 +407,22 @@ mod tests {
         while Instant::now() < end {
             while let Ok(Some(msg)) = control.try_recv() {
                 match msg {
-                    ControlMessage::StartupRecord { board_id_hash, .. }
-                        if board_id_hash == my_hash =>
-                    {
+                    ControlToNode::StartupRecord { .. } => {
                         if send_ready {
-                            let _ = control.publish(&ControlMessage::Ready {
-                                board_id_hash: my_hash,
-                            });
-                            let _ = control.publish(&ControlMessage::Ready {
-                                board_id_hash: my_hash,
-                            });
+                            let _ = control.publish(&ControlToArbiter::Ready { from: my_hash });
+                            let _ = control.publish(&ControlToArbiter::Ready { from: my_hash });
                         }
                     }
-                    ControlMessage::Start => {
+                    ControlToNode::Start => {
                         got_start = true;
                         if inject_host_stop {
-                            let _ = control.publish(&ControlMessage::HostStop {
-                                board_id_hash: my_hash,
+                            let _ = control.publish(&ControlToArbiter::HostStop {
+                                from: my_hash,
                                 reason: HostStopReason::Breakpoint,
                             });
                         }
                     }
-                    ControlMessage::ClusterStop { reason } => {
+                    ControlToNode::ClusterStop { reason } => {
                         assert_eq!(reason, HostStopReason::Breakpoint);
                         if let Some(flag) = &saw_cluster_stop {
                             *flag.lock().unwrap() = true;
