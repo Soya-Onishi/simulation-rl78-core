@@ -168,7 +168,7 @@ fn ready_barrier_and_start(
                     let Some(state) = peers.get_mut(&board_id) else {
                         continue;
                     };
-                    let (next, effect) = state.on_message(from, msg);
+                    let (next, effect) = state.on_message(msg);
                     warn_peer(&board_id, effect);
                     if next != *state {
                         eprintln!("cluster-arbiter: peer '{board_id}' {state:?} -> {next:?}");
@@ -231,7 +231,7 @@ fn run_time_sync(
             let Some(state) = peers.get_mut(&board_id) else {
                 continue;
             };
-            let (next, effect) = state.on_message(from, msg);
+            let (next, effect) = state.on_message(msg);
             match effect.clone() {
                 Some(PeerEffect::TimeReport {
                     from: _,

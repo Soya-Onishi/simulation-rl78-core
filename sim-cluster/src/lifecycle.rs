@@ -86,25 +86,14 @@ pub enum PeerEffect {
 }
 
 impl PeerState {
-    /// Apply one inbound n2a message from this peer.
+    /// Apply one inbound n2a message already routed to this peer.
+    ///
+    /// Caller must select the peer via [`ControlToArbiter::from_board`]; this
+    /// method does not re-check sender identity.
     #[must_use]
-    pub fn on_message(
-        self,
-        expected_board_hash: u64,
-        msg: ControlToArbiter,
-    ) -> (Self, Option<PeerEffect>) {
+    pub fn on_message(self, msg: ControlToArbiter) -> (Self, Option<PeerEffect>) {
         match (self, msg) {
-            (PeerState::AwaitingReady, ControlToArbiter::Ready { from }) => {
-                if from != expected_board_hash {
-                    return (
-                        self,
-                        Some(PeerEffect::Warn(format!(
-                            "Ready from {from:#x} != expected {expected_board_hash:#x}; ignoring"
-                        ))),
-                    );
-                }
-                (PeerState::Ready, None)
-            }
+            (PeerState::AwaitingReady, ControlToArbiter::Ready { .. }) => (PeerState::Ready, None),
             (PeerState::Ready, ControlToArbiter::Ready { from }) => (
                 PeerState::Ready,
                 Some(PeerEffect::Warn(format!(
@@ -117,41 +106,21 @@ impl PeerState {
                     from,
                     virtual_time_ns,
                 },
-            ) => {
-                if from != expected_board_hash {
-                    return (
-                        self,
-                        Some(PeerEffect::Warn(format!(
-                            "TimeReport from {from:#x} != {expected_board_hash:#x}; ignoring"
-                        ))),
-                    );
-                }
-                (
-                    PeerState::Running,
-                    Some(PeerEffect::TimeReport {
-                        from,
-                        virtual_time_ns,
-                    }),
-                )
-            }
-            (PeerState::Running, ControlToArbiter::HostStop { from, reason }) => {
-                if from != expected_board_hash {
-                    return (
-                        self,
-                        Some(PeerEffect::Warn(format!(
-                            "HostStop from {from:#x} != {expected_board_hash:#x}; ignoring"
-                        ))),
-                    );
-                }
-                (
-                    PeerState::Stopped,
-                    Some(PeerEffect::HostStop { from, reason }),
-                )
-            }
+            ) => (
+                PeerState::Running,
+                Some(PeerEffect::TimeReport {
+                    from,
+                    virtual_time_ns,
+                }),
+            ),
+            (PeerState::Running, ControlToArbiter::HostStop { from, reason }) => (
+                PeerState::Stopped,
+                Some(PeerEffect::HostStop { from, reason }),
+            ),
             (state, msg) => (
                 state,
                 Some(PeerEffect::Warn(format!(
-                    "ignoring {msg:?} from {expected_board_hash:#x} in state {state:?}"
+                    "ignoring {msg:?} in state {state:?}"
                 ))),
             ),
         }
@@ -202,11 +171,11 @@ mod tests {
     fn peer_ready_and_duplicate() {
         let hash_a = board_id_hash("a");
         let mut s = PeerState::AwaitingReady;
-        let (n, eff) = s.on_message(hash_a, ControlToArbiter::Ready { from: hash_a });
+        let (n, eff) = s.on_message(ControlToArbiter::Ready { from: hash_a });
         assert_eq!(n, PeerState::Ready);
         assert!(eff.is_none());
         s = n;
-        let (n, eff) = s.on_message(hash_a, ControlToArbiter::Ready { from: hash_a });
+        let (n, eff) = s.on_message(ControlToArbiter::Ready { from: hash_a });
         assert_eq!(n, PeerState::Ready);
         assert!(matches!(eff, Some(PeerEffect::Warn(_))));
     }
@@ -215,13 +184,10 @@ mod tests {
     fn peer_host_stop_while_running() {
         let hash_a = board_id_hash("a");
         let s = PeerState::Running;
-        let (n, eff) = s.on_message(
-            hash_a,
-            ControlToArbiter::HostStop {
-                from: hash_a,
-                reason: HostStopReason::Breakpoint,
-            },
-        );
+        let (n, eff) = s.on_message(ControlToArbiter::HostStop {
+            from: hash_a,
+            reason: HostStopReason::Breakpoint,
+        });
         assert_eq!(n, PeerState::Stopped);
         assert_eq!(
             eff,
