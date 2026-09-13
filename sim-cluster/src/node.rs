@@ -43,8 +43,9 @@ pub struct NodeOptions {
 
 /// Drive the node outer loop.
 ///
-/// Starts in [`NodeState::Stopped`] (same as after breakpoint / ClusterStop) and
-/// only performs UART / placeholder quantum work while [`NodeState::Running`].
+/// Starts in [`NodeState::AwaitingStartup`], moves to [`NodeState::Stopped`]
+/// after StartupRecord (same idle as after breakpoint / ClusterStop), and only
+/// performs UART / placeholder quantum work while [`NodeState::Running`].
 /// The process stays alive across Stopped↔Running until the arbiter kills it.
 pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let board_id = opts.board_id.as_str();
@@ -59,7 +60,7 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let control = NodeControl::open(&iox_node, &opts.cluster_key, boards)?;
     let uart = NodeUartPorts::open_for_board(&iox_node, &opts.cluster_key, board_id, &topo.edges)?;
 
-    let mut state = NodeState::Stopped;
+    let mut state = NodeState::AwaitingStartup;
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut virtual_time_ns = 0_u64;

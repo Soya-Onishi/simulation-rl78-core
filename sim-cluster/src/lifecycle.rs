@@ -8,11 +8,16 @@ use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 
 /// Per-node control-plane state.
 ///
-/// Starts in [`Stopped`](Self::Stopped) — the same state as after a breakpoint
-/// / [`ControlToNode::ClusterStop`]. Simulation work runs only in [`Running`](Self::Running).
+/// Starts in [`AwaitingStartup`](Self::AwaitingStartup) until the first
+/// [`ControlToNode::StartupRecord`]. After Ready, idle/halt uses
+/// [`Stopped`](Self::Stopped) — the same state as after a breakpoint /
+/// [`ControlToNode::ClusterStop`]. Simulation work runs only in
+/// [`Running`](Self::Running).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeState {
-    /// Idle: waiting for Start, or halted after ClusterStop / host stop.
+    /// Waiting for the first usable [`ControlToNode::StartupRecord`].
+    AwaitingStartup,
+    /// Idle: Ready sent and waiting for Start, or halted after ClusterStop / host stop.
     Stopped,
     /// Simulation may run.
     Running,
@@ -37,6 +42,10 @@ impl NodeState {
     #[must_use]
     pub fn on_message(self, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
         match (self, msg) {
+            (NodeState::AwaitingStartup, ControlToNode::StartupRecord { .. }) => {
+                (NodeState::Stopped, Some(NodeEffect::SendReady))
+            }
+            // Late / republished StartupRecord while idle: re-send Ready for the barrier.
             (NodeState::Stopped, ControlToNode::StartupRecord { .. }) => {
                 (NodeState::Stopped, Some(NodeEffect::SendReady))
             }
@@ -49,8 +58,10 @@ impl NodeState {
                 NodeState::Stopped,
                 Some(NodeEffect::Warn(format!("ClusterStop ({reason})"))),
             ),
-            // Already idle (e.g. duplicate ClusterStop after breakpoint).
-            (NodeState::Stopped, ControlToNode::ClusterStop { .. }) => (NodeState::Stopped, None),
+            (
+                NodeState::AwaitingStartup | NodeState::Stopped,
+                ControlToNode::ClusterStop { .. },
+            ) => (NodeState::Stopped, None),
             // Duplicate / late / early messages: warn and stay.
             (state, msg) => (
                 state,
@@ -141,7 +152,7 @@ mod tests {
 
     #[test]
     fn node_happy_path() {
-        let mut s = NodeState::Stopped;
+        let mut s = NodeState::AwaitingStartup;
         let (n, eff) = s.on_message(ControlToNode::StartupRecord {
             margin_ns: 1000,
             headroom_threshold_ns: 100,

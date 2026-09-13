@@ -1,4 +1,4 @@
-//! `cluster-node` — one board process (control plane; starts Stopped until Start).
+//! `cluster-node` — one board process (control plane; AwaitingStartup until init).
 
 use std::env;
 use std::path::PathBuf;
@@ -73,6 +73,7 @@ fn main() {
 fn usage() -> &'static str {
     "Usage: cluster-node --board-id <id> --cluster-key <key> --iox-root <path> --topology <json>\n\
      \n\
-     Spawned by cluster-arbiter. Starts Stopped, sends Ready after StartupRecord,\n\
-     and runs only after Start (same Stopped state as after breakpoint / ClusterStop).\n"
+     Spawned by cluster-arbiter. Starts AwaitingStartup, becomes Stopped after\n\
+     StartupRecord (Ready), and runs only after Start (Stopped is also the halt\n\
+     state after breakpoint / ClusterStop).\n"
 }
