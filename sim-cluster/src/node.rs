@@ -65,19 +65,8 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
 
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;
-    let control = NodeControl::open(
-        &iox_node,
-        &opts.cluster_key,
-        boards,
-        Duration::from_secs(5),
-    )?;
-    let uart = NodeUartPorts::open_for_board(
-        &iox_node,
-        &opts.cluster_key,
-        board_id,
-        &topo.edges,
-        Duration::from_secs(5),
-    )?;
+    let control = NodeControl::open(&iox_node, &opts.cluster_key, boards)?;
+    let uart = NodeUartPorts::open_for_board(&iox_node, &opts.cluster_key, board_id, &topo.edges)?;
 
     let mut state = NodeState::AwaitingStartup;
     let mut headroom_threshold_ns = 0_u64;

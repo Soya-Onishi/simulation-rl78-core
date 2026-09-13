@@ -424,7 +424,7 @@ mod tests {
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, &format!("fake-{board_id}-{cluster_key}")).unwrap();
         let control =
-            NodeControl::open(&node, &cluster_key, boards, Duration::from_secs(2)).unwrap();
+            NodeControl::open(&node, &cluster_key, boards).unwrap();
         // UART attach is covered by dedicated tests; skip here to isolate control timing.
 
         let end = Instant::now() + Duration::from_secs(3);

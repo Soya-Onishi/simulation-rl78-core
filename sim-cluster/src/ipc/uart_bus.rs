@@ -1,7 +1,6 @@
 //! Per-edge UART pub/sub (nodes `open_or_create` with topology QoS).
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
@@ -31,9 +30,7 @@ impl NodeUartPorts {
         cluster_key: &str,
         board_id: &str,
         topo_edges: &[DirectedEdge],
-        open_budget: Duration,
     ) -> Result<Self, IpcError> {
-        let deadline = Instant::now() + open_budget;
         let mut producers = HashMap::new();
         let mut consumers = HashMap::new();
         for edge in topo_edges {
@@ -49,10 +46,10 @@ impl NodeUartPorts {
             let svc_name = names::uart_edge(cluster_key, &id);
             let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
             if edge.from_board == board_id {
-                let puber = open_or_create_uart_publisher(node, &svc_name, capacity, deadline)?;
+                let puber = open_or_create_uart_publisher(node, &svc_name, capacity)?;
                 producers.insert(id, puber);
             } else if edge.to_board == board_id {
-                let sub = open_or_create_uart_subscriber(node, &svc_name, capacity, deadline)?;
+                let sub = open_or_create_uart_subscriber(node, &svc_name, capacity)?;
                 consumers.insert(id, sub);
             }
         }
@@ -98,72 +95,46 @@ fn open_or_create_uart_publisher(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,
-    deadline: Instant,
 ) -> Result<UartPub, IpcError> {
     let svc_name: ServiceName = name
         .try_into()
         .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
-    loop {
-        match node
-            .service_builder(&svc_name)
-            .publish_subscribe::<UartFrame>()
-            .max_publishers(1)
-            .max_subscribers(1)
-            .max_nodes(16)
-            .subscriber_max_buffer_size(capacity)
-            .enable_safe_overflow(true)
-            .open_or_create()
-        {
-            Ok(svc) => {
-                return svc
-                    .publisher_builder()
-                    .create()
-                    .map_err(|e| IpcError::Message(format!("uart publisher {name}: {e:?}")));
-            }
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-            Err(e) => {
-                return Err(IpcError::Message(format!(
-                    "open_or_create uart pub {name}: {e:?}"
-                )));
-            }
-        }
-    }
+    let svc = node
+        .service_builder(&svc_name)
+        .publish_subscribe::<UartFrame>()
+        .max_publishers(1)
+        .max_subscribers(1)
+        .max_nodes(16)
+        .subscriber_max_buffer_size(capacity)
+        .enable_safe_overflow(true)
+        .open_or_create()
+        .map_err(|e| IpcError::Message(format!("open_or_create uart pub {name}: {e:?}")))?;
+    svc.publisher_builder()
+        .create()
+        .map_err(|e| IpcError::Message(format!("uart publisher {name}: {e:?}")))
 }
 
 fn open_or_create_uart_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,
-    deadline: Instant,
 ) -> Result<UartSub, IpcError> {
     let svc_name: ServiceName = name
         .try_into()
         .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
-    loop {
-        match node
-            .service_builder(&svc_name)
-            .publish_subscribe::<UartFrame>()
-            .max_publishers(1)
-            .max_subscribers(1)
-            .max_nodes(16)
-            .subscriber_max_buffer_size(capacity)
-            .enable_safe_overflow(true)
-            .open_or_create()
-        {
-            Ok(svc) => {
-                return svc
-                    .subscriber_builder()
-                    .create()
-                    .map_err(|e| IpcError::Message(format!("uart subscriber {name}: {e:?}")));
-            }
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-            Err(e) => {
-                return Err(IpcError::Message(format!(
-                    "open_or_create uart sub {name}: {e:?}"
-                )));
-            }
-        }
-    }
+    let svc = node
+        .service_builder(&svc_name)
+        .publish_subscribe::<UartFrame>()
+        .max_publishers(1)
+        .max_subscribers(1)
+        .max_nodes(16)
+        .subscriber_max_buffer_size(capacity)
+        .enable_safe_overflow(true)
+        .open_or_create()
+        .map_err(|e| IpcError::Message(format!("open_or_create uart sub {name}: {e:?}")))?;
+    svc.subscriber_builder()
+        .create()
+        .map_err(|e| IpcError::Message(format!("uart subscriber {name}: {e:?}")))
 }
 
 #[cfg(test)]
@@ -171,6 +142,7 @@ mod tests {
     use super::*;
     use crate::ipc::runtime::{create_node, isolated_config, new_cluster_key};
     use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
+    use std::time::Duration;
 
     #[test]
     fn uart_frame_round_trip() {
@@ -216,12 +188,8 @@ mod tests {
         // No arbiter-side create: TX/RX nodes open_or_create themselves.
         let na = create_node(&config, "uart-a").unwrap();
         let nb = create_node(&config, "uart-b").unwrap();
-        let porta =
-            NodeUartPorts::open_for_board(&na, &key, "a", &topo.edges, Duration::from_secs(2))
-                .unwrap();
-        let portb =
-            NodeUartPorts::open_for_board(&nb, &key, "b", &topo.edges, Duration::from_secs(2))
-                .unwrap();
+        let porta = NodeUartPorts::open_for_board(&na, &key, "a", &topo.edges).unwrap();
+        let portb = NodeUartPorts::open_for_board(&nb, &key, "b", &topo.edges).unwrap();
         let edge = names::edge_id("a", "tx", "b", "rx");
         let frame = UartFrame {
             data: 0x5A,
