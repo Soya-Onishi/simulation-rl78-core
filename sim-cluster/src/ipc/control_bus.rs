@@ -109,25 +109,6 @@ impl ArbiterControl {
             None => Ok(None),
         }
     }
-
-    /// Drain inbound until idle or deadline.
-    pub fn recv_until(
-        &self,
-        deadline: Instant,
-        mut on_msg: impl FnMut(ControlMessage),
-    ) -> Result<(), IpcError> {
-        while Instant::now() < deadline {
-            let mut got = false;
-            while let Some(msg) = self.try_recv()? {
-                on_msg(msg);
-                got = true;
-            }
-            if !got {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Node-side control ports (opens existing services).
