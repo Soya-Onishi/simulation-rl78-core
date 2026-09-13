@@ -6,7 +6,7 @@ use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
 
-use crate::control::{BoardTarget, ControlToArbiter, ControlToNode};
+use crate::control::{ControlToArbiter, ControlToNode};
 
 use super::names;
 use super::runtime::IpcError;
@@ -119,7 +119,6 @@ impl ArbiterControl {
 pub struct NodeControl {
     pub a2n_sub: A2nSub,
     pub n2a_pub: N2aPub,
-    boards: HashMap<u64, String>,
 }
 
 impl NodeControl {
@@ -135,11 +134,7 @@ impl NodeControl {
         let a2n_sub = open_or_create_a2n_subscriber(node, &a2n_name, max_nodes)?;
         let n2a_pub = open_or_create_n2a_publisher(node, &n2a_name, max_nodes)?;
 
-        Ok(Self {
-            a2n_sub,
-            n2a_pub,
-            boards,
-        })
+        Ok(Self { a2n_sub, n2a_pub })
     }
 
     pub fn publish(&self, msg: &ControlToArbiter) -> Result<(), IpcError> {
@@ -155,25 +150,9 @@ impl NodeControl {
             .receive()
             .map_err(|e| IpcError::Message(format!("a2n receive: {e:?}")))?
         {
-            Some(sample) => {
-                let msg: ControlToNode = *sample;
-                // Unknown Unicast destinations are ignored quietly.
-                Ok(filter_known_destination(&self.boards, msg))
-            }
+            Some(sample) => Ok(Some(*sample)),
             None => Ok(None),
         }
-    }
-}
-
-/// Drop a2n messages whose Unicast destination is not in the local board table.
-fn filter_known_destination(
-    boards: &HashMap<u64, String>,
-    msg: ControlToNode,
-) -> Option<ControlToNode> {
-    match msg.destination() {
-        BoardTarget::Broadcast => Some(msg),
-        BoardTarget::Unicast { board_id_hash } if boards.contains_key(&board_id_hash) => Some(msg),
-        BoardTarget::Unicast { .. } => None,
     }
 }
 

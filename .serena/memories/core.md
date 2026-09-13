@@ -10,7 +10,7 @@ RL78 guest sim: Rust workspace + tlib (TCG) submodule. No config files — machi
 
 ## Source map (exclude vendored tlib tree unless changing FFI)
 - Root: `Cargo.toml` workspace, `tests/cli_lifecycle.rs`, `python/topology_dsl/`, `python/examples/`.
-- `sim-cluster/src/{lib,topology,server,arbiter,control,lifecycle,cluster_stop,time_sync,node}.rs`, `sim-cluster/src/ipc/{mod,hash,names,wire,runtime,control_bus,uart_bus}.rs`, bins `cluster_{server,arbiter,node}.rs`. Control plane: a2n `ControlToNode` (`BoardTarget` Broadcast/Unicast) and n2a `ControlToArbiter` (`from` sender hash), both `repr(C)` + `ZeroCopySend` / `HostStopReason` — no separate `ControlWire`.
+- `sim-cluster/src/{lib,topology,server,arbiter,control,lifecycle,cluster_stop,time_sync,node}.rs`, `sim-cluster/src/ipc/{mod,hash,names,wire,runtime,control_bus,uart_bus}.rs`, bins `cluster_{server,arbiter,node}.rs`. Control plane: a2n `ControlToNode` (broadcast variants) and n2a `ControlToArbiter` (`from` sender hash), both `repr(C)` + `ZeroCopySend` / `HostStopReason` — no separate `ControlWire`.
 - `sim-kernel/src/{lib,machine,sim,bus,cpu,command,clock,event,stop,breakpoint}.rs`.
 - `rl78-core/src/{lib,cpu,callbacks,ffi,map,magic,elf}.rs`, `build.rs`, `src/host_callbacks.c`, submodule `rl78-core/tlib` (git branch `rl78`).
 

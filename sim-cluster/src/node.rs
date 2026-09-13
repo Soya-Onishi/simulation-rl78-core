@@ -87,11 +87,10 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
                 headroom_threshold_ns: thr,
                 ..
             } = msg
-                && msg.is_for(board_hash)
             {
                 headroom_threshold_ns = thr;
             }
-            let (next, effect) = state.on_message(board_hash, msg);
+            let (next, effect) = state.on_message(msg);
             if let Some(effect) = effect {
                 apply_effect(board_id, board_hash, &control, effect, &mut allowed_ns)?;
             }

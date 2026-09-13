@@ -48,33 +48,6 @@ impl fmt::Display for HostStopReason {
     }
 }
 
-/// Logical destination for arbiter → node (a2n) messages.
-///
-/// Physical delivery may still be pub/sub broadcast; receivers use
-/// [`BoardTarget::includes`] (or [`ControlToNode::is_for`]) to accept or
-/// silently drop.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
-pub enum BoardTarget {
-    /// Every subscriber should process the message.
-    Broadcast,
-    /// Only the board with this hash should process the message.
-    Unicast { board_id_hash: u64 },
-}
-
-impl BoardTarget {
-    /// Whether `board_id_hash` is in the logical destination set.
-    #[must_use]
-    pub fn includes(self, board_id_hash: u64) -> bool {
-        match self {
-            Self::Broadcast => true,
-            Self::Unicast {
-                board_id_hash: target,
-            } => target == board_id_hash,
-        }
-    }
-}
-
 /// Arbiter → node control messages (a2n iceoryx2 sample type).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
@@ -92,25 +65,6 @@ pub enum ControlToNode {
     Allowed { allowed_ns: u64 },
     /// Host-initiated cluster stop (always broadcast; no ack on same host).
     ClusterStop { reason: HostStopReason },
-}
-
-impl ControlToNode {
-    /// Logical destination of this a2n message.
-    #[must_use]
-    pub fn destination(self) -> BoardTarget {
-        match self {
-            Self::StartupRecord { .. }
-            | Self::Start
-            | Self::Allowed { .. }
-            | Self::ClusterStop { .. } => BoardTarget::Broadcast,
-        }
-    }
-
-    /// Whether this node should process the message.
-    #[must_use]
-    pub fn is_for(self, board_id_hash: u64) -> bool {
-        self.destination().includes(board_id_hash)
-    }
 }
 
 /// Node → arbiter control messages (n2a iceoryx2 sample type).

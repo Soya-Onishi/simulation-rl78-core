@@ -2,8 +2,7 @@
 //!
 //! Unexpected messages do not fail the cluster: they log a warning and leave
 //! the state unchanged. Ready-barrier timeout remains a hard failure at the
-//! arbiter orchestration layer (simulation must not start). Destination
-//! mismatch on a2n Unicast is dropped silently (no warn).
+//! arbiter orchestration layer (simulation must not start).
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 
@@ -34,14 +33,10 @@ pub enum NodeEffect {
 impl NodeState {
     /// Apply one inbound a2n control message.
     ///
-    /// Returns the next state and an optional effect. Messages not addressed to
-    /// this board are ignored silently. Other unexpected messages yield
+    /// Returns the next state and an optional effect. Unexpected messages yield
     /// [`NodeEffect::Warn`] and keep the current state.
     #[must_use]
-    pub fn on_message(self, board_id_hash: u64, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
-        if !msg.is_for(board_id_hash) {
-            return (self, None);
-        }
+    pub fn on_message(self, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
         match (self, msg) {
             (NodeState::AwaitingStartup, ControlToNode::StartupRecord { .. }) => {
                 (NodeState::AwaitingStart, Some(NodeEffect::SendReady))
@@ -175,50 +170,30 @@ impl PeerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::BoardTarget;
     use crate::ipc::board_id_hash;
 
     #[test]
     fn node_happy_path() {
-        let hash_a = board_id_hash("a");
         let mut s = NodeState::AwaitingStartup;
-        let (n, eff) = s.on_message(
-            hash_a,
-            ControlToNode::StartupRecord {
-                margin_ns: 1000,
-                headroom_threshold_ns: 100,
-            },
-        );
+        let (n, eff) = s.on_message(ControlToNode::StartupRecord {
+            margin_ns: 1000,
+            headroom_threshold_ns: 100,
+        });
         assert_eq!(n, NodeState::AwaitingStart);
         assert_eq!(eff, Some(NodeEffect::SendReady));
         s = n;
-        let (n, eff) = s.on_message(hash_a, ControlToNode::Start);
+        let (n, eff) = s.on_message(ControlToNode::Start);
         assert_eq!(n, NodeState::Running);
         assert!(eff.is_none());
     }
 
     #[test]
-    fn board_target_unicast_mismatch_is_not_included() {
-        let hash_a = board_id_hash("a");
-        let hash_b = board_id_hash("b");
-        assert!(!BoardTarget::Unicast {
-            board_id_hash: hash_b
-        }
-        .includes(hash_a));
-        assert!(BoardTarget::Broadcast.includes(hash_a));
-    }
-
-    #[test]
     fn node_ignores_startup_after_running() {
-        let hash_a = board_id_hash("a");
         let s = NodeState::Running;
-        let (n, eff) = s.on_message(
-            hash_a,
-            ControlToNode::StartupRecord {
-                margin_ns: 1000,
-                headroom_threshold_ns: 100,
-            },
-        );
+        let (n, eff) = s.on_message(ControlToNode::StartupRecord {
+            margin_ns: 1000,
+            headroom_threshold_ns: 100,
+        });
         assert_eq!(n, NodeState::Running);
         assert!(matches!(eff, Some(NodeEffect::Warn(_))));
     }
@@ -260,12 +235,9 @@ mod tests {
     #[test]
     fn node_cluster_stop_while_running() {
         let s = NodeState::Running;
-        let (n, eff) = s.on_message(
-            board_id_hash("b"),
-            ControlToNode::ClusterStop {
-                reason: HostStopReason::Breakpoint,
-            },
-        );
+        let (n, eff) = s.on_message(ControlToNode::ClusterStop {
+            reason: HostStopReason::Breakpoint,
+        });
         assert_eq!(n, NodeState::Stopped);
         assert!(matches!(eff, Some(NodeEffect::Warn(_))));
     }
