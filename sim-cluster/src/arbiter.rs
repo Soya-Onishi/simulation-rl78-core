@@ -221,6 +221,10 @@ fn run_time_sync(
     })?;
     eprintln!("cluster-arbiter: initial Allowed={allowed}");
 
+    // TODO(cluster-loop): MVP wall-clock window only. Replace
+    // `while Instant::now() < deadline` with an open `loop` that keeps
+    // receiving (TimeReport / HostStop) and can broadcast ClusterStop until
+    // an explicit shutdown condition; otherwise post-Start control is dead.
     let deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < deadline {
         let mut changed = false;
