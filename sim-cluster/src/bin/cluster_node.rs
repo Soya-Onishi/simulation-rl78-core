@@ -8,7 +8,9 @@ use sim_cluster::{InjectHostStop, NodeOptions, run_node};
 
 fn main() {
     let mut board_id: Option<String> = None;
-    let mut control: Option<PathBuf> = None;
+    let mut cluster_key: Option<String> = None;
+    let mut iox_root: Option<PathBuf> = None;
+    let mut topology: Option<PathBuf> = None;
     let mut inject_reason: Option<String> = None;
     let mut inject_after_ms: u64 = 20;
     let mut args = env::args().skip(1);
@@ -24,9 +26,21 @@ fn main() {
                     process::exit(2);
                 }));
             }
-            "--control" => {
-                control = Some(PathBuf::from(args.next().unwrap_or_else(|| {
-                    eprintln!("cluster-node: --control requires a path");
+            "--cluster-key" => {
+                cluster_key = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("cluster-node: --cluster-key requires a value");
+                    process::exit(2);
+                }));
+            }
+            "--iox-root" => {
+                iox_root = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("cluster-node: --iox-root requires a path");
+                    process::exit(2);
+                })));
+            }
+            "--topology" => {
+                topology = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("cluster-node: --topology requires a path");
                     process::exit(2);
                 })));
             }
@@ -53,8 +67,12 @@ fn main() {
             }
         }
     }
-    let (Some(board_id), Some(control)) = (board_id, control) else {
-        eprintln!("cluster-node: --board-id and --control are required");
+    let (Some(board_id), Some(cluster_key), Some(iox_root), Some(topology_path)) =
+        (board_id, cluster_key, iox_root, topology)
+    else {
+        eprintln!(
+            "cluster-node: --board-id, --cluster-key, --iox-root, and --topology are required"
+        );
         eprint!("{}", usage());
         process::exit(2);
     };
@@ -66,7 +84,9 @@ fn main() {
 
     if let Err(err) = run_node(NodeOptions {
         board_id,
-        control,
+        cluster_key,
+        iox_root,
+        topology_path,
         inject_host_stop,
     }) {
         eprintln!("cluster-node: {err}");
@@ -75,7 +95,7 @@ fn main() {
 }
 
 fn usage() -> &'static str {
-    "Usage: cluster-node --board-id <id> --control <uds-path>\n\
+    "Usage: cluster-node --board-id <id> --cluster-key <key> --iox-root <path> --topology <json>\n\
      \n\
      Optional:\n\
        --inject-host-stop <reason>   Send HostStop after Start (smoke / E2E)\n\

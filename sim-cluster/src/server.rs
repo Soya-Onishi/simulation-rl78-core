@@ -1,4 +1,4 @@
-//! Singleton cluster server: run Python DSL, validate topology, spawn arbiter.
+//! Cluster server: run Python DSL, validate topology, spawn arbiter.
 
 use std::fs;
 use std::io::Write;
@@ -19,8 +19,6 @@ pub struct ServerOptions {
     pub arbiter_bin: PathBuf,
     /// Python interpreter (default `python3`).
     pub python_bin: PathBuf,
-    /// Lock file used to enforce a single server instance.
-    pub lock_path: PathBuf,
 }
 
 impl ServerOptions {
@@ -33,13 +31,11 @@ impl ServerOptions {
             .to_path_buf();
         let arbiter_bin = exe_dir.join("cluster-arbiter");
         let python_path = discover_python_package_root()?;
-        let lock_path = default_lock_path();
         Ok(Self {
             script,
             python_path,
             arbiter_bin,
             python_bin: PathBuf::from("python3"),
-            lock_path,
         })
     }
 }
@@ -47,8 +43,6 @@ impl ServerOptions {
 /// Server failures.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
-    #[error("another cluster-server instance holds the lock at {0}")]
-    AlreadyRunning(PathBuf),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("topology error: {0}")]
@@ -59,12 +53,8 @@ pub enum ServerError {
     Message(String),
 }
 
-/// Acquire the singleton lock, run Python, validate JSON, spawn the arbiter.
-///
-/// Returns when the arbiter process exits.
+/// Run Python, validate JSON, spawn the arbiter. Returns when the arbiter exits.
 pub fn run_server(opts: &ServerOptions) -> Result<i32, ServerError> {
-    let _lock = ServerLock::acquire(&opts.lock_path)?;
-
     if !opts.script.is_file() {
         return Err(ServerError::Message(format!(
             "topology script not found: {}",
@@ -147,13 +137,6 @@ fn write_temp_topology(topo: &LogicalTopology) -> Result<PathBuf, ServerError> {
     Ok(path)
 }
 
-fn default_lock_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("sim-cluster-server.lock")
-}
-
 fn discover_python_package_root() -> Result<PathBuf, ServerError> {
     let mut candidates = Vec::new();
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
@@ -176,60 +159,6 @@ fn discover_python_package_root() -> Result<PathBuf, ServerError> {
     Err(ServerError::Message(
         "could not locate python/topology_dsl; set ServerOptions.python_path".into(),
     ))
-}
-
-/// Exclusive singleton lock via `flock(LOCK_EX)`.
-///
-/// The lock is released when the process exits (including crash / SIGKILL),
-/// so a leftover lock file cannot permanently block a new `cluster-server`.
-#[derive(Debug)]
-struct ServerLock {
-    path: PathBuf,
-    file: fs::File,
-}
-
-impl ServerLock {
-    fn acquire(path: &Path) -> Result<Self, ServerError> {
-        use std::os::unix::io::AsRawFd;
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(ServerError::Io)?;
-
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock
-                || err.raw_os_error() == Some(libc::EWOULDBLOCK)
-                || err.raw_os_error() == Some(libc::EAGAIN)
-            {
-                return Err(ServerError::AlreadyRunning(path.to_path_buf()));
-            }
-            return Err(ServerError::Io(err));
-        }
-
-        file.set_len(0).map_err(ServerError::Io)?;
-        writeln!(file, "{}", std::process::id()).map_err(ServerError::Io)?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            file,
-        })
-    }
-}
-
-impl Drop for ServerLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        let _ = fs::remove_file(&self.path);
-    }
 }
 
 #[cfg(test)]
@@ -266,7 +195,6 @@ emit(t)
             python_path: python_root,
             arbiter_bin: PathBuf::from("/nonexistent"),
             python_bin: PathBuf::from("python3"),
-            lock_path: PathBuf::from("/tmp/unused"),
         };
         let json = run_python_topology(&opts).expect("python run");
         let topo = LogicalTopology::from_json_str(&json).expect("parse");
@@ -284,39 +212,20 @@ emit(t)
             .join("../target/debug/cluster-arbiter")
             .canonicalize()
             .unwrap_or_else(|_| {
-                // Fall back to CARGO_BIN_EXE when available (integration-style).
                 PathBuf::from(option_env!("CARGO_BIN_EXE_cluster-arbiter").unwrap_or(""))
             });
         if !arbiter.is_file() {
-            // Unit tests may run before bins are linked; skip rather than fail CI noise.
             eprintln!("skip: cluster-arbiter not built at {}", arbiter.display());
             return;
         }
-
-        let lock = tempfile::NamedTempFile::new().unwrap();
-        let lock_path = lock.path().to_path_buf();
-        drop(lock);
 
         let opts = ServerOptions {
             script,
             python_path: python_root,
             arbiter_bin: arbiter,
             python_bin: PathBuf::from("python3"),
-            lock_path,
         };
         let code = run_server(&opts).expect("run_server");
         assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn stale_lock_file_is_reclaimed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("server.lock");
-        fs::write(&path, "1\n").unwrap();
-        let lock = ServerLock::acquire(&path).expect("reclaim stale lock file");
-        let err = ServerLock::acquire(&path).unwrap_err();
-        assert!(matches!(err, ServerError::AlreadyRunning(_)));
-        drop(lock);
-        let _relock = ServerLock::acquire(&path).expect("lock after drop");
     }
 }

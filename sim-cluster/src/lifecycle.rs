@@ -9,7 +9,7 @@ use crate::control::ControlMessage;
 /// Per-node control-plane state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeState {
-    /// Connected; waiting for the first usable [`ControlMessage::StartupRecord`].
+    /// Waiting for the first usable [`ControlMessage::StartupRecord`].
     AwaitingStartup,
     /// Ready sent; waiting for [`ControlMessage::Start`].
     AwaitingStart,
@@ -42,7 +42,6 @@ impl NodeState {
                 NodeState::AwaitingStartup,
                 ControlMessage::StartupRecord {
                     board_id: id,
-                    shm_segments,
                     ..
                 },
             ) => {
@@ -54,7 +53,6 @@ impl NodeState {
                         ))),
                     );
                 }
-                let _ = shm_segments; // Phase 3: attach SHM before Ready
                 (NodeState::AwaitingStart, Some(NodeEffect::SendReady))
             }
             (NodeState::AwaitingStart, ControlMessage::Start) => (NodeState::Running, None),
@@ -83,9 +81,7 @@ impl NodeState {
 /// Per-board peer state on the arbiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerState {
-    /// Listener bound; waiting for the node to connect.
-    Accepting,
-    /// Connected and StartupRecord sent; waiting for Ready.
+    /// StartupRecord sent (or about to be); waiting for Ready.
     AwaitingReady,
     /// Ready received.
     Ready,
@@ -110,20 +106,6 @@ pub enum PeerEffect {
 }
 
 impl PeerState {
-    /// Node connected on this board's control socket.
-    #[must_use]
-    pub fn on_connected(self) -> (Self, Option<PeerEffect>) {
-        match self {
-            PeerState::Accepting => (PeerState::AwaitingReady, None),
-            other => (
-                other,
-                Some(PeerEffect::Warn(format!(
-                    "unexpected connect while {other:?}"
-                ))),
-            ),
-        }
-    }
-
     /// Apply one inbound message from this peer.
     #[must_use]
     pub fn on_message(
@@ -137,7 +119,7 @@ impl PeerState {
                     return (
                         self,
                         Some(PeerEffect::Warn(format!(
-                            "Ready board_id '{board_id}' != socket '{expected_board}'; ignoring"
+                            "Ready board_id '{board_id}' != expected '{expected_board}'; ignoring"
                         ))),
                     );
                 }
@@ -216,7 +198,6 @@ mod tests {
             "a",
             ControlMessage::StartupRecord {
                 board_id: "a".into(),
-                shm_segments: vec![],
                 margin_ns: 1000,
                 headroom_threshold_ns: 100,
             },
@@ -236,7 +217,6 @@ mod tests {
             "a",
             ControlMessage::StartupRecord {
                 board_id: "a".into(),
-                shm_segments: vec![],
                 margin_ns: 1000,
                 headroom_threshold_ns: 100,
             },
@@ -247,10 +227,7 @@ mod tests {
 
     #[test]
     fn peer_ready_and_duplicate() {
-        let mut s = PeerState::Accepting;
-        let (n, _) = s.on_connected();
-        assert_eq!(n, PeerState::AwaitingReady);
-        s = n;
+        let mut s = PeerState::AwaitingReady;
         let (n, eff) = s.on_message(
             "a",
             ControlMessage::Ready {

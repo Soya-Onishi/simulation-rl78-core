@@ -21,13 +21,9 @@ path = "src/bin/cluster_node.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-# TODO(ipc): provisional SHM + Event stack (issue #37 MVP). Prefer replacing
-# `raw_sync` (unmaintained) with an actively developed wait/wake; see
-# `src/shm_uart.rs` module docs for swap touch points.
-shared_memory = "0.12"
-raw_sync = "0.1"
-crossbeam-queue = "0.3"
-libc = "0.2"
+iceoryx2 = "0.9.3"
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
+iceoryx2-bb-system-types = "0.9.3"
 
 [dev-dependencies]
 tempfile = "3"
