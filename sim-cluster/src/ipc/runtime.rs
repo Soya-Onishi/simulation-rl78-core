@@ -29,7 +29,10 @@ pub fn isolated_config(root: &std::path::Path) -> Result<Config, IpcError> {
     let mut cfg = Config::default();
     let bytes = path_as_bytes(root)?;
     let iox_path = IoxPath::new(&bytes).map_err(|e| {
-        IpcError::Message(format!("invalid iceoryx root path {}: {e:?}", root.display()))
+        IpcError::Message(format!(
+            "invalid iceoryx root path {}: {e:?}",
+            root.display()
+        ))
     })?;
     cfg.global.set_root_path(&iox_path);
     Ok(cfg)

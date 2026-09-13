@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::control::ControlMessage;
+use crate::control::{ControlMessage, HostStopReason};
 use crate::ipc::{
-    board_hash_table, create_node, isolated_config, HostStopReason, NodeControl, NodeUartPorts,
-    IpcError,
+    IpcError, NodeControl, NodeUartPorts, board_hash_table, board_id_hash, create_node,
+    isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::topology::{LogicalTopology, TopologyError};
@@ -58,10 +58,11 @@ pub struct NodeOptions {
 /// Drive the node outer loop until Stopped.
 pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let board_id = opts.board_id.as_str();
+    let board_hash = board_id_hash(board_id);
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
-    let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
-        .map_err(NodeError::Message)?;
+    let boards =
+        board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).map_err(NodeError::Message)?;
 
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;
@@ -83,17 +84,17 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
         // Control receive every iteration.
         while let Some(msg) = control.try_recv()? {
             if let ControlMessage::StartupRecord {
-                board_id: ref id,
+                board_id_hash: id_hash,
                 headroom_threshold_ns: thr,
                 ..
             } = msg
-                && id == board_id
+                && id_hash == board_hash
             {
                 headroom_threshold_ns = thr;
             }
-            let (next, effect) = state.on_message(board_id, msg);
+            let (next, effect) = state.on_message(board_hash, msg);
             if let Some(effect) = effect {
-                apply_effect(board_id, &control, effect, &mut allowed_ns)?;
+                apply_effect(board_id, board_hash, &control, effect, &mut allowed_ns)?;
             }
             if next != state {
                 eprintln!("cluster-node[{board_id}]: {state:?} -> {next:?}");
@@ -156,7 +157,7 @@ pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
             // and should drive TimeReport from the sim clock / headroom policy.
             if headroom < headroom_threshold_ns && last_time_report != Some(virtual_time_ns) {
                 let _ = control.publish(&ControlMessage::TimeReport {
-                    board_id: board_id.to_string(),
+                    board_id_hash: board_hash,
                     virtual_time_ns,
                 });
                 last_time_report = Some(virtual_time_ns);
@@ -182,23 +183,19 @@ pub fn notify_host_stop(
     board_id: &str,
     reason: &str,
 ) -> Result<bool, NodeError> {
-    use crate::cluster_stop::is_cluster_relevant_reason;
-
-    if !is_cluster_relevant_reason(reason) {
+    let Some(reason) = HostStopReason::from_label(reason) else {
         return Ok(false);
-    }
-    if HostStopReason::from_label(reason).is_none() {
-        return Ok(false);
-    }
+    };
     control.publish(&ControlMessage::HostStop {
-        board_id: board_id.to_string(),
-        reason: reason.to_string(),
+        board_id_hash: board_id_hash(board_id),
+        reason,
     })?;
     Ok(true)
 }
 
 fn apply_effect(
     board_id: &str,
+    board_hash: u64,
     control: &NodeControl,
     effect: NodeEffect,
     allowed_ns: &mut u64,
@@ -206,7 +203,7 @@ fn apply_effect(
     match effect {
         NodeEffect::SendReady => {
             control.publish(&ControlMessage::Ready {
-                board_id: board_id.to_string(),
+                board_id_hash: board_hash,
             })?;
             eprintln!("cluster-node[{board_id}]: Ready");
         }
