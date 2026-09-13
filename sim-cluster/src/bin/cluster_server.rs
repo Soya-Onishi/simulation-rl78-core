@@ -1,10 +1,10 @@
-//! `cluster-server` — singleton entry: run Python DSL, spawn `cluster-arbiter`.
+//! `cluster-server` — entry: run Python DSL, spawn `cluster-arbiter`.
 
 use std::env;
 use std::path::PathBuf;
 use std::process;
 
-use sim_cluster::{ServerError, ServerOptions, run_server};
+use sim_cluster::{ServerOptions, run_server};
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -35,10 +35,6 @@ fn main() {
 
     match run_server(&opts) {
         Ok(code) => process::exit(code),
-        Err(ServerError::AlreadyRunning(path)) => {
-            eprintln!("cluster-server: already running (lock {})", path.display());
-            process::exit(1);
-        }
         Err(err) => {
             eprintln!("cluster-server: {err}");
             process::exit(1);
@@ -49,6 +45,6 @@ fn main() {
 fn usage() -> &'static str {
     "Usage: cluster-server <topology.py>\n\
      \n\
-     Singleton cluster entry. Runs the Python topology DSL script, validates\n\
-     the logical JSON, and spawns cluster-arbiter with that topology.\n"
+     Cluster entry. Runs the Python topology DSL script, validates the logical\n\
+     JSON, and spawns cluster-arbiter with that topology.\n"
 }

@@ -1,8 +1,4 @@
-//! Arbiter: bind control resources, spawn nodes, Ready barrier, Start.
-//!
-//! Per-peer progress is an event-driven [`PeerState`] machine. Unexpected
-//! messages warn and are ignored; only Ready-barrier timeout is fatal for
-//! starting the simulation.
+//! Arbiter: create iceoryx services, spawn nodes, Ready barrier, Start.
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,13 +6,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::control::{
-    ControlMessage, ShmBinding, ShmRole, accept_timeout, bind_listener, default_control_dir,
-    read_message_timeout, write_message,
+use crate::control::ControlMessage;
+use crate::ipc::{
+    board_hash_table, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
+    ArbiterControl, IpcError, UartServicesCreated,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
-use crate::shm_uart::{ShmUartError, UartShmOwner};
-use crate::topology::{DirectedEdge, LogicalTopology, PayloadKind, TopologyError};
+use crate::topology::{LogicalTopology, TopologyError};
+
+/// Idle poll while waiting for Ready / time-sync (arbiter side).
+const ARBITER_POLL_IDLE: Duration = Duration::from_millis(1);
 
 /// Arbiter failures.
 #[derive(Debug, thiserror::Error)]
@@ -27,8 +26,8 @@ pub enum ArbiterError {
     Topology(#[from] TopologyError),
     #[error("ready barrier timed out after {timeout_ms}ms; missing boards: {missing}")]
     ReadyTimeout { timeout_ms: u64, missing: String },
-    #[error("shm error: {0}")]
-    Shm(#[from] ShmUartError),
+    #[error("ipc error: {0}")]
+    Ipc(#[from] IpcError),
     #[error("{0}")]
     Message(String),
 }
@@ -38,8 +37,10 @@ pub enum ArbiterError {
 pub struct ArbiterOptions {
     pub topology_path: PathBuf,
     pub node_bin: PathBuf,
-    /// Directory for per-board control sockets.
-    pub control_dir: PathBuf,
+    /// Unique key for this cluster instance (iceoryx isolation + service names).
+    pub cluster_key: String,
+    /// Absolute iceoryx root path for this cluster.
+    pub iox_root: PathBuf,
 }
 
 impl ArbiterOptions {
@@ -48,10 +49,13 @@ impl ArbiterOptions {
         let exe_dir = exe
             .parent()
             .ok_or_else(|| ArbiterError::Message("current_exe has no parent".into()))?;
+        let cluster_key = new_cluster_key();
+        let iox_root = root_path_for_cluster(&cluster_key);
         Ok(Self {
             topology_path,
             node_bin: exe_dir.join("cluster-node"),
-            control_dir: default_control_dir().join(format!("arb-{}", std::process::id())),
+            cluster_key,
+            iox_root,
         })
     }
 }
@@ -69,10 +73,11 @@ pub fn run_arbiter_with_topology(
     topo: &LogicalTopology,
 ) -> Result<(), ArbiterError> {
     eprintln!(
-        "cluster-arbiter: loaded topology ({} boards, {} edges, margin_ns={})",
+        "cluster-arbiter: loaded topology ({} boards, {} edges, margin_ns={}, cluster_key={})",
         topo.boards.len(),
         topo.edges.len(),
-        topo.margin_ns
+        topo.margin_ns,
+        opts.cluster_key
     );
 
     if !opts.node_bin.is_file() {
@@ -82,25 +87,25 @@ pub fn run_arbiter_with_topology(
         )));
     }
 
-    fs::create_dir_all(&opts.control_dir)?;
+    let board_ids: Vec<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
+    let boards = board_hash_table(board_ids).map_err(ArbiterError::Message)?;
 
-    let edge_bindings = create_edge_shm(topo, &opts.control_dir)?;
-    // Keep owners alive for the cluster lifetime (Drop unlinks flinks).
-    let _shm_owners: Vec<UartShmOwner> = edge_bindings.owners;
+    let config = isolated_config(&opts.iox_root)?;
+    let node = create_node(&config, &format!("arbiter-{}", opts.cluster_key))?;
+    let control = ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards)?;
+    let _uart = UartServicesCreated::create_all(&node, &opts.cluster_key, topo)?;
 
     let mut children: Vec<Child> = Vec::new();
-    let mut listeners = Vec::new();
-
     for board in &topo.boards {
-        let sock = opts.control_dir.join(format!("{}.sock", board.id));
-        let listener = bind_listener(&sock)?;
-        listeners.push((board.id.clone(), sock.clone(), listener));
-
         let child = Command::new(&opts.node_bin)
             .arg("--board-id")
             .arg(&board.id)
-            .arg("--control")
-            .arg(&sock)
+            .arg("--cluster-key")
+            .arg(&opts.cluster_key)
+            .arg("--iox-root")
+            .arg(&opts.iox_root)
+            .arg("--topology")
+            .arg(&opts.topology_path)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -108,10 +113,8 @@ pub fn run_arbiter_with_topology(
         children.push(child);
     }
 
-    let result = ready_barrier_and_start(topo, &mut listeners, &edge_bindings.by_board);
+    let result = ready_barrier_and_start(topo, &control);
     if result.is_ok() {
-        // Phase 2: Start delivered; leave nodes running briefly then stop.
-        // Later phases keep the arbiter event loop alive.
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -119,157 +122,72 @@ pub fn run_arbiter_with_topology(
         let _ = child.kill();
         let _ = child.wait();
     }
-    let _ = fs::remove_dir_all(&opts.control_dir);
+    let _ = fs::remove_dir_all(&opts.iox_root);
     result
-}
-
-struct PeerSlot {
-    state: PeerState,
-    stream: Option<std::os::unix::net::UnixStream>,
-}
-
-struct EdgeShmBundle {
-    owners: Vec<UartShmOwner>,
-    by_board: HashMap<String, Vec<ShmBinding>>,
-}
-
-fn edge_id(edge: &DirectedEdge) -> String {
-    format!(
-        "{}:{}->{}:{}",
-        edge.from_board, edge.from_endpoint, edge.to_board, edge.to_endpoint
-    )
-}
-
-fn create_edge_shm(
-    topo: &LogicalTopology,
-    control_dir: &Path,
-) -> Result<EdgeShmBundle, ArbiterError> {
-    let mut owners = Vec::new();
-    let mut by_board: HashMap<String, Vec<ShmBinding>> = HashMap::new();
-    for (i, edge) in topo.edges.iter().enumerate() {
-        if edge.payload != PayloadKind::Uart {
-            continue;
-        }
-        let id = edge_id(edge);
-        let flink = control_dir.join(format!("uart-edge-{i}.shm"));
-        let capacity = LogicalTopology::uart_ring_len(edge);
-        let owner = UartShmOwner::create(&flink, capacity)?;
-        let flink_name = owner.flink().display().to_string();
-        by_board
-            .entry(edge.from_board.clone())
-            .or_default()
-            .push(ShmBinding {
-                edge_id: id.clone(),
-                flink_name: flink_name.clone(),
-                role: ShmRole::Producer,
-            });
-        by_board
-            .entry(edge.to_board.clone())
-            .or_default()
-            .push(ShmBinding {
-                edge_id: id,
-                flink_name,
-                role: ShmRole::Consumer,
-            });
-        owners.push(owner);
-    }
-    Ok(EdgeShmBundle { owners, by_board })
 }
 
 fn ready_barrier_and_start(
     topo: &LogicalTopology,
-    listeners: &mut [(String, PathBuf, std::os::unix::net::UnixListener)],
-    bindings_by_board: &HashMap<String, Vec<ShmBinding>>,
+    control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
     let timeout = Duration::from_millis(topo.ready_timeout_ms);
     let deadline = Instant::now() + timeout;
-    let expected: Vec<String> = topo.boards.iter().map(|b| b.id.clone()).collect();
-    let mut peers: HashMap<String, PeerSlot> = expected
+    let mut peers: HashMap<String, PeerState> = topo
+        .boards
         .iter()
-        .map(|id| {
-            (
-                id.clone(),
-                PeerSlot {
-                    state: PeerState::Accepting,
-                    stream: None,
-                },
-            )
-        })
+        .map(|b| (b.id.clone(), PeerState::AwaitingReady))
         .collect();
 
-    // Accept connections (event: connect) until every peer is AwaitingReady or timeout.
-    while peers.values().any(|p| p.state == PeerState::Accepting) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return ready_timeout(topo, &peers);
-        }
-        let mut progressed = false;
-        for (board_id, _sock, listener) in listeners.iter() {
-            let Some(slot) = peers.get_mut(board_id) else {
-                continue;
-            };
-            if slot.state != PeerState::Accepting {
-                continue;
-            }
-            let slice = remaining.min(Duration::from_millis(20));
-            if let Some(mut stream) = accept_timeout(listener, slice)? {
-                let (next, effect) = slot.state.on_connected();
-                warn_peer(board_id, effect);
-                let shm_segments = bindings_by_board.get(board_id).cloned().unwrap_or_default();
-                let startup = ControlMessage::StartupRecord {
-                    board_id: board_id.clone(),
-                    shm_segments,
-                    margin_ns: topo.margin_ns,
-                    headroom_threshold_ns: topo.headroom_threshold_ns,
-                };
-                write_message(&mut stream, &startup)?;
-                slot.state = next;
-                slot.stream = Some(stream);
-                progressed = true;
-            }
-        }
-        if !progressed {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+    // Publish StartupRecord for every board (nodes may still be opening).
+    for board in &topo.boards {
+        control.publish(&ControlMessage::StartupRecord {
+            board_id: board.id.clone(),
+            margin_ns: topo.margin_ns,
+            headroom_threshold_ns: topo.headroom_threshold_ns,
+        })?;
     }
+    // Re-publish periodically until Ready so late openers still see Startup.
+    let mut last_startup = Instant::now();
 
-    // Collect Ready events until all peers are Ready or timeout.
-    while peers.values().any(|p| p.state != PeerState::Ready) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+    while peers.values().any(|p| *p != PeerState::Ready) {
+        if Instant::now() >= deadline {
             return ready_timeout(topo, &peers);
+        }
+        if last_startup.elapsed() > Duration::from_millis(50) {
+            for board in &topo.boards {
+                if peers.get(&board.id) == Some(&PeerState::AwaitingReady) {
+                    let _ = control.publish(&ControlMessage::StartupRecord {
+                        board_id: board.id.clone(),
+                        margin_ns: topo.margin_ns,
+                        headroom_threshold_ns: topo.headroom_threshold_ns,
+                    });
+                }
+            }
+            last_startup = Instant::now();
         }
 
         let mut progressed = false;
-        for (board_id, slot) in peers.iter_mut() {
-            if slot.state == PeerState::Ready {
-                continue;
-            }
-            let Some(stream) = slot.stream.as_mut() else {
-                continue;
-            };
-            let slice = remaining.min(Duration::from_millis(50));
-            match read_message_timeout(stream, slice) {
-                Ok(msg) => {
-                    let (next, effect) = slot.state.on_message(board_id, msg);
+        while let Some(msg) = control.try_recv()? {
+            match &msg {
+                ControlMessage::Ready { board_id } => {
+                    let Some(state) = peers.get_mut(board_id) else {
+                        continue;
+                    };
+                    let (next, effect) = state.on_message(board_id, msg.clone());
                     warn_peer(board_id, effect);
-                    if next != slot.state {
-                        eprintln!(
-                            "cluster-arbiter: peer '{board_id}' {:?} -> {next:?}",
-                            slot.state
-                        );
+                    if next != *state {
+                        eprintln!("cluster-arbiter: peer '{board_id}' {state:?} -> {next:?}");
                     }
-                    slot.state = next;
+                    *state = next;
                     progressed = true;
                 }
-                Err(err)
-                    if err.kind() == std::io::ErrorKind::TimedOut
-                        || err.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(err) => return Err(ArbiterError::Io(err)),
+                other => {
+                    eprintln!("cluster-arbiter: ignoring unexpected before Start: {other:?}");
+                }
             }
         }
         if !progressed {
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(ARBITER_POLL_IDLE);
         }
     }
 
@@ -278,141 +196,121 @@ fn ready_barrier_and_start(
         peers.len()
     );
 
-    for (board_id, slot) in peers.iter_mut() {
-        if let Some(stream) = slot.stream.as_mut() {
-            write_message(stream, &ControlMessage::Start)?;
-        }
-        slot.state = slot.state.on_start_broadcast();
-        eprintln!("cluster-arbiter: peer '{board_id}' -> {:?}", slot.state);
+    control.publish(&ControlMessage::Start)?;
+    for state in peers.values_mut() {
+        *state = state.on_start_broadcast();
     }
     eprintln!("cluster-arbiter: Start broadcast");
 
-    run_time_sync(topo, &mut peers)?;
+    run_time_sync(topo, control, &mut peers)?;
     Ok(())
 }
 
 fn run_time_sync(
     topo: &LogicalTopology,
-    peers: &mut HashMap<String, PeerSlot>,
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
 ) -> Result<(), ArbiterError> {
     use crate::cluster_stop::is_cluster_relevant_reason;
     use crate::time_sync::TimeCeiling;
 
     let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
     let mut allowed = ceiling.allowed_ns();
-    for slot in peers.values_mut() {
-        if let Some(stream) = slot.stream.as_mut() {
-            if let Err(err) = write_message(
-                stream,
-                &ControlMessage::Allowed {
-                    allowed_ns: allowed,
-                },
-            ) {
-                eprintln!("cluster-arbiter: warning: Allowed send failed: {err}");
-            }
-        }
-    }
+    control.publish(&ControlMessage::Allowed {
+        allowed_ns: allowed,
+    })?;
     eprintln!("cluster-arbiter: initial Allowed={allowed}");
 
-    // Post-start event loop: time ceiling + cluster stop. Brief window for MVP.
     let deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < deadline {
         let mut changed = false;
         let mut cluster_stop: Option<(String, String)> = None;
-        for (board_id, slot) in peers.iter_mut() {
-            let Some(stream) = slot.stream.as_mut() else {
+        while let Some(msg) = control.try_recv()? {
+            let board_id = match &msg {
+                ControlMessage::TimeReport { board_id, .. }
+                | ControlMessage::HostStop { board_id, .. }
+                | ControlMessage::Ready { board_id } => board_id.clone(),
+                _ => {
+                    eprintln!("cluster-arbiter: ignoring {msg:?} in time-sync");
+                    continue;
+                }
+            };
+            let Some(state) = peers.get_mut(&board_id) else {
                 continue;
             };
-            match read_message_timeout(stream, Duration::from_millis(10)) {
-                Ok(msg) => {
-                    let (next, effect) = slot.state.on_message(board_id, msg);
-                    match effect.clone() {
-                        Some(PeerEffect::TimeReport {
-                            board_id: id,
-                            virtual_time_ns,
-                        }) => {
-                            ceiling.report(&id, virtual_time_ns);
-                            changed = true;
-                        }
-                        Some(PeerEffect::HostStop {
-                            board_id: id,
-                            reason,
-                        }) => {
-                            if is_cluster_relevant_reason(&reason) {
-                                cluster_stop = Some((id, reason));
-                            } else {
-                                eprintln!(
-                                    "cluster-arbiter: ignoring non-cluster HostStop from '{id}': {reason}"
-                                );
-                            }
-                        }
-                        other => warn_peer(board_id, other),
+            let (next, effect) = state.on_message(&board_id, msg);
+            match effect.clone() {
+                Some(PeerEffect::TimeReport {
+                    board_id: id,
+                    virtual_time_ns,
+                }) => {
+                    ceiling.report(&id, virtual_time_ns);
+                    changed = true;
+                }
+                Some(PeerEffect::HostStop {
+                    board_id: id,
+                    reason,
+                }) => {
+                    if is_cluster_relevant_reason(&reason) {
+                        cluster_stop = Some((id, reason));
+                    } else {
+                        eprintln!(
+                            "cluster-arbiter: ignoring non-cluster HostStop from '{id}': {reason}"
+                        );
                     }
-                    slot.state = next;
                 }
-                Err(err)
-                    if err.kind() == std::io::ErrorKind::TimedOut
-                        || err.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => {
-                    // Peer gone; keep last report in the ceiling.
-                }
+                other => warn_peer(&board_id, other),
             }
+            *state = next;
         }
         if let Some((source, reason)) = cluster_stop {
             eprintln!(
                 "cluster-arbiter: HostStop from '{source}' ({reason}); broadcasting ClusterStop"
             );
-            broadcast_cluster_stop(peers, &source, &reason);
+            broadcast_cluster_stop(control, peers, &source, &reason)?;
             return Ok(());
         }
         if changed {
             let next_allowed = ceiling.allowed_ns();
             if next_allowed != allowed {
                 allowed = next_allowed;
-                for slot in peers.values_mut() {
-                    if let Some(stream) = slot.stream.as_mut() {
-                        if let Err(err) = write_message(
-                            stream,
-                            &ControlMessage::Allowed {
-                                allowed_ns: allowed,
-                            },
-                        ) {
-                            eprintln!("cluster-arbiter: warning: Allowed send failed: {err}");
-                        }
-                    }
-                }
+                control.publish(&ControlMessage::Allowed {
+                    allowed_ns: allowed,
+                })?;
                 eprintln!("cluster-arbiter: Allowed={allowed}");
             }
         }
+        std::thread::sleep(ARBITER_POLL_IDLE);
     }
     Ok(())
 }
 
-fn broadcast_cluster_stop(peers: &mut HashMap<String, PeerSlot>, source: &str, reason: &str) {
-    let msg = ControlMessage::ClusterStop {
+fn broadcast_cluster_stop(
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
+    source: &str,
+    reason: &str,
+) -> Result<(), ArbiterError> {
+    control.publish(&ControlMessage::ClusterStop {
         reason: reason.to_string(),
-    };
-    for (board_id, slot) in peers.iter_mut() {
+    })?;
+    for (board_id, state) in peers.iter_mut() {
         if board_id == source {
-            slot.state = PeerState::Stopped;
+            *state = PeerState::Stopped;
             continue;
         }
-        if let Some(stream) = slot.stream.as_mut() {
-            if let Err(err) = write_message(stream, &msg) {
-                eprintln!("cluster-arbiter: warning: ClusterStop to '{board_id}' failed: {err}");
-            }
-        }
-        slot.state = PeerState::Stopped;
+        *state = PeerState::Stopped;
     }
+    Ok(())
 }
 
 fn ready_timeout(
     topo: &LogicalTopology,
-    peers: &HashMap<String, PeerSlot>,
+    peers: &HashMap<String, PeerState>,
 ) -> Result<(), ArbiterError> {
     let missing = peers
         .iter()
-        .filter(|(_, p)| p.state != PeerState::Ready)
+        .filter(|(_, p)| **p != PeerState::Ready)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>()
         .join(",");
@@ -440,8 +338,12 @@ pub fn run_arbiter_from_path(topology_path: &Path) -> Result<(), ArbiterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::{
+        board_hash_table, create_node, isolated_config, ArbiterControl, NodeControl,
+        UartServicesCreated,
+    };
     use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
-    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     fn two_board_topo(ready_timeout_ms: u64) -> LogicalTopology {
@@ -506,91 +408,88 @@ mod tests {
         }
     }
 
-    fn fake_node(sock: PathBuf, board_id: String, send_ready: bool) {
-        fake_node_behavior(sock, board_id, send_ready, false);
-    }
-
-    fn fake_node_behavior(
-        sock: PathBuf,
+    fn fake_node_loop(
+        cluster_key: String,
+        iox_root: PathBuf,
         board_id: String,
         send_ready: bool,
         inject_host_stop: bool,
+        saw_cluster_stop: Option<Arc<Mutex<bool>>>,
     ) {
-        let mut stream = loop {
-            match UnixStream::connect(&sock) {
-                Ok(s) => break s,
-                Err(_) => thread::sleep(Duration::from_millis(5)),
-            }
-        };
-        let startup = crate::control::read_message(&mut stream).unwrap();
-        match startup {
-            ControlMessage::StartupRecord { board_id: id, .. } => {
-                assert_eq!(id, board_id);
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        if send_ready {
-            // Duplicate Ready should be warned, not fatal.
-            write_message(
-                &mut stream,
-                &ControlMessage::Ready {
-                    board_id: board_id.clone(),
-                },
-            )
-            .unwrap();
-            let _ = write_message(
-                &mut stream,
-                &ControlMessage::Ready {
-                    board_id: board_id.clone(),
-                },
-            );
-            // Ready-timeout tests may drop the peer before Start arrives.
-            let Ok(start) = crate::control::read_message(&mut stream) else {
-                return;
-            };
-            assert!(matches!(start, ControlMessage::Start));
-            if inject_host_stop {
-                // Drain initial Allowed, then HostStop.
-                let _ = read_message_timeout(&mut stream, Duration::from_millis(50));
-                write_message(
-                    &mut stream,
-                    &ControlMessage::HostStop {
-                        board_id: board_id.clone(),
-                        reason: "breakpoint".into(),
-                    },
-                )
-                .unwrap();
-                let end = Instant::now() + Duration::from_millis(200);
-                while Instant::now() < end {
-                    let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
-                }
-            } else {
-                // Stay connected through the arbiter's short time-sync window.
-                let end = Instant::now() + Duration::from_millis(350);
-                while Instant::now() < end {
-                    let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
+        let topo = two_board_topo(2_000);
+        let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
+        let config = isolated_config(&iox_root).unwrap();
+        let node = create_node(&config, &format!("fake-{board_id}-{cluster_key}")).unwrap();
+        let control =
+            NodeControl::open(&node, &cluster_key, boards, Duration::from_secs(2)).unwrap();
+        // UART attach is covered by dedicated tests; skip here to isolate control timing.
+
+        let end = Instant::now() + Duration::from_secs(3);
+        let mut got_start = false;
+        while Instant::now() < end {
+            while let Ok(Some(msg)) = control.try_recv() {
+                match msg {
+                    ControlMessage::StartupRecord { board_id: id, .. } if id == board_id => {
+                        if send_ready {
+                            let _ = control.publish(&ControlMessage::Ready {
+                                board_id: board_id.clone(),
+                            });
+                            let _ = control.publish(&ControlMessage::Ready {
+                                board_id: board_id.clone(),
+                            });
+                        }
+                    }
+                    ControlMessage::Start => {
+                        got_start = true;
+                        if inject_host_stop {
+                            let _ = control.publish(&ControlMessage::HostStop {
+                                board_id: board_id.clone(),
+                                reason: "breakpoint".into(),
+                            });
+                        }
+                    }
+                    ControlMessage::ClusterStop { reason } => {
+                        assert_eq!(reason, "breakpoint");
+                        if let Some(flag) = &saw_cluster_stop {
+                            *flag.lock().unwrap() = true;
+                        }
+                        return;
+                    }
+                    _ => {}
                 }
             }
-        } else {
-            let _ = crate::control::read_message(&mut stream);
+            if got_start && !inject_host_stop && saw_cluster_stop.is_none() {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            thread::sleep(Duration::from_millis(2));
         }
     }
 
     #[test]
     fn ready_barrier_succeeds_with_fake_nodes() {
         let dir = tempfile::tempdir().unwrap();
+        let cluster_key = format!("t-ready-{}", std::process::id());
+        let iox_root = dir.path().join("iox");
         let topo = two_board_topo(2_000);
-        let mut listeners = Vec::new();
+        let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
+        let config = isolated_config(&iox_root).unwrap();
+        let node = create_node(&config, "arb-test-ready").unwrap();
+        let control =
+            ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
+        let _uart = UartServicesCreated::create_all(&node, &cluster_key, &topo).unwrap();
+
         let mut joins = Vec::new();
         for board in &topo.boards {
-            let sock = dir.path().join(format!("{}.sock", board.id));
-            let listener = bind_listener(&sock).unwrap();
-            let sock2 = sock.clone();
+            let ck = cluster_key.clone();
+            let root = iox_root.clone();
             let id = board.id.clone();
-            joins.push(thread::spawn(move || fake_node(sock2, id, true)));
-            listeners.push((board.id.clone(), sock, listener));
+            joins.push(thread::spawn(move || {
+                fake_node_loop(ck, root, id, true, false, None);
+            }));
         }
-        ready_barrier_and_start(&topo, &mut listeners, &HashMap::new()).unwrap();
+
+        ready_barrier_and_start(&topo, &control).unwrap();
         for j in joins {
             j.join().unwrap();
         }
@@ -599,19 +498,28 @@ mod tests {
     #[test]
     fn ready_barrier_times_out_when_node_silent() {
         let dir = tempfile::tempdir().unwrap();
+        let cluster_key = format!("t-timeout-{}", std::process::id());
+        let iox_root = dir.path().join("iox");
         let topo = two_board_topo(200);
-        let mut listeners = Vec::new();
+        let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
+        let config = isolated_config(&iox_root).unwrap();
+        let node = create_node(&config, "arb-test-timeout").unwrap();
+        let control =
+            ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
+        let _uart = UartServicesCreated::create_all(&node, &cluster_key, &topo).unwrap();
+
         let mut joins = Vec::new();
         for (i, board) in topo.boards.iter().enumerate() {
-            let sock = dir.path().join(format!("{}.sock", board.id));
-            let listener = bind_listener(&sock).unwrap();
-            let sock2 = sock.clone();
+            let ck = cluster_key.clone();
+            let root = iox_root.clone();
             let id = board.id.clone();
             let send = i == 0;
-            joins.push(thread::spawn(move || fake_node(sock2, id, send)));
-            listeners.push((board.id.clone(), sock, listener));
+            joins.push(thread::spawn(move || {
+                fake_node_loop(ck, root, id, send, false, None);
+            }));
         }
-        let err = ready_barrier_and_start(&topo, &mut listeners, &HashMap::new()).unwrap_err();
+
+        let err = ready_barrier_and_start(&topo, &control).unwrap_err();
         assert!(matches!(err, ArbiterError::ReadyTimeout { .. }));
         for j in joins {
             let _ = j.join();
@@ -620,81 +528,63 @@ mod tests {
 
     #[test]
     fn host_stop_broadcasts_cluster_stop() {
-        use std::sync::{Arc, Mutex};
-
         let dir = tempfile::tempdir().unwrap();
+        let cluster_key = format!("t-hoststop-{}", std::process::id());
+        let iox_root = dir.path().join("iox");
         let topo = two_board_topo(2_000);
-        let mut listeners = Vec::new();
-        let mut joins = Vec::new();
-        let saw_cluster_stop = Arc::new(Mutex::new(false));
+        let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
+        let config = isolated_config(&iox_root).unwrap();
+        let node = create_node(&config, "arb-test-hoststop").unwrap();
+        let control =
+            ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
+        let _uart = UartServicesCreated::create_all(&node, &cluster_key, &topo).unwrap();
 
+        let saw_cluster_stop = Arc::new(Mutex::new(false));
+        let mut joins = Vec::new();
         for board in &topo.boards {
-            let sock = dir.path().join(format!("{}.sock", board.id));
-            let listener = bind_listener(&sock).unwrap();
-            let sock2 = sock.clone();
+            let ck = cluster_key.clone();
+            let root = iox_root.clone();
             let id = board.id.clone();
-            let flag = Arc::clone(&saw_cluster_stop);
             let inject = id == "a";
+            let flag = if inject {
+                None
+            } else {
+                Some(Arc::clone(&saw_cluster_stop))
+            };
             joins.push(thread::spawn(move || {
-                let mut stream = loop {
-                    match UnixStream::connect(&sock2) {
-                        Ok(s) => break s,
-                        Err(_) => thread::sleep(Duration::from_millis(5)),
-                    }
-                };
-                let startup = crate::control::read_message(&mut stream).unwrap();
-                assert!(matches!(
-                    startup,
-                    ControlMessage::StartupRecord { board_id: ref bid, .. } if *bid == id
-                ));
-                write_message(
-                    &mut stream,
-                    &ControlMessage::Ready {
-                        board_id: id.clone(),
-                    },
-                )
-                .unwrap();
-                let start = crate::control::read_message(&mut stream).unwrap();
-                assert!(matches!(start, ControlMessage::Start));
-                if inject {
-                    let _ = read_message_timeout(&mut stream, Duration::from_millis(50));
-                    write_message(
-                        &mut stream,
-                        &ControlMessage::HostStop {
-                            board_id: id.clone(),
-                            reason: "breakpoint".into(),
-                        },
-                    )
-                    .unwrap();
-                    let end = Instant::now() + Duration::from_millis(200);
-                    while Instant::now() < end {
-                        let _ = read_message_timeout(&mut stream, Duration::from_millis(20));
-                    }
-                } else {
-                    let end = Instant::now() + Duration::from_millis(400);
-                    while Instant::now() < end {
-                        match read_message_timeout(&mut stream, Duration::from_millis(20)) {
-                            Ok(ControlMessage::ClusterStop { reason }) => {
-                                assert_eq!(reason, "breakpoint");
-                                *flag.lock().unwrap() = true;
-                                break;
-                            }
-                            Ok(_) => {}
-                            Err(_) => {}
-                        }
-                    }
-                }
+                fake_node_loop(ck, root, id, true, inject, flag);
             }));
-            listeners.push((board.id.clone(), sock, listener));
         }
 
-        ready_barrier_and_start(&topo, &mut listeners, &HashMap::new()).unwrap();
+        ready_barrier_and_start(&topo, &control).unwrap();
         for j in joins {
             j.join().unwrap();
         }
         assert!(
             *saw_cluster_stop.lock().unwrap(),
             "peer should receive ClusterStop after HostStop"
+        );
+    }
+
+    #[test]
+    fn duplicate_service_create_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let cluster_key = format!("t-dup-{}", std::process::id());
+        let iox_root = dir.path().join("iox");
+        let boards = board_hash_table(["a", "b"]).unwrap();
+        let config = isolated_config(&iox_root).unwrap();
+        let node1 = create_node(&config, "arb-dup-1").unwrap();
+        let _c1 = ArbiterControl::create(&node1, &cluster_key, 2, boards.clone()).unwrap();
+        let node2 = create_node(&config, "arb-dup-2").unwrap();
+        let err = ArbiterControl::create(&node2, &cluster_key, 2, boards);
+        assert!(
+            err.is_err(),
+            "expected duplicate create to fail, got Ok(...)"
+        );
+        let err = err.err().unwrap();
+        assert!(
+            err.to_string().contains("create"),
+            "expected create failure, got {err}"
         );
     }
 }
