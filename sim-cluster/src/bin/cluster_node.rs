@@ -75,5 +75,6 @@ fn usage() -> &'static str {
      \n\
      Spawned by cluster-arbiter. Starts AwaitingStartup, becomes Stopped after\n\
      StartupRecord (Ready), and runs only after Start (Stopped is also the halt\n\
-     state after breakpoint / ClusterStop).\n"
+     state after breakpoint / ClusterStop). Process exit is not driven by\n\
+     ClusterStop; MVP arbiter OS-kills children (see TODO(cluster-shutdown)).\n"
 }

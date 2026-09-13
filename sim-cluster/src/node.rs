@@ -46,7 +46,18 @@ pub struct NodeOptions {
 /// Starts in [`NodeState::AwaitingStartup`], moves to [`NodeState::Stopped`]
 /// after StartupRecord (same idle as after breakpoint / ClusterStop), and only
 /// performs UART / placeholder quantum work while [`NodeState::Running`].
-/// The process stays alive across Stopped↔Running until the arbiter kills it.
+///
+/// # Process lifetime (MVP)
+///
+/// This function is an intentional infinite loop: [`ControlToNode::ClusterStop`]
+/// only transitions sim state to [`NodeState::Stopped`]; it does **not** exit
+/// the process. There is no control-plane quit/shutdown message yet.
+///
+/// Today the arbiter ends the run by **OS-killing** child node processes after
+/// a short wall-clock window (see `run_arbiter_with_topology` /
+/// `TODO(cluster-loop)`). That kill is a placeholder, not the final shutdown
+/// design — replace with an explicit arbiter shutdown path when the cluster
+/// loop is made long-lived.
 pub fn run_node(opts: NodeOptions) -> Result<(), NodeError> {
     let board_id = opts.board_id.as_str();
     let board_hash = board_id_hash(board_id);

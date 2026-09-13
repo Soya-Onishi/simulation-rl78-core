@@ -118,6 +118,12 @@ pub fn run_arbiter_with_topology(
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // TODO(cluster-shutdown): Not a control-plane stop. Nodes run an intentional
+    // infinite loop (`run_node`); ClusterStop only moves them to Stopped and
+    // does not exit the process. Until an explicit shutdown message / quit path
+    // exists, tear down by OS-killing children after the MVP wall-clock window
+    // in `run_time_sync` (`TODO(cluster-loop)`). Do not treat this kill as the
+    // finished cluster lifecycle.
     for child in &mut children {
         let _ = child.kill();
         let _ = child.wait();
@@ -215,10 +221,12 @@ fn run_time_sync(
     })?;
     eprintln!("cluster-arbiter: initial Allowed={allowed}");
 
-    // TODO(cluster-loop): MVP wall-clock window only. Replace
-    // `while Instant::now() < deadline` with an open `loop` that keeps
-    // receiving (TimeReport / HostStop) and can broadcast ClusterStop until
-    // an explicit shutdown condition; otherwise post-Start control is dead.
+    // TODO(cluster-loop): MVP wall-clock window only — not a real run duration.
+    // After this window returns, the caller OS-kills node children
+    // (`TODO(cluster-shutdown)`). Replace with an open `loop` that keeps
+    // receiving (TimeReport / HostStop), can broadcast ClusterStop for sim
+    // halt, and ends only on an explicit shutdown condition; otherwise
+    // post-Start control dies when this timer fires.
     let deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < deadline {
         let mut changed = false;
