@@ -17,7 +17,7 @@ pub mod topology;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use cluster_stop::is_cluster_relevant_reason;
-pub use control::{ControlMessage, HostStopReason};
+pub use control::{BoardTarget, ControlToArbiter, ControlToNode, HostStopReason};
 pub use ipc::UartFrame;
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use node::{InjectHostStop, NodeError, NodeOptions, notify_host_stop, run_node};

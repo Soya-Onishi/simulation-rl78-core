@@ -1,6 +1,6 @@
 //! Cluster-stop policy: which host stops propagate to peer boards.
 
-/// Reasons that must be broadcast as [`crate::control::ControlMessage::ClusterStop`].
+/// Reasons that must be broadcast as [`crate::control::ControlToNode::ClusterStop`].
 ///
 /// Guest-local `halt` (RL78 STOP / WFI) is intentionally absent.
 pub fn is_cluster_relevant_reason(reason: &str) -> bool {

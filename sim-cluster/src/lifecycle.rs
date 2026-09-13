@@ -2,16 +2,17 @@
 //!
 //! Unexpected messages do not fail the cluster: they log a warning and leave
 //! the state unchanged. Ready-barrier timeout remains a hard failure at the
-//! arbiter orchestration layer (simulation must not start).
+//! arbiter orchestration layer (simulation must not start). Destination
+//! mismatch on a2n Unicast is dropped silently (no warn).
 
-use crate::control::{ControlMessage, HostStopReason};
+use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 
 /// Per-node control-plane state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeState {
-    /// Waiting for the first usable [`ControlMessage::StartupRecord`].
+    /// Waiting for the first usable [`ControlToNode::StartupRecord`].
     AwaitingStartup,
-    /// Ready sent; waiting for [`ControlMessage::Start`].
+    /// Ready sent; waiting for [`ControlToNode::Start`].
     AwaitingStart,
     /// Simulation may run.
     Running,
@@ -22,7 +23,7 @@ pub enum NodeState {
 /// Side effects requested by [`NodeState::on_message`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeEffect {
-    /// Send [`ControlMessage::Ready`] to the arbiter.
+    /// Send [`ControlToArbiter::Ready`] to the arbiter.
     SendReady,
     /// Apply a new virtual-time ceiling locally.
     SetAllowed { allowed_ns: u64 },
@@ -31,38 +32,28 @@ pub enum NodeEffect {
 }
 
 impl NodeState {
-    /// Apply one inbound control message.
+    /// Apply one inbound a2n control message.
     ///
-    /// Returns the next state and an optional effect. Unexpected messages yield
+    /// Returns the next state and an optional effect. Messages not addressed to
+    /// this board are ignored silently. Other unexpected messages yield
     /// [`NodeEffect::Warn`] and keep the current state.
     #[must_use]
-    pub fn on_message(self, board_id_hash: u64, msg: ControlMessage) -> (Self, Option<NodeEffect>) {
+    pub fn on_message(self, board_id_hash: u64, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
+        if !msg.is_for(board_id_hash) {
+            return (self, None);
+        }
         match (self, msg) {
-            (
-                NodeState::AwaitingStartup,
-                ControlMessage::StartupRecord {
-                    board_id_hash: id_hash,
-                    ..
-                },
-            ) => {
-                if id_hash != board_id_hash {
-                    return (
-                        self,
-                        Some(NodeEffect::Warn(format!(
-                            "StartupRecord board_id_hash {id_hash:#x} != local {board_id_hash:#x}; ignoring"
-                        ))),
-                    );
-                }
+            (NodeState::AwaitingStartup, ControlToNode::StartupRecord { .. }) => {
                 (NodeState::AwaitingStart, Some(NodeEffect::SendReady))
             }
-            (NodeState::AwaitingStart, ControlMessage::Start) => (NodeState::Running, None),
-            (NodeState::Running, ControlMessage::Allowed { allowed_ns }) => (
+            (NodeState::AwaitingStart, ControlToNode::Start) => (NodeState::Running, None),
+            (NodeState::Running, ControlToNode::Allowed { allowed_ns }) => (
                 NodeState::Running,
                 Some(NodeEffect::SetAllowed { allowed_ns }),
             ),
             (
                 NodeState::Running | NodeState::AwaitingStart | NodeState::AwaitingStartup,
-                ControlMessage::ClusterStop { reason },
+                ControlToNode::ClusterStop { reason },
             ) => (
                 NodeState::Stopped,
                 Some(NodeEffect::Warn(format!("ClusterStop ({reason})"))),
@@ -95,86 +86,71 @@ pub enum PeerState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerEffect {
     Warn(String),
-    TimeReport {
-        board_id_hash: u64,
-        virtual_time_ns: u64,
-    },
-    HostStop {
-        board_id_hash: u64,
-        reason: HostStopReason,
-    },
+    TimeReport { from: u64, virtual_time_ns: u64 },
+    HostStop { from: u64, reason: HostStopReason },
 }
 
 impl PeerState {
-    /// Apply one inbound message from this peer.
+    /// Apply one inbound n2a message from this peer.
     #[must_use]
     pub fn on_message(
         self,
         expected_board_hash: u64,
-        msg: ControlMessage,
+        msg: ControlToArbiter,
     ) -> (Self, Option<PeerEffect>) {
         match (self, msg) {
-            (PeerState::AwaitingReady, ControlMessage::Ready { board_id_hash }) => {
-                if board_id_hash != expected_board_hash {
+            (PeerState::AwaitingReady, ControlToArbiter::Ready { from }) => {
+                if from != expected_board_hash {
                     return (
                         self,
                         Some(PeerEffect::Warn(format!(
-                            "Ready board_id_hash {board_id_hash:#x} != expected {expected_board_hash:#x}; ignoring"
+                            "Ready from {from:#x} != expected {expected_board_hash:#x}; ignoring"
                         ))),
                     );
                 }
                 (PeerState::Ready, None)
             }
-            (PeerState::Ready, ControlMessage::Ready { board_id_hash }) => (
+            (PeerState::Ready, ControlToArbiter::Ready { from }) => (
                 PeerState::Ready,
                 Some(PeerEffect::Warn(format!(
-                    "duplicate Ready from {board_id_hash:#x}; ignoring"
+                    "duplicate Ready from {from:#x}; ignoring"
                 ))),
             ),
             (
                 PeerState::Running,
-                ControlMessage::TimeReport {
-                    board_id_hash,
+                ControlToArbiter::TimeReport {
+                    from,
                     virtual_time_ns,
                 },
             ) => {
-                if board_id_hash != expected_board_hash {
+                if from != expected_board_hash {
                     return (
                         self,
                         Some(PeerEffect::Warn(format!(
-                            "TimeReport board_id_hash {board_id_hash:#x} != {expected_board_hash:#x}; ignoring"
+                            "TimeReport from {from:#x} != {expected_board_hash:#x}; ignoring"
                         ))),
                     );
                 }
                 (
                     PeerState::Running,
                     Some(PeerEffect::TimeReport {
-                        board_id_hash,
+                        from,
                         virtual_time_ns,
                     }),
                 )
             }
-            (
-                PeerState::Running,
-                ControlMessage::HostStop {
-                    board_id_hash,
-                    reason,
-                },
-            ) => {
-                if board_id_hash != expected_board_hash {
+            (PeerState::Running, ControlToArbiter::HostStop { from, reason }) => {
+                if from != expected_board_hash {
                     return (
                         self,
                         Some(PeerEffect::Warn(format!(
-                            "HostStop board_id_hash {board_id_hash:#x} != {expected_board_hash:#x}; ignoring"
+                            "HostStop from {from:#x} != {expected_board_hash:#x}; ignoring"
                         ))),
                     );
                 }
                 (
                     PeerState::Stopped,
-                    Some(PeerEffect::HostStop {
-                        board_id_hash,
-                        reason,
-                    }),
+                    Some(PeerEffect::HostStop { from, reason }),
                 )
             }
             (state, msg) => (
@@ -199,6 +175,7 @@ impl PeerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::BoardTarget;
     use crate::ipc::board_id_hash;
 
     #[test]
@@ -207,8 +184,8 @@ mod tests {
         let mut s = NodeState::AwaitingStartup;
         let (n, eff) = s.on_message(
             hash_a,
-            ControlMessage::StartupRecord {
-                board_id_hash: hash_a,
+            ControlToNode::StartupRecord {
+                target: BoardTarget::Broadcast,
                 margin_ns: 1000,
                 headroom_threshold_ns: 100,
             },
@@ -216,8 +193,27 @@ mod tests {
         assert_eq!(n, NodeState::AwaitingStart);
         assert_eq!(eff, Some(NodeEffect::SendReady));
         s = n;
-        let (n, eff) = s.on_message(hash_a, ControlMessage::Start);
+        let (n, eff) = s.on_message(hash_a, ControlToNode::Start);
         assert_eq!(n, NodeState::Running);
+        assert!(eff.is_none());
+    }
+
+    #[test]
+    fn node_silently_ignores_other_board_unicast() {
+        let hash_a = board_id_hash("a");
+        let hash_b = board_id_hash("b");
+        let s = NodeState::AwaitingStartup;
+        let (n, eff) = s.on_message(
+            hash_a,
+            ControlToNode::StartupRecord {
+                target: BoardTarget::Unicast {
+                    board_id_hash: hash_b,
+                },
+                margin_ns: 1000,
+                headroom_threshold_ns: 100,
+            },
+        );
+        assert_eq!(n, NodeState::AwaitingStartup);
         assert!(eff.is_none());
     }
 
@@ -227,8 +223,8 @@ mod tests {
         let s = NodeState::Running;
         let (n, eff) = s.on_message(
             hash_a,
-            ControlMessage::StartupRecord {
-                board_id_hash: hash_a,
+            ControlToNode::StartupRecord {
+                target: BoardTarget::Broadcast,
                 margin_ns: 1000,
                 headroom_threshold_ns: 100,
             },
@@ -241,21 +237,11 @@ mod tests {
     fn peer_ready_and_duplicate() {
         let hash_a = board_id_hash("a");
         let mut s = PeerState::AwaitingReady;
-        let (n, eff) = s.on_message(
-            hash_a,
-            ControlMessage::Ready {
-                board_id_hash: hash_a,
-            },
-        );
+        let (n, eff) = s.on_message(hash_a, ControlToArbiter::Ready { from: hash_a });
         assert_eq!(n, PeerState::Ready);
         assert!(eff.is_none());
         s = n;
-        let (n, eff) = s.on_message(
-            hash_a,
-            ControlMessage::Ready {
-                board_id_hash: hash_a,
-            },
-        );
+        let (n, eff) = s.on_message(hash_a, ControlToArbiter::Ready { from: hash_a });
         assert_eq!(n, PeerState::Ready);
         assert!(matches!(eff, Some(PeerEffect::Warn(_))));
     }
@@ -266,8 +252,8 @@ mod tests {
         let s = PeerState::Running;
         let (n, eff) = s.on_message(
             hash_a,
-            ControlMessage::HostStop {
-                board_id_hash: hash_a,
+            ControlToArbiter::HostStop {
+                from: hash_a,
                 reason: HostStopReason::Breakpoint,
             },
         );
@@ -275,7 +261,7 @@ mod tests {
         assert_eq!(
             eff,
             Some(PeerEffect::HostStop {
-                board_id_hash: hash_a,
+                from: hash_a,
                 reason: HostStopReason::Breakpoint,
             })
         );
@@ -286,7 +272,7 @@ mod tests {
         let s = NodeState::Running;
         let (n, eff) = s.on_message(
             board_id_hash("b"),
-            ControlMessage::ClusterStop {
+            ControlToNode::ClusterStop {
                 reason: HostStopReason::Breakpoint,
             },
         );

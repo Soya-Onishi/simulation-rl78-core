@@ -1,7 +1,8 @@
 //! Control-plane messages shared by arbiter, nodes, and iceoryx2 pub/sub.
 //!
-//! Layout matches the SHM sample (`repr(C)` + [`ZeroCopySend`]): board ids are
-//! hashes and stop reasons are a fixed enum — no separate wire type.
+//! a2n ([`ControlToNode`]) and n2a ([`ControlToArbiter`]) are separate sample
+//! types so destination vs sender hashing cannot be confused. Layout matches
+//! the SHM sample (`repr(C)` + [`ZeroCopySend`]).
 
 use std::fmt;
 
@@ -47,35 +48,93 @@ impl fmt::Display for HostStopReason {
     }
 }
 
-/// Control messages between arbiter and nodes (also the iceoryx2 sample type).
+/// Logical destination for arbiter → node (a2n) messages.
+///
+/// Physical delivery may still be pub/sub broadcast; receivers use
+/// [`BoardTarget::includes`] (or [`ControlToNode::is_for`]) to accept or
+/// silently drop.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
-pub enum ControlMessage {
-    /// Arbiter → node: bind resources / time parameters for this board.
+pub enum BoardTarget {
+    /// Every subscriber should process the message.
+    Broadcast,
+    /// Only the board with this hash should process the message.
+    Unicast { board_id_hash: u64 },
+}
+
+impl BoardTarget {
+    /// Whether `board_id_hash` is in the logical destination set.
+    #[must_use]
+    pub fn includes(self, board_id_hash: u64) -> bool {
+        match self {
+            Self::Broadcast => true,
+            Self::Unicast {
+                board_id_hash: target,
+            } => target == board_id_hash,
+        }
+    }
+}
+
+/// Arbiter → node control messages (a2n iceoryx2 sample type).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
+pub enum ControlToNode {
+    /// Shared startup parameters (logical broadcast; see issue #43).
     StartupRecord {
-        board_id_hash: u64,
+        target: BoardTarget,
         /// Virtual-time skew margin (ns); copied from topology for the node.
         margin_ns: u64,
         /// Report when `allowed - now` falls below this (ns).
         headroom_threshold_ns: u64,
     },
-    /// Node → arbiter: control attach complete.
-    Ready { board_id_hash: u64 },
-    /// Arbiter → node: simulation may enter Running.
+    /// Simulation may enter Running (always broadcast).
     Start,
-    /// Node → arbiter: virtual time report.
-    TimeReport {
-        board_id_hash: u64,
-        virtual_time_ns: u64,
-    },
-    /// Arbiter → node: new virtual-time ceiling.
+    /// New virtual-time ceiling (always broadcast).
     Allowed { allowed_ns: u64 },
-    /// Node → arbiter: host-initiated stop (BP / external / step / unmapped).
-    /// Guest-local Halt must not be sent.
-    HostStop {
-        board_id_hash: u64,
-        reason: HostStopReason,
-    },
-    /// Arbiter → node: host-initiated cluster stop (no ack on same host).
+    /// Host-initiated cluster stop (always broadcast; no ack on same host).
     ClusterStop { reason: HostStopReason },
+}
+
+impl ControlToNode {
+    /// Logical destination of this a2n message.
+    #[must_use]
+    pub fn destination(self) -> BoardTarget {
+        match self {
+            Self::StartupRecord { target, .. } => target,
+            Self::Start | Self::Allowed { .. } | Self::ClusterStop { .. } => BoardTarget::Broadcast,
+        }
+    }
+
+    /// Whether this node should process the message.
+    #[must_use]
+    pub fn is_for(self, board_id_hash: u64) -> bool {
+        self.destination().includes(board_id_hash)
+    }
+}
+
+/// Node → arbiter control messages (n2a iceoryx2 sample type).
+///
+/// `from` is always the sender board hash (not a destination).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
+pub enum ControlToArbiter {
+    /// Control attach complete.
+    Ready { from: u64 },
+    /// Virtual time report.
+    TimeReport { from: u64, virtual_time_ns: u64 },
+    /// Host-initiated stop (BP / external / step / unmapped).
+    /// Guest-local Halt must not be sent.
+    HostStop { from: u64, reason: HostStopReason },
+}
+
+impl ControlToArbiter {
+    /// Sender board hash.
+    #[must_use]
+    pub fn from_board(self) -> u64 {
+        match self {
+            Self::Ready { from } | Self::TimeReport { from, .. } | Self::HostStop { from, .. } => {
+                from
+            }
+        }
+    }
 }
