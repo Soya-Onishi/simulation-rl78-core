@@ -65,6 +65,7 @@ pub enum ControlToNode {
     Allowed { allowed_ns: u64 },
     /// Host-initiated cluster stop (always broadcast; no ack on same host).
     ClusterStop { reason: HostStopReason },
+    // TODO: add Shutdown to end the node process (ClusterStop only halts to Stopped).
 }
 
 /// Node → arbiter control messages (n2a iceoryx2 sample type).
