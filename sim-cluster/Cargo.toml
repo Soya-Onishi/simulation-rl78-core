@@ -24,6 +24,7 @@ thiserror = "2"
 iceoryx2 = "0.9.3"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 iceoryx2-bb-system-types = "0.9.3"
+sim-kernel = { path = "../sim-kernel" }
 
 [dev-dependencies]
 tempfile = "3"
