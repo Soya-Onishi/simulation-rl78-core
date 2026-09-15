@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use sim_kernel::{
-    Addr, Breakpoint, BreakpointId, Cpu, MemoryBus, PendingStop, Quantum, RegId, SimError,
-    resolve_after_tlib_execute,
+    Addr, Breakpoint, BreakpointId, Cpu, FirmwareError, MemoryBus, PendingStop, Quantum, RegId,
+    SimError, resolve_after_tlib_execute,
 };
 
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
@@ -322,6 +322,10 @@ impl Cpu for Rl78Cpu {
         // Safety: `Machine` boxes the bus before bind and keeps it pinned.
         unsafe { set_io_bus(bus as *mut MemoryBus) };
         self.memory_bound = true;
+    }
+
+    fn load_firmware(&mut self, bus: &mut MemoryBus, image: &[u8]) -> Result<(), FirmwareError> {
+        crate::elf::load_elf_firmware(self, bus, image)
     }
 
     fn run_quantum(&mut self, max_instructions: u32) -> Quantum {
