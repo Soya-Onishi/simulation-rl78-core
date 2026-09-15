@@ -63,5 +63,6 @@ fn main() {
 fn usage() -> &'static str {
     "Usage: cluster-arbiter --topology <logical.json> [--node-bin <path>]\n\
      \n\
-     Normally spawned by cluster-server with a validated logical topology.\n"
+     Normally spawned by cluster-server with a validated logical topology.\n\
+     Default board binary is rl78-minimal-board next to this executable.\n"
 }
