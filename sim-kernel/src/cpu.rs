@@ -1,9 +1,40 @@
 //! CPU contract implemented by architecture crates.
 
 use crate::breakpoint::{Breakpoint, BreakpointId};
-use crate::bus::{Addr, MemoryBus};
+use crate::bus::{Addr, BusError, MemoryBus};
 use crate::command::SimError;
 use crate::stop::StopReason;
+
+/// Failure while loading guest firmware into a [`Cpu`] / bus.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FirmwareError {
+    /// Bytes are not a recognized firmware image for this CPU.
+    InvalidImage,
+    /// Image appears truncated or corrupt.
+    Truncated,
+    /// Architecture rejected the image (format class, endianness, …).
+    Unsupported(&'static str),
+    Bus(BusError),
+}
+
+impl std::fmt::Display for FirmwareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidImage => write!(f, "image is not a valid firmware file"),
+            Self::Truncated => write!(f, "firmware image truncated"),
+            Self::Unsupported(msg) => write!(f, "unsupported firmware: {msg}"),
+            Self::Bus(err) => write!(f, "bus error while loading firmware: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for FirmwareError {}
+
+impl From<BusError> for FirmwareError {
+    fn from(err: BusError) -> Self {
+        Self::Bus(err)
+    }
+}
 
 /// Architecture-defined register identifier (stable numeric id, not a string).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -148,6 +179,16 @@ pub trait Cpu: Send {
     /// layout is fixed after construction). Not invoked every quantum and not
     /// an argument to `tlib_execute`.
     fn bind_memory(&mut self, _bus: &mut MemoryBus) {}
+
+    /// Parse `image` and write it into `bus`, then set execution state (PC, …).
+    ///
+    /// Architecture crates own format details (ELF, raw bin, …). Board builders
+    /// must not interpret firmware; callers pass raw file bytes only.
+    fn load_firmware(&mut self, _bus: &mut MemoryBus, _image: &[u8]) -> Result<(), FirmwareError> {
+        Err(FirmwareError::Unsupported(
+            "firmware load not implemented for this CPU",
+        ))
+    }
 
     /// Execute up to `max_instructions` guest instructions.
     ///

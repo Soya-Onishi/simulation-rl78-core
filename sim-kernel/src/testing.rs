@@ -76,6 +76,14 @@ impl Cpu for ScriptedCpu {
         self.bus_addr = bus as *mut MemoryBus as usize;
     }
 
+    fn load_firmware(
+        &mut self,
+        _bus: &mut MemoryBus,
+        _image: &[u8],
+    ) -> Result<(), crate::FirmwareError> {
+        Ok(())
+    }
+
     fn run_quantum(&mut self, max_instructions: u32) -> Quantum {
         let mut instructions = 0u64;
         while instructions < u64::from(max_instructions) {
