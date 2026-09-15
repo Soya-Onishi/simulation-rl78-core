@@ -895,6 +895,7 @@ dependencies = [
  "iceoryx2-bb-system-types",
  "serde",
  "serde_json",
+ "sim-kernel",
  "tempfile",
  "thiserror",
  "xxhash-rust",
