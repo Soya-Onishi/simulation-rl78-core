@@ -1,0 +1,14 @@
+[package]
+name = "rl78-minimal-board"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "RL78 minimal board process for multi-board cluster simulation"
+
+[[bin]]
+name = "rl78-minimal-board"
+path = "src/main.rs"
+
+[dependencies]
+rl78-core = { path = "../rl78-core" }
+sim-cluster = { path = "../sim-cluster" }

@@ -53,7 +53,7 @@ impl ArbiterOptions {
         let iox_root = root_path_for_cluster(&cluster_key);
         Ok(Self {
             topology_path,
-            node_bin: exe_dir.join("cluster-node"),
+            node_bin: exe_dir.join("rl78-minimal-board"),
             cluster_key,
             iox_root,
         })
@@ -82,7 +82,7 @@ pub fn run_arbiter_with_topology(
 
     if !opts.node_bin.is_file() {
         return Err(ArbiterError::Message(format!(
-            "cluster-node not found at {}",
+            "board binary not found at {} (build rl78-minimal-board or pass --node-bin)",
             opts.node_bin.display()
         )));
     }
