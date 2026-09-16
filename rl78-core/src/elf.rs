@@ -1,9 +1,11 @@
 //! ELF loader for guest images (ELF only; no bin/mot).
 //!
-//! Parsing uses the [`object`] crate (`PT_LOAD` segments).
+//! Parsing uses the [`object`] crate (`PT_LOAD` segments). Firmware load for a
+//! live machine goes through [`sim_kernel::Cpu::load_firmware`] on [`Rl78Cpu`];
+//! the helpers here remain thin compatibility wrappers.
 
 use object::{Endianness, Object, ObjectSegment};
-use sim_kernel::{Cpu, Machine, MemoryBus};
+use sim_kernel::{Cpu, FirmwareError, Machine, MemoryBus};
 
 use crate::Rl78Cpu;
 
@@ -37,6 +39,28 @@ impl std::fmt::Display for LoadError {
 }
 
 impl std::error::Error for LoadError {}
+
+impl From<FirmwareError> for LoadError {
+    fn from(err: FirmwareError) -> Self {
+        match err {
+            FirmwareError::InvalidImage => Self::NotElf,
+            FirmwareError::Truncated => Self::Truncated,
+            FirmwareError::Unsupported(msg) => Self::Unsupported(msg),
+            FirmwareError::Bus(err) => Self::Bus(err),
+        }
+    }
+}
+
+impl From<LoadError> for FirmwareError {
+    fn from(err: LoadError) -> Self {
+        match err {
+            LoadError::NotElf => Self::InvalidImage,
+            LoadError::Truncated => Self::Truncated,
+            LoadError::Unsupported(msg) => Self::Unsupported(msg),
+            LoadError::Bus(err) => Self::Bus(err),
+        }
+    }
+}
 
 /// Load a guest ELF into `bus` (PT_LOAD segments only).
 pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError> {
@@ -84,15 +108,29 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
 }
 
 /// Load `image` into `machine` and set the CPU PC to the ELF entry.
+///
+/// Thin wrapper over [`Machine::load_firmware`] / [`Cpu::load_firmware`].
 pub fn load_elf_into_machine(
     image: &[u8],
     machine: &mut Machine<Rl78Cpu>,
 ) -> Result<ElfLoad, LoadError> {
-    let loaded = load_elf(image, machine.bus_mut())?;
+    machine.load_firmware(image)?;
+    Ok(ElfLoad {
+        entry: machine.cpu().pc(),
+    })
+}
+
+/// Parse ELF, write PT_LOAD segments, invalidate TBs, and set PC.
+pub(crate) fn load_elf_firmware(
+    cpu: &mut Rl78Cpu,
+    bus: &mut MemoryBus,
+    image: &[u8],
+) -> Result<(), FirmwareError> {
+    let loaded = load_elf(image, bus)?;
     // ROM bytes changed under an already-bound host map; drop stale TBs.
     unsafe { crate::ffi::tlib_invalidate_translation_cache() };
-    machine.cpu_mut().set_pc(loaded.entry);
-    Ok(loaded)
+    cpu.set_pc(loaded.entry);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -147,6 +185,19 @@ mod tests {
         assert_eq!(machine.cpu().pc(), 0x200);
         let mut buf = [0u8; 4];
         machine.bus_mut().read(0x200, &mut buf).unwrap();
+        assert_eq!(buf, payload);
+    }
+
+    #[serial]
+    #[test]
+    fn machine_load_firmware_matches_wrapper() {
+        let payload = [0xAAu8, 0xBB];
+        let image = write_minimal_elf32(0x300, 0x300, &payload);
+        let mut machine = minimal_machine(MinimalMachineConfig::default());
+        machine.load_firmware(&image).unwrap();
+        assert_eq!(machine.cpu().pc(), 0x300);
+        let mut buf = [0u8; 2];
+        machine.bus_mut().read(0x300, &mut buf).unwrap();
         assert_eq!(buf, payload);
     }
 

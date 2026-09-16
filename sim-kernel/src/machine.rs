@@ -6,7 +6,7 @@ use crate::breakpoint::BreakpointStore;
 use crate::bus::{Addr, BusError, MemoryBus};
 use crate::clock::{Tick, VirtualClock};
 use crate::command::SimError;
-use crate::cpu::{Cpu, RegId};
+use crate::cpu::{Cpu, FirmwareError, RegId};
 use crate::event::{EventCtl, EventQueue};
 
 /// Concrete machine owned exclusively by the simulation thread.
@@ -60,6 +60,11 @@ impl<C: Cpu> Machine<C> {
 
     pub fn bus_mut(&mut self) -> &mut MemoryBus {
         &mut self.bus
+    }
+
+    /// Load guest firmware bytes via [`Cpu::load_firmware`].
+    pub fn load_firmware(&mut self, image: &[u8]) -> Result<(), FirmwareError> {
+        self.cpu.load_firmware(self.bus.as_mut(), image)
     }
 
     #[must_use]
