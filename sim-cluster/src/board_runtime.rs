@@ -24,7 +24,7 @@ use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
 /// Idle sleep when not Running, waiting on the allowed ceiling, or guest-halted.
 pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
 
-/// Options for [`run_board`] (and the transitional [`crate::run_node`] wrapper).
+/// Options for [`run_board`].
 #[derive(Clone, Debug)]
 pub struct BoardOptions {
     pub board_id: String,

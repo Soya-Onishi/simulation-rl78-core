@@ -8,7 +8,7 @@ cargo run -- path/to/guest.elf
 cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test -p sim-cluster
-cargo build -p sim-cluster --bins
+cargo build -p sim-cluster --bins -p rl78-minimal-board
 cargo run -p sim-cluster --bin cluster-server -- python/examples/two_board_uart.py
 ```
 
