@@ -759,6 +759,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rl78-minimal-board"
+version = "0.1.0"
+dependencies = [
+ "rl78-core",
+ "sim-cluster",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -895,6 +903,7 @@ dependencies = [
  "iceoryx2-bb-system-types",
  "serde",
  "serde_json",
+ "sim-kernel",
  "tempfile",
  "thiserror",
  "xxhash-rust",
