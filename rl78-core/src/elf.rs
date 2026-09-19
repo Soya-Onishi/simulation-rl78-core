@@ -4,7 +4,7 @@
 //! live machine goes through [`sim_kernel::Cpu::load_firmware`] on [`Rl78Cpu`];
 //! the helpers here remain thin compatibility wrappers.
 
-use object::{Endianness, Object, ObjectSegment};
+use object::{Endianness, Object, read::elf::ProgramHeader};
 use sim_kernel::{Cpu, FirmwareError, Machine, MemoryBus};
 
 use crate::Rl78Cpu;
@@ -71,30 +71,28 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
             LoadError::Truncated
         }
     })?;
-    match file {
-        object::File::Elf32(_) => {}
+
+    let elf = match file {
+        object::File::Elf32(ref elf) => elf,
         _ => return Err(LoadError::Unsupported("only ELF32 is supported")),
-    }
-    if file.endianness() != Endianness::Little {
+    };
+
+    let endianness = file.endianness();
+    if endianness != Endianness::Little {
         return Err(LoadError::Unsupported("ELF must be little-endian"));
     }
 
     let mut loaded = false;
-    for segment in file.segments() {
-        let addr = segment.address();
-        let data = segment.data().map_err(|_| LoadError::Truncated)?;
-        let mem_size = usize::try_from(segment.size()).map_err(|_| LoadError::Truncated)?;
-        if data.is_empty() && mem_size == 0 {
+    for ph in elf.elf_program_headers() {
+        let paddr = ph.p_paddr(endianness);
+        let addr = if paddr == 0 { ph.p_vaddr(endianness) } else { paddr };
+        let data = ph.data(endianness, elf.data()).map_err(|_| LoadError::Truncated)?;
+
+        if data.is_empty() || ph.p_type(endianness) != object::elf::PT_LOAD {
             continue;
         }
-        if !data.is_empty() {
-            bus.load(addr, data).map_err(LoadError::Bus)?;
-        }
-        if mem_size > data.len() {
-            let zeros = vec![0u8; mem_size - data.len()];
-            bus.load(addr + data.len() as u64, &zeros)
-                .map_err(LoadError::Bus)?;
-        }
+
+        bus.load(addr as u64, data).map_err(LoadError::Bus)?; 
         loaded = true;
     }
 
