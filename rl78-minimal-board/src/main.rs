@@ -7,7 +7,7 @@
 use std::env;
 use std::process;
 
-use rl78_core::{MinimalMachineConfig, minimal_machine};
+use rl78_core::{g23_machine, G23MachineConfig};
 use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_board};
 
 fn main() {
@@ -26,7 +26,7 @@ fn main() {
         }
     };
 
-    if let Err(err) = run_board(opts, || minimal_machine(MinimalMachineConfig::default())) {
+    if let Err(err) = run_board(opts, || g23_machine(G23MachineConfig::default())) {
         eprintln!("rl78-minimal-board: {err}");
         process::exit(1);
     }
