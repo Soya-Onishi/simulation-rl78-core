@@ -583,16 +583,22 @@ impl MemoryMapped for IrqEdgeMmio {
 mod tests {
     use super::*;
 
+    fn after_reset() -> IrqController {
+        let mut irq = IrqController::new();
+        Resettable::reset(&mut irq, &mut MemoryBus::new());
+        irq
+    }
+
     #[test]
     fn reset_masks_all_and_clears_if() {
-        let irq = IrqController::default();
+        let irq = after_reset();
         assert!(!irq.is_flag_set(IrqId::INTTM00));
         assert!(irq.pending().is_none());
     }
 
     #[test]
     fn raise_stays_pending_only_when_unmasked() {
-        let mut irq = IrqController::default();
+        let mut irq = after_reset();
         irq.raise(IrqId::INTTM00);
         assert!(irq.is_flag_set(IrqId::INTTM00));
         assert!(irq.pending().is_none());
@@ -604,7 +610,7 @@ mod tests {
 
     #[test]
     fn lower_priority_number_wins() {
-        let mut irq = IrqController::default();
+        let mut irq = after_reset();
         irq.unmask_all();
         irq.raise(IrqId::INTTM00);
         irq.raise(IrqId::INTST0);
@@ -616,7 +622,7 @@ mod tests {
 
     #[test]
     fn ack_clears_flag() {
-        let mut irq = IrqController::default();
+        let mut irq = after_reset();
         irq.unmask_all();
         irq.raise(IrqId::INTST0);
         irq.ack(IrqId::INTST0);
@@ -626,7 +632,7 @@ mod tests {
 
     #[test]
     fn word_write_updates_if0_in_one_deposit() {
-        let irq = Arc::new(Mutex::new(IrqController::default()));
+        let irq = Arc::new(Mutex::new(after_reset()));
         let mut mmio = IrqBankMmio::new(Arc::clone(&irq), 0);
         mmio.write(0, &[0x34, 0x12]).unwrap();
         let mut buf = [0u8; 2];
@@ -641,7 +647,7 @@ mod tests {
 
     #[test]
     fn byte_write_touches_only_if0h() {
-        let irq = Arc::new(Mutex::new(IrqController::default()));
+        let irq = Arc::new(Mutex::new(after_reset()));
         let mut mmio = IrqBankMmio::new(Arc::clone(&irq), 0);
         mmio.write(0, &[0xFF, 0x00]).unwrap();
         mmio.write(1, &[0x40]).unwrap();

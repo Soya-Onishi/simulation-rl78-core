@@ -192,7 +192,7 @@ pub struct ClockGenerator {
 }
 
 impl Default for ClockGenerator {
-    fn default() -> Self { 
+    fn default() -> Self {
         Self::new()
     }
 }
@@ -539,6 +539,12 @@ clock_byte_mmio!(ClockTrimMmio, 4, read_trim, write_trim);
 mod tests {
     use super::*;
 
+    fn after_reset() -> ClockGenerator {
+        let mut c = ClockGenerator::new();
+        Resettable::reset(&mut c, &mut MemoryBus::new());
+        c
+    }
+
     #[test]
     fn hertz_converts_cycles_and_ticks() {
         let f = Hertz::from_mhz(32);
@@ -554,7 +560,7 @@ mod tests {
 
     #[test]
     fn reset_fclk_is_hoco_32mhz() {
-        let c = ClockGenerator::default();
+        let c = after_reset();
         assert_eq!(c.f_clk(), Hertz::from_mhz(32));
         assert_eq!(c.read_sfr(1), 0xC0);
         assert_eq!(c.read_sfr(4), 0x00);
@@ -562,21 +568,21 @@ mod tests {
 
     #[test]
     fn hocodiv_halves_hoco() {
-        let mut c = ClockGenerator::default();
+        let mut c = after_reset();
         c.write_hoco(8, 1);
         assert_eq!(c.f_clk(), Hertz::from_mhz(16));
     }
 
     #[test]
     fn hiostop_kills_fclk() {
-        let mut c = ClockGenerator::default();
+        let mut c = after_reset();
         c.write_sfr(1, CSC_HIOSTOP | CSC_XTSTOP | CSC_MSTOP);
         assert_eq!(c.f_clk(), Hertz::ZERO);
     }
 
     #[test]
     fn ckc_css_mirrors_to_cls() {
-        let mut c = ClockGenerator::default();
+        let mut c = after_reset();
         c.write_sfr(7, CKSEL_SELLOSC);
         c.write_sfr(4, CKC_CSS);
         let v = c.read_sfr(4);
@@ -587,7 +593,7 @@ mod tests {
 
     #[test]
     fn css_without_xt1_or_sellosc_stops_fclk() {
-        let mut c = ClockGenerator::default();
+        let mut c = after_reset();
         c.write_sfr(4, CKC_CSS);
         assert_eq!(c.f_clk(), Hertz::ZERO);
     }
