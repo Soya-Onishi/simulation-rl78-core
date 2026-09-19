@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{BusError, MemoryMapped, NS_PER_SEC, Resettable, Tick};
+use sim_kernel::{BusError, MemoryBus, MemoryMapped, NS_PER_SEC, Resettable, Tick};
 
 /// Oscillator or baud-rate generator cycle count (not virtual time).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -192,10 +192,8 @@ pub struct ClockGenerator {
 }
 
 impl Default for ClockGenerator {
-    fn default() -> Self {
-        let mut s = Self::new();
-        Resettable::reset(&mut s);
-        s
+    fn default() -> Self { 
+        Self::new()
     }
 }
 
@@ -417,7 +415,7 @@ impl ClockGenerator {
 }
 
 impl Resettable for ClockGenerator {
-    fn reset(&mut self) {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
         let (hocodiv, frqsel3) = match self.option_byte {
             Some(b) => (b & 0x07, (b & 0x08) != 0),
             None => (0, true),
@@ -599,7 +597,7 @@ mod tests {
         let c = ClockGenerator::new();
         assert_eq!(c.f_clk(), Hertz::ZERO);
         let mut c = ClockGenerator::new();
-        Resettable::reset(&mut c);
+        Resettable::reset(&mut c, &mut MemoryBus::new());
         assert_eq!(c.f_clk(), Hertz::from_mhz(32));
     }
 }

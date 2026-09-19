@@ -5,7 +5,8 @@
 use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
-    BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, SourcePort, Tick,
+    BusError, EventCtl, EventCtx, EventId, MemoryBus, MemoryMapped, Resettable, SimEvent,
+    SourcePort, Tick,
 };
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
@@ -193,7 +194,7 @@ impl TauUnit {
 }
 
 impl Resettable for TauUnit {
-    fn reset(&mut self) {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
         for ch in 0..CHANNELS {
             self.stop_channel(ch);
         }

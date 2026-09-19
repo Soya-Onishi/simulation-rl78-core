@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
-    BusError, EventCtl, EventCtx, EventId, MemoryMapped, Resettable, SimEvent, SourcePort, Tick,
-    UartFrame, UartParity, UartStopBits,
+    BusError, EventCtl, EventCtx, EventId, MemoryBus, MemoryMapped, Resettable, SimEvent,
+    SourcePort, Tick, UartFrame, UartParity, UartStopBits,
 };
 
 use crate::peripherals::clock::{ClockOutputs, Cycles};
@@ -389,7 +389,7 @@ impl SauUnit {
 }
 
 impl Resettable for SauUnit {
-    fn reset(&mut self) {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
         for ch in 0..CHANNELS {
             self.cancel_tx(ch);
         }

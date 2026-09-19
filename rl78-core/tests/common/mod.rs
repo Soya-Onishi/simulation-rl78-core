@@ -1,5 +1,7 @@
 //! Shared fixtures for rl78-core integration tests.
 
+#![allow(dead_code)] // each integration binary only uses a subset
+
 pub mod irq_inject;
 
 /// ELF `e_machine` value for Renesas RL78 (`EM_RL78`).

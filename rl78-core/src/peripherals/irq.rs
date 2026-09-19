@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sim_kernel::{BusError, MemoryMapped, Resettable};
+use sim_kernel::{BusError, MemoryBus, MemoryMapped, Resettable};
 
 use crate::ffi;
 
@@ -435,14 +435,12 @@ impl IrqController {
 
 impl Default for IrqController {
     fn default() -> Self {
-        let mut s = Self::new();
-        Resettable::reset(&mut s);
-        s
+        Self::new()
     }
 }
 
 impl Resettable for IrqController {
-    fn reset(&mut self) {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
         self.flag = 0;
         self.mask = u64::MAX;
         self.priority = [IrqId::PRIORITY_LEVELS - 1; IrqId::SLOTS];

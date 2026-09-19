@@ -42,6 +42,7 @@ fn main() {
         }
         println!("loaded {}", path.display());
     }
+    machine.reset();
 
     let (ctrl, events) = spawn(machine, sim_kernel::SimConfig::default());
 

@@ -30,8 +30,14 @@ fn guest_writes_magic_probe() {
     let captured = Arc::clone(&sink.buf);
     let mut machine = minimal_machine_with_probe(MinimalMachineConfig::default(), sink);
     let code = magic_probe_guest_code(b"Hi\n");
-    let image = write_minimal_elf32(0x100, 0x100, &code);
+    let entry = 0x100u32;
+    let mut payload = vec![0xFFu8; entry as usize + code.len()];
+    payload[0] = (entry & 0xff) as u8;
+    payload[1] = (entry >> 8) as u8;
+    payload[entry as usize..].copy_from_slice(&code);
+    let image = write_minimal_elf32(0, entry, &payload);
     load_elf_into_machine(&image, &mut machine).unwrap();
+    machine.reset();
 
     for _ in 0..32 {
         let q = machine.cpu_mut().run_quantum(16);

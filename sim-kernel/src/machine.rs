@@ -8,6 +8,7 @@ use crate::clock::{Tick, VirtualClock};
 use crate::command::SimError;
 use crate::cpu::{Cpu, FirmwareError, RegId};
 use crate::event::{EventCtl, EventQueue};
+use crate::reset::Device;
 
 /// Concrete machine owned exclusively by the simulation thread.
 ///
@@ -15,9 +16,14 @@ use crate::event::{EventCtl, EventQueue};
 /// with [`crate::MemoryMapBuilder`], rather than mutating regions afterward.
 /// The bus is heap-allocated so its address stays stable across `Machine` moves
 /// after the one-time [`Cpu::bind_memory`] at construction.
+///
+/// Logical devices (SoC parts, board peripherals) are kept separately from the
+/// bus so [`Self::reset`] can hold-reset each device once, even when its MMIO
+/// is split across multiple mapped regions.
 pub struct Machine<C: Cpu> {
     cpu: C,
     bus: Box<MemoryBus>,
+    devices: Vec<Box<dyn Device>>,
     clock: VirtualClock,
     ctl: EventCtl,
     breakpoints: BreakpointStore,
@@ -26,17 +32,37 @@ pub struct Machine<C: Cpu> {
 impl<C: Cpu> Machine<C> {
     /// `ctl` must be the same [`EventCtl`] clone given to peripherals (`Arc` queue).
     #[must_use]
-    pub fn new(mut cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
+    pub fn new(cpu: C, bus: MemoryBus, ctl: EventCtl) -> Self {
+        Self::with_devices(cpu, bus, ctl, Vec::new())
+    }
+
+    /// Like [`Self::new`], and retains `devices` for [`Self::reset`].
+    #[must_use]
+    pub fn with_devices(
+        mut cpu: C,
+        bus: MemoryBus,
+        ctl: EventCtl,
+        devices: Vec<Box<dyn Device>>,
+    ) -> Self {
         let mut bus = Box::new(bus);
         cpu.bind_memory(bus.as_mut());
         ctl.set_now(Tick::ZERO);
         Self {
             cpu,
             bus,
+            devices,
             clock: VirtualClock::new(),
             ctl,
             breakpoints: BreakpointStore::new(),
         }
+    }
+
+    /// Hold-reset all devices, then the CPU. Call after firmware is in ROM.
+    pub fn reset(&mut self) {
+        for device in &mut self.devices {
+            device.reset(&mut self.bus);
+        }
+        self.cpu.reset(&mut self.bus);
     }
 
     #[must_use]
