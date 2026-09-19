@@ -34,6 +34,8 @@ pub fn load_vectors_and_idle(machine: &mut Machine<rl78_core::Rl78Cpu>) {
     let mut image = vec![0u8; 0x302];
     image[0] = MAIN as u8;
     image[1] = (MAIN >> 8) as u8;
+    // Erased-flash default so hold-reset latches a running HOCO.
+    image[0x00C2] = 0xFF;
     let v_st0 = 4 + usize::from(IrqId::INTST0.index()) * 2;
     let v_tm00 = 4 + usize::from(IrqId::INTTM00.index()) * 2;
     image[v_st0] = ISR_ST0 as u8;

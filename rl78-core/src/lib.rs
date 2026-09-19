@@ -27,8 +27,7 @@ pub use peripherals::{
 };
 
 use sim_kernel::{
-    EventCtl, HasMemoryMap, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom,
-    UnmappedPolicy,
+    EventCtl, HasMemoryMap, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
@@ -89,15 +88,14 @@ pub struct G23MachineConfig {
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
 pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
     let ctl = EventCtl::new();
-    let mut part = R7F100Gxl::new(ctl.clone());
-    let mut bus = part
+    let part = R7F100Gxl::new(ctl.clone());
+    let bus = part
         .memory_map()
         .expect("g23 memory map")
         .policy(cfg.unmapped)
         .build();
-    part.reset(&mut bus);
     let irq = std::sync::Arc::clone(&part.core.irq);
-    let machine = Machine::new(Rl78Cpu::new(), bus, ctl);
+    let machine = Machine::with_devices(Rl78Cpu::new(), bus, ctl, vec![Box::new(part)]);
     peripherals::irq::bind_cpu_line(irq);
     machine
 }
@@ -108,12 +106,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::{BusError, HasMemoryMap, SourcePort, Tick, UartFrame, Wire};
+    use sim_kernel::{BusError, HasMemoryMap, Resettable, SourcePort, Tick, UartFrame, Wire};
 
     fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
         let mut part = R7F100Gxl::new(ctl);
         let mut bus = part.memory_map().unwrap().build();
-        part.reset(&mut bus);
+        Resettable::reset(&mut part, &mut bus);
         (part, bus)
     }
 

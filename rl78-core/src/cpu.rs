@@ -17,8 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use sim_kernel::{
-    Addr, Breakpoint, BreakpointId, Cpu, FirmwareError, MemoryBus, PendingStop, Quantum, RegId,
-    SimError, resolve_after_tlib_execute,
+    Addr, Breakpoint, BreakpointId, Cpu, FirmwareError, MemoryBus, PendingStop, Quantum, RegId, Resettable, SimError, resolve_after_tlib_execute,
 };
 
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
@@ -94,6 +93,12 @@ pub struct Rl78Cpu {
     /// [`UNIT_TEST_RESET_TLIB_ON_NEXT_NEW`].
     #[cfg(test)]
     unit_test_guest_executed: bool,
+}
+
+impl Resettable for Rl78Cpu {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
+        unsafe { ffi::tlib_reset(); }
+    }
 }
 
 impl Rl78Cpu {

@@ -1,5 +1,6 @@
 //! CPU contract implemented by architecture crates.
 
+use crate::Resettable;
 use crate::breakpoint::{Breakpoint, BreakpointId};
 use crate::bus::{Addr, BusError, MemoryBus};
 use crate::command::SimError;
@@ -172,7 +173,7 @@ pub fn resolve_after_tlib_execute(
 }
 
 /// Architecture CPU. All mutation happens on the simulation thread.
-pub trait Cpu: Send {
+pub trait Cpu: Send + Resettable {
     /// Install the guest memory map used by load/store callbacks.
     ///
     /// Called **once** when the CPU is placed into a [`crate::Machine`] (bus

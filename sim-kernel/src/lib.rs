@@ -39,7 +39,7 @@ pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use external::{ExternalError, ExternalId, ExternalSink, ExternalSource};
 pub use gdb::{GdbBindError, listen_gdb, parse_gdb_dev};
 pub use machine::Machine;
-pub use reset::Resettable;
+pub use reset::{Device, Resettable};
 pub use sim::{
     BeforeQuantum, DEFAULT_MAX_QUANTUM, SimConfig, SimControl, SimEvents, SimState, Simulator,
     spawn,

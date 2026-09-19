@@ -10,6 +10,7 @@ use sim_kernel::Cpu;
 fn ack_clears_if_and_reinjects_next_pending() {
     let mut machine = g23_machine(G23MachineConfig::default());
     load_vectors_and_idle(&mut machine);
+    machine.reset();
     arm_cpu(&mut machine);
     machine.bus_mut().write(0xFFFE4, &[0xFF, 0x9F]).unwrap();
     machine.bus_mut().write(0xFFFE0, &[0x00, 0x60]).unwrap();

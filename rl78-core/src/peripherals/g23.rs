@@ -3,7 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
-    Addr, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable, Rom, Wire,
+    Addr, Device, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable,
+    Rom, Wire,
 };
 
 use crate::map::MemoryLayout;
@@ -108,12 +109,12 @@ impl Rl78G23Core {
 }
 
 impl Resettable for Rl78G23Core {
-    fn reset(&mut self) {
-        Resettable::reset(&mut *self.clock.lock().expect("clock"));
-        Resettable::reset(&mut *self.sau.lock().expect("sau"));
-        Resettable::reset(&mut *self.tau.lock().expect("tau"));
-        Resettable::reset(&mut *self.irq.lock().expect("irq"));
-        Resettable::reset(&mut *self.uart_tx.lock().expect("tx"));
+    fn reset(&mut self, bus: &mut MemoryBus) {
+        Resettable::reset(&mut *self.clock.lock().expect("clock"), bus);
+        Resettable::reset(&mut *self.sau.lock().expect("sau"), bus);
+        Resettable::reset(&mut *self.tau.lock().expect("tau"), bus);
+        Resettable::reset(&mut *self.irq.lock().expect("irq"), bus);
+        Resettable::reset(&mut *self.uart_tx.lock().expect("tx"), bus);
     }
 }
 
@@ -189,9 +190,11 @@ impl R7F100Gxl {
             core: Rl78G23Core::new(ctl),
         }
     }
+}
 
+impl Resettable for R7F100Gxl {
     /// Hold-reset. `FRQSEL` is latched from ROM at [`OPTION_BYTE_ADDR`].
-    pub fn reset(&mut self, bus: &mut MemoryBus) {
+    fn reset(&mut self, bus: &mut MemoryBus) {
         let mut byte = [0u8; 1];
         let option = bus.read(OPTION_BYTE_ADDR, &mut byte).ok().map(|_| byte[0]);
         self.core
@@ -199,9 +202,11 @@ impl R7F100Gxl {
             .lock()
             .expect("clock")
             .set_option_byte(option);
-        Resettable::reset(&mut self.core);
+        Resettable::reset(&mut self.core, bus);
     }
 }
+
+impl Device for R7F100Gxl {}
 
 impl HasMemoryMap for R7F100Gxl {
     fn memory_map(&self) -> Result<MemoryMapBuilder, MapError> {

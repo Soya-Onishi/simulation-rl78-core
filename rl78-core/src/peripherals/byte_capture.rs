@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{Resettable, UartFrame};
+use sim_kernel::{MemoryBus, Resettable, UartFrame};
 
 /// Buffer filled by board UART TX wiring, not by a guest peripheral.
 #[derive(Default)]
@@ -38,7 +38,7 @@ impl ByteCapture {
 }
 
 impl Resettable for ByteCapture {
-    fn reset(&mut self) {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
         self.clear();
     }
 }

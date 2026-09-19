@@ -10,6 +10,7 @@ use sim_kernel::Cpu;
 fn tau_interval_unmasked_enters_inttm00_isr() {
     let mut machine = g23_machine(G23MachineConfig::default());
     load_vectors_and_idle(&mut machine);
+    machine.reset();
     arm_cpu(&mut machine);
     machine.bus_mut().write(0xFFFE4, &[0xFF, 0xBF]).unwrap();
     expire_tau0(&mut machine);

@@ -5,7 +5,7 @@
 //! the helpers here remain thin compatibility wrappers.
 
 use object::{Endianness, Object, read::elf::ProgramHeader};
-use sim_kernel::{Cpu, FirmwareError, Machine, MemoryBus};
+use sim_kernel::{FirmwareError, Machine, MemoryBus};
 
 use crate::Rl78Cpu;
 
@@ -105,29 +105,34 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
     })
 }
 
-/// Load `image` into `machine` and set the CPU PC to the ELF entry.
+/// Load `image` into `machine` ROM. Does not change PC (see reset).
 ///
 /// Thin wrapper over [`Machine::load_firmware`] / [`Cpu::load_firmware`].
 pub fn load_elf_into_machine(
     image: &[u8],
     machine: &mut Machine<Rl78Cpu>,
 ) -> Result<ElfLoad, LoadError> {
-    machine.load_firmware(image)?;
+    let loaded = load_elf(image, machine.bus_mut())?;
+    // Same TB flush as [`load_elf_firmware`] when the host map is already bound.
+    unsafe { crate::ffi::tlib_invalidate_translation_cache() };
+
+    // TODO: returning entrypoint when loading firmware is not appropriate. Do when trigger reset.
     Ok(ElfLoad {
-        entry: machine.cpu().pc(),
+        entry: loaded.entry,
     })
 }
 
-/// Parse ELF, write PT_LOAD segments, invalidate TBs, and set PC.
+/// Parse ELF, write PT_LOAD segments, and invalidate TBs.
+///
+/// Does not set PC — that belongs to CPU reset (reset vector at `0x00000`).
 pub(crate) fn load_elf_firmware(
-    cpu: &mut Rl78Cpu,
+    _cpu: &mut Rl78Cpu,
     bus: &mut MemoryBus,
     image: &[u8],
 ) -> Result<(), FirmwareError> {
-    let loaded = load_elf(image, bus)?;
+    load_elf(image, bus)?;
     // ROM bytes changed under an already-bound host map; drop stale TBs.
     unsafe { crate::ffi::tlib_invalidate_translation_cache() };
-    cpu.set_pc(loaded.entry);
     Ok(())
 }
 
@@ -174,13 +179,12 @@ mod tests {
 
     #[serial]
     #[test]
-    fn load_elf_writes_payload_and_sets_entry() {
+    fn load_elf_writes_payload_and_reports_entry() {
         let payload = [0x00u8, 0x00, 0x11, 0x22];
         let image = write_minimal_elf32(0x200, 0x200, &payload);
         let mut machine = minimal_machine(MinimalMachineConfig::default());
         let loaded = load_elf_into_machine(&image, &mut machine).unwrap();
         assert_eq!(loaded.entry, 0x200);
-        assert_eq!(machine.cpu().pc(), 0x200);
         let mut buf = [0u8; 4];
         machine.bus_mut().read(0x200, &mut buf).unwrap();
         assert_eq!(buf, payload);
@@ -193,7 +197,6 @@ mod tests {
         let image = write_minimal_elf32(0x300, 0x300, &payload);
         let mut machine = minimal_machine(MinimalMachineConfig::default());
         machine.load_firmware(&image).unwrap();
-        assert_eq!(machine.cpu().pc(), 0x300);
         let mut buf = [0u8; 2];
         machine.bus_mut().read(0x300, &mut buf).unwrap();
         assert_eq!(buf, payload);

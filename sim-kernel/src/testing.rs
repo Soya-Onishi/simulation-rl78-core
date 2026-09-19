@@ -6,6 +6,7 @@ use crate::breakpoint::Breakpoint;
 use crate::bus::{Addr, BusError, MemoryBus};
 use crate::command::SimError;
 use crate::cpu::{Cpu, Quantum, RegId};
+use crate::reset::Resettable;
 use crate::stop::StopReason;
 
 /// One scripted guest action. Each operation retires one instruction.
@@ -68,6 +69,14 @@ impl ScriptedCpu {
             "bind_memory must be called before run_quantum"
         );
         unsafe { &mut *(self.bus_addr as *mut MemoryBus) }
+    }
+}
+
+impl Resettable for ScriptedCpu {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
+        self.pc = 0;
+        self.idx = 0;
+        self.regs.clear();
     }
 }
 

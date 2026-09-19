@@ -163,6 +163,7 @@ pub fn run_board<C: Cpu>(
         sim.machine_mut().load_firmware(&image)?;
         eprintln!("board[{board_id}]: loaded firmware {}", elf_path);
     }
+    sim.machine_mut().reset();
 
     let mut state = NodeState::AwaitingStartup;
     let mut headroom_threshold_ns = 0_u64;
@@ -320,7 +321,8 @@ fn maybe_time_report(
 mod tests {
     use super::*;
     use sim_kernel::{
-        Addr, Breakpoint, EventCtl, MemoryBus, MemoryMapBuilder, Quantum, RegId, Rom, SimError,
+        Addr, Breakpoint, EventCtl, MemoryBus, MemoryMapBuilder, Quantum, RegId, Resettable, Rom,
+        SimError,
     };
 
     #[test]
@@ -394,6 +396,13 @@ mod tests {
     impl FakeCpu {
         fn script(ops: Vec<FakeOp>) -> Self {
             Self { pc: 0, ops, idx: 0 }
+        }
+    }
+
+    impl Resettable for FakeCpu {
+        fn reset(&mut self, _bus: &mut MemoryBus) {
+            self.pc = 0;
+            self.idx = 0;
         }
     }
 
