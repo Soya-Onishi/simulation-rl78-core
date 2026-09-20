@@ -196,9 +196,12 @@ pub trait Cpu: Send + Resettable {
     /// `u32` matches `tlib_execute(max_insns)`. The kernel clamps the virtual-time
     /// budget to `u32::MAX` before calling this. On return, map the exit code with
     /// [`map_tlib_exit`]: breakpoint → `EXCP_DEBUG` → [`StopReason::Breakpoint`].
-    /// Implementations must either retire a non-zero number of instructions or
-    /// return a stop reason. A zero-instruction quantum with no stop is treated
-    /// as [`StopReason::Halt`].
+    /// Guest Halt / WFI must be reported via [`Quantum::stop`] =
+    /// [`StopReason::Halt`] (e.g. tlib `EXCP_WFI`), not inferred from a zero
+    /// instruction count. The kernel keeps Running and does not emit
+    /// [`crate::Response::Stopped`] for that reason. A zero-instruction quantum
+    /// with no stop is a normal engine exit (IRQ / return-request); the kernel
+    /// retries on the next poll.
     fn run_quantum(&mut self, max_instructions: u32) -> Quantum;
 
     fn read_reg(&self, id: RegId) -> Result<u64, SimError>;
