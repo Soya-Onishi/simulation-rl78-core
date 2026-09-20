@@ -478,7 +478,7 @@ mod tests {
         let bus = MemoryMapBuilder::new()
             .map(0, Box::new(Rom::new(64)))
             .expect("map")
-            .build();
+            .build().unwrap();
         Machine::new(FakeCpu::script(ops), bus, EventCtl::new())
     }
 

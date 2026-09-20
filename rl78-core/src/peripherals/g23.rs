@@ -214,7 +214,8 @@ impl HasMemoryMap for R7F100Gxl {
         self.core.memory_map()?.merge(
             MemoryMapBuilder::new()
                 .map(layout.rom_base, Box::new(Rom::erased(layout.rom_size)))?
-                .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?,
+                .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
+                .alias(0xF3000, 0x3000, 3840)?
         )
     }
 }

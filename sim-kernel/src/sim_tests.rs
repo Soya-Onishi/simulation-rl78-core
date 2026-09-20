@@ -61,7 +61,7 @@ fn inspect_reg_and_mem_when_stopped() {
     let bus = MemoryMapBuilder::new()
         .map(0x2000, Box::new(Ram::new(16)))
         .unwrap()
-        .build();
+        .build().unwrap();
     let mut machine = Machine::new(ScriptedCpu::new(vec![]), bus, EventCtl::new());
     machine.write_reg(RegId(3), 0x55).unwrap();
     let mut sim = Simulator::new(machine, SimConfig::default());
@@ -141,7 +141,7 @@ fn mmio_write_reaches_ram() {
     let bus = MemoryMapBuilder::new()
         .map(0x8000, Box::new(Ram::new(8)))
         .unwrap()
-        .build();
+        .build().unwrap();
     let machine = Machine::new(
         ScriptedCpu::new(vec![ScriptOp::Write {
             addr: 0x8000,
@@ -180,7 +180,7 @@ fn unmapped_write_stops_when_cpu_reports_it() {
 
 #[test]
 fn trap_policy_stops_even_if_cpu_continues() {
-    let bus = MemoryMapBuilder::new().policy(UnmappedPolicy::Trap).build();
+    let bus = MemoryMapBuilder::new().policy(UnmappedPolicy::Trap).build().unwrap();
     let machine = Machine::new(
         ScriptedCpu::new(vec![ScriptOp::WriteIgnoreError {
             addr: 0x1,

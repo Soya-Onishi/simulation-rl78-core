@@ -76,7 +76,7 @@ where
         .map(layout.rom_base, Box::new(Rom::new(layout.rom_size)))?
         .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
         .map(MAGIC_PROBE_BASE, Box::new(MagicProbe::new(sink)))
-        .map(|b| b.build())
+        .and_then(|b| b.build())
 }
 
 /// Knobs for [`g23_machine`]. Option byte `0x000C2` is read from ROM at reset.
@@ -93,7 +93,7 @@ pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
         .memory_map()
         .expect("g23 memory map")
         .policy(cfg.unmapped)
-        .build();
+        .build().unwrap();
     let irq = std::sync::Arc::clone(&part.core.irq);
     let machine = Machine::with_devices(Rl78Cpu::new(), bus, ctl, vec![Box::new(part)]);
     peripherals::irq::bind_cpu_line(irq);
@@ -110,7 +110,7 @@ mod tests {
 
     fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
         let mut part = R7F100Gxl::new(ctl);
-        let mut bus = part.memory_map().unwrap().build();
+        let mut bus = part.memory_map().unwrap().build().unwrap();
         Resettable::reset(&mut part, &mut bus);
         (part, bus)
     }
