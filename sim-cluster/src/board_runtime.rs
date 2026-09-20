@@ -123,7 +123,7 @@ pub fn board_usage(prog: &str) -> String {
 
 /// Map a simulator stop to a cluster [`HostStopReason`], if any.
 ///
-/// [`StopReason::Halt`] is guest-local and must not be forwarded.
+/// [`StopReason::Halt`] is guest-local (sim stays Running) and must not be forwarded.
 #[must_use]
 pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
     match reason {
@@ -216,7 +216,7 @@ pub fn run_board<C: Cpu>(
             }
 
             if sim.waiting_on_allowed_ceiling() || sim.state() != SimState::Running {
-                // Ceiling wait, or guest-local Halt left the sim Stopped.
+                // Ceiling wait, or a host-relevant stop left the sim Stopped.
                 thread::sleep(BOARD_IDLE_POLL);
                 continue;
             }
@@ -242,8 +242,9 @@ pub fn run_board<C: Cpu>(
                         );
                         return Ok(());
                     }
-                    // Halt: keep NodeState::Running, do not notify arbiter.
-                    eprintln!("board[{board_id}]: guest Halt (local) at vt={virtual_time_ns}");
+                    // Guest Halt/WFI: sim stays Running; park briefly so IRQs/events
+                    // can arrive without busy-spinning the board thread.
+                    thread::sleep(BOARD_IDLE_POLL);
                 }
                 Some(other) => {
                     eprintln!("board[{board_id}]: unexpected sim response {other:?}");
@@ -495,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn halt_leaves_sim_stopped_without_host_reason() {
+    fn halt_keeps_sim_running_without_host_reason() {
         let mut sim = Simulator::new(fake_machine(vec![FakeOp::Halt]), SimConfig::default());
         let _ = sim.command(Command::SetAllowed { tick: Tick(1_000) });
         let _ = sim.command(Command::Start);
@@ -503,7 +504,7 @@ mod tests {
         match resp {
             Some(Response::Stopped(StopReason::Halt)) => {
                 assert!(cluster_host_stop_reason(&StopReason::Halt).is_none());
-                assert_eq!(sim.state(), SimState::Stopped);
+                assert_eq!(sim.state(), SimState::Running);
             }
             other => panic!("expected Halt, got {other:?}"),
         }

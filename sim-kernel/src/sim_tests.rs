@@ -99,7 +99,52 @@ fn scripted_cpu_halts() {
         run_until_stop(&mut sim),
         Response::Stopped(StopReason::Halt)
     );
+    assert_eq!(sim.state(), SimState::Running);
     assert_eq!(sim.machine().clock().now(), Tick(2));
+}
+
+/// CPU that returns a zero-instruction quantum with no stop (IRQ-style engine exit).
+struct ZeroInsnCpu;
+
+impl crate::Resettable for ZeroInsnCpu {
+    fn reset(&mut self, _bus: &mut MemoryBus) {}
+}
+
+impl crate::Cpu for ZeroInsnCpu {
+    fn bind_memory(&mut self, _bus: &mut MemoryBus) {}
+
+    fn run_quantum(&mut self, _max_instructions: u32) -> crate::Quantum {
+        crate::Quantum {
+            instructions: 0,
+            stop: None,
+        }
+    }
+
+    fn read_reg(&self, id: RegId) -> Result<u64, SimError> {
+        Err(SimError::UnknownRegister(id))
+    }
+
+    fn write_reg(&mut self, id: RegId, _value: u64) -> Result<(), SimError> {
+        Err(SimError::UnknownRegister(id))
+    }
+
+    fn pc(&self) -> crate::Addr {
+        0
+    }
+
+    fn set_pc(&mut self, _pc: crate::Addr) {}
+}
+
+#[test]
+fn zero_instruction_quantum_without_stop_stays_running() {
+    let mut sim = Simulator::new(
+        Machine::new(ZeroInsnCpu, MemoryBus::new(), EventCtl::new()),
+        SimConfig::default(),
+    );
+    sim.command(Command::Start);
+    assert_eq!(sim.poll(), None);
+    assert_eq!(sim.state(), SimState::Running);
+    assert_eq!(sim.machine().clock().now(), Tick(0));
 }
 
 #[test]
@@ -115,6 +160,7 @@ fn quantum_does_not_pass_next_event() {
     );
     sim.command(Command::Start);
     assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Halt)));
+    assert_eq!(sim.state(), SimState::Running);
     assert_eq!(sim.machine().clock().now(), Tick(4));
 }
 
@@ -133,6 +179,7 @@ fn sub_instruction_remainder_advances_to_event() {
     );
     sim.command(Command::Start);
     assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Halt)));
+    assert_eq!(sim.state(), SimState::Running);
     assert_eq!(sim.machine().clock().now(), Tick(5));
 }
 

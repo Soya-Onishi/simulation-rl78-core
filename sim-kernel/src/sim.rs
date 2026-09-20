@@ -214,10 +214,10 @@ impl<C: Cpu> Simulator<C> {
             let (cpu, _, _) = self.machine.parts_mut();
             cpu.run_quantum(max_instructions)
         };
+        // Zero retired instructions with no stop is a normal engine exit
+        // (e.g. IRQ `exit_request`), not guest Halt — retry on the next poll.
         if result.instructions == 0 && result.stop.is_none() {
-            self.step_once = false;
-            self.state = SimState::Stopped;
-            return Some(Response::Stopped(StopReason::Halt));
+            return None;
         }
         let elapsed = ns_per_insn.saturating_mul(result.instructions);
         self.machine.advance_clock(elapsed);
@@ -232,9 +232,7 @@ impl<C: Cpu> Simulator<C> {
         }
 
         if let Some(stop) = result.stop {
-            self.step_once = false;
-            self.state = SimState::Stopped;
-            return Some(Response::Stopped(stop));
+            return Some(self.commit_stop(stop));
         }
 
         if self.step_once {
@@ -262,12 +260,24 @@ impl<C: Cpu> Simulator<C> {
                 ctx.stop
             };
             if let Some(stop) = stop {
-                self.step_once = false;
-                self.state = SimState::Stopped;
-                return Some(Response::Stopped(stop));
+                return Some(self.commit_stop(stop));
             }
         }
         None
+    }
+
+    /// Commit a stop reason from CPU or an event.
+    ///
+    /// [`StopReason::Halt`] is guest-local idle (WFI / STOP): keep
+    /// [`SimState::Running`] so later polls can fire events and accept IRQs.
+    /// Other reasons leave Running (external control or abnormal).
+    fn commit_stop(&mut self, stop: StopReason) -> Response {
+        if matches!(stop, StopReason::Halt) {
+            return Response::Stopped(stop);
+        }
+        self.step_once = false;
+        self.state = SimState::Stopped;
+        Response::Stopped(stop)
     }
 
     fn inspect(&mut self, cmd: Command) -> Response {

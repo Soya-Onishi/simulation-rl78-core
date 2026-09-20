@@ -1,4 +1,8 @@
-//! Why the guest left the running state.
+//! Why a quantum or control action produced a [`StopReason`].
+//!
+//! Only some reasons clear [`crate::SimState::Running`] (external stop, step,
+//! breakpoint, unmapped). [`StopReason::Halt`] is guest-local idle and keeps
+//! the sim Running so later polls can wake on IRQs / events.
 
 use crate::breakpoint::BreakpointId;
 use crate::bus::Addr;
@@ -10,7 +14,8 @@ use crate::bus::Addr;
 /// callbacks — not via a kernel-side PC scan after each quantum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StopReason {
-    /// Guest-local halt (e.g. RL78 STOP / tlib WFI). Must not freeze peer boards.
+    /// Guest-local idle (e.g. RL78 STOP / tlib WFI). Keeps the sim Running;
+    /// must not freeze peer boards.
     Halt,
     ExternalStop,
     /// Finished a [`crate::Command::Step`] without another stop reason.

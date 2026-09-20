@@ -79,7 +79,7 @@ pub enum ControlToArbiter {
     /// Virtual time report.
     TimeReport { from: u64, virtual_time_ns: u64 },
     /// Host-initiated stop (BP / external / step / unmapped).
-    /// Guest-local Halt must not be sent.
+    /// Guest-local Halt (sim stays Running) must not be sent.
     HostStop { from: u64, reason: HostStopReason },
 }
 
