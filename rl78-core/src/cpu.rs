@@ -523,7 +523,7 @@ mod map_probe {
             .unwrap()
             .map(0xF0100, Box::new(Ram::new(1024)))
             .unwrap()
-            .build();
+            .build().unwrap();
         let mut cpu = Rl78Cpu::new();
         cpu.bind_memory(&mut bus);
         assert!(cpu.memory_bound);
@@ -601,7 +601,7 @@ mod map_probe {
             .unwrap()
             .map(0xF0100, Box::new(Ram::new(1024)))
             .unwrap()
-            .build();
+            .build().unwrap();
         let mut cpu = Rl78Cpu::new();
         cpu.bind_memory(&mut bus);
         assert!(!crate::callbacks::rl78_host_guest_offset_to_host_ptr(0).is_null());
