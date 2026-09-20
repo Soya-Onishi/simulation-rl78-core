@@ -198,8 +198,10 @@ pub trait Cpu: Send + Resettable {
     /// [`map_tlib_exit`]: breakpoint → `EXCP_DEBUG` → [`StopReason::Breakpoint`].
     /// Guest Halt / WFI must be reported via [`Quantum::stop`] =
     /// [`StopReason::Halt`] (e.g. tlib `EXCP_WFI`), not inferred from a zero
-    /// instruction count. A zero-instruction quantum with no stop is a normal
-    /// engine exit (IRQ / return-request); the kernel retries on the next poll.
+    /// instruction count. The kernel keeps Running and does not emit
+    /// [`crate::Response::Stopped`] for that reason. A zero-instruction quantum
+    /// with no stop is a normal engine exit (IRQ / return-request); the kernel
+    /// retries on the next poll.
     fn run_quantum(&mut self, max_instructions: u32) -> Quantum;
 
     fn read_reg(&self, id: RegId) -> Result<u64, SimError>;

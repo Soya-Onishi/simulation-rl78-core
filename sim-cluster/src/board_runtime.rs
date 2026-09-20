@@ -242,9 +242,8 @@ pub fn run_board<C: Cpu>(
                         );
                         return Ok(());
                     }
-                    // Guest Halt/WFI: sim stays Running; park briefly so IRQs/events
-                    // can arrive without busy-spinning the board thread.
-                    thread::sleep(BOARD_IDLE_POLL);
+                    // Guest Halt is not surfaced as Response::Stopped anymore.
+                    eprintln!("board[{board_id}]: unexpected non-host stop {reason:?}");
                 }
                 Some(other) => {
                     eprintln!("board[{board_id}]: unexpected sim response {other:?}");
@@ -500,14 +499,9 @@ mod tests {
         let mut sim = Simulator::new(fake_machine(vec![FakeOp::Halt]), SimConfig::default());
         let _ = sim.command(Command::SetAllowed { tick: Tick(1_000) });
         let _ = sim.command(Command::Start);
-        let resp = sim.poll();
-        match resp {
-            Some(Response::Stopped(StopReason::Halt)) => {
-                assert!(cluster_host_stop_reason(&StopReason::Halt).is_none());
-                assert_eq!(sim.state(), SimState::Running);
-            }
-            other => panic!("expected Halt, got {other:?}"),
-        }
+        assert_eq!(sim.poll(), None);
+        assert!(cluster_host_stop_reason(&StopReason::Halt).is_none());
+        assert_eq!(sim.state(), SimState::Running);
     }
 
     #[test]

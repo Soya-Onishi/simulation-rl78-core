@@ -18,6 +18,15 @@ impl SimEvent for HaltAtFire {
     }
 }
 
+/// Event used as a test sentinel that *does* leave Running.
+struct ExternalStopAtFire;
+
+impl SimEvent for ExternalStopAtFire {
+    fn fire(&mut self, ctx: &mut EventCtx<'_>) {
+        ctx.stop = Some(StopReason::ExternalStop);
+    }
+}
+
 fn empty_machine(cpu: ScriptedCpu) -> Machine<ScriptedCpu> {
     Machine::new(cpu, MemoryBus::new(), EventCtl::new())
 }
@@ -95,10 +104,9 @@ fn scripted_cpu_halts() {
         empty_machine(ScriptedCpu::new(vec![ScriptOp::Nop, ScriptOp::Halt])),
         SimConfig::default(),
     );
-    assert_eq!(
-        run_until_stop(&mut sim),
-        Response::Stopped(StopReason::Halt)
-    );
+    sim.command(Command::Start);
+    // Nop then Halt in one quantum: Halt stays Running and does not emit Stopped.
+    assert_eq!(sim.poll(), None);
     assert_eq!(sim.state(), SimState::Running);
     assert_eq!(sim.machine().clock().now(), Tick(2));
 }
@@ -150,6 +158,28 @@ fn zero_instruction_quantum_without_stop_stays_running() {
 #[test]
 fn quantum_does_not_pass_next_event() {
     let mut machine = empty_machine(ScriptedCpu::nops(100));
+    machine
+        .events_mut()
+        .schedule(Tick(4), Box::new(ExternalStopAtFire));
+    let mut sim = Simulator::new(
+        machine,
+        SimConfig {
+            max_quantum: Tick(50),
+            ..SimConfig::default()
+        },
+    );
+    sim.command(Command::Start);
+    assert_eq!(
+        sim.poll(),
+        Some(Response::Stopped(StopReason::ExternalStop))
+    );
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.machine().clock().now(), Tick(4));
+}
+
+#[test]
+fn event_halt_stays_running_without_response() {
+    let mut machine = empty_machine(ScriptedCpu::nops(100));
     machine.events_mut().schedule(Tick(4), Box::new(HaltAtFire));
     let mut sim = Simulator::new(
         machine,
@@ -159,7 +189,7 @@ fn quantum_does_not_pass_next_event() {
         },
     );
     sim.command(Command::Start);
-    assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Halt)));
+    assert_eq!(sim.poll(), None);
     assert_eq!(sim.state(), SimState::Running);
     assert_eq!(sim.machine().clock().now(), Tick(4));
 }
@@ -169,7 +199,9 @@ fn sub_instruction_remainder_advances_to_event() {
     // Event at 5ns with 10ns/insn: first poll cannot retire an instruction, but
     // must still advance to the deadline so the event fires (no spin).
     let mut machine = empty_machine(ScriptedCpu::nops(100));
-    machine.events_mut().schedule(Tick(5), Box::new(HaltAtFire));
+    machine
+        .events_mut()
+        .schedule(Tick(5), Box::new(ExternalStopAtFire));
     let mut sim = Simulator::new(
         machine,
         SimConfig {
@@ -178,8 +210,11 @@ fn sub_instruction_remainder_advances_to_event() {
         },
     );
     sim.command(Command::Start);
-    assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Halt)));
-    assert_eq!(sim.state(), SimState::Running);
+    assert_eq!(
+        sim.poll(),
+        Some(Response::Stopped(StopReason::ExternalStop))
+    );
+    assert_eq!(sim.state(), SimState::Stopped);
     assert_eq!(sim.machine().clock().now(), Tick(5));
 }
 
@@ -198,9 +233,13 @@ fn mmio_write_reaches_ram() {
         EventCtl::new(),
     );
     let mut sim = Simulator::new(machine, SimConfig::default());
+    sim.command(Command::Start);
+    assert_eq!(sim.poll(), None); // script ends in Halt → stay Running, no Stopped
+    assert_eq!(sim.state(), SimState::Running);
+    // Inspect is blocked while Running; Stop first for the mem check.
     assert_eq!(
-        run_until_stop(&mut sim),
-        Response::Stopped(StopReason::Halt)
+        sim.command(Command::Stop),
+        Response::Stopped(StopReason::ExternalStop)
     );
     let mut buf = [0u8; 2];
     sim.machine_mut().read_mem(0x8000, &mut buf).unwrap();
@@ -279,12 +318,23 @@ fn ns_per_instruction_scales_virtual_time() {
             ..SimConfig::default()
         },
     );
-    assert_eq!(
-        run_until_stop(&mut sim),
-        Response::Stopped(StopReason::Halt)
-    );
+    sim.command(Command::Start);
+    assert_eq!(sim.poll(), None);
+    assert_eq!(sim.state(), SimState::Running);
     // 3 instructions × 10 ns
     assert_eq!(sim.machine().clock().now(), Tick(30));
+}
+
+#[test]
+fn step_into_halt_completes_as_step() {
+    let mut sim = Simulator::new(
+        empty_machine(ScriptedCpu::new(vec![ScriptOp::Halt])),
+        SimConfig::default(),
+    );
+    assert_eq!(sim.command(Command::Step), Response::Started);
+    assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Step)));
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.machine().clock().now(), Tick(1));
 }
 
 #[test]

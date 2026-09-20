@@ -232,7 +232,7 @@ impl<C: Cpu> Simulator<C> {
         }
 
         if let Some(stop) = result.stop {
-            return Some(self.commit_stop(stop));
+            return self.commit_stop(stop);
         }
 
         if self.step_once {
@@ -260,7 +260,7 @@ impl<C: Cpu> Simulator<C> {
                 ctx.stop
             };
             if let Some(stop) = stop {
-                return Some(self.commit_stop(stop));
+                return self.commit_stop(stop);
             }
         }
         None
@@ -269,15 +269,26 @@ impl<C: Cpu> Simulator<C> {
     /// Commit a stop reason from CPU or an event.
     ///
     /// [`StopReason::Halt`] is guest-local idle (WFI / STOP): keep
-    /// [`SimState::Running`] so later polls can fire events and accept IRQs.
-    /// Other reasons leave Running (external control or abnormal).
-    fn commit_stop(&mut self, stop: StopReason) -> Response {
-        if matches!(stop, StopReason::Halt) {
-            return Response::Stopped(stop);
+    /// [`SimState::Running`] and do **not** emit [`Response::Stopped`] (so CLI/GDB
+    /// do not treat idle as a debugger stop). A pending [`Command::Step`] still
+    /// completes as [`StopReason::Step`]. Other reasons clear Running.
+    fn commit_stop(&mut self, stop: StopReason) -> Option<Response> {
+        match stop {
+            StopReason::Halt if self.step_once => {
+                self.step_once = false;
+                self.state = SimState::Stopped;
+                Some(Response::Stopped(StopReason::Step))
+            }
+            StopReason::Halt => {
+                self.step_once = false;
+                None
+            }
+            other => {
+                self.step_once = false;
+                self.state = SimState::Stopped;
+                Some(Response::Stopped(other))
+            }
         }
-        self.step_once = false;
-        self.state = SimState::Stopped;
-        Response::Stopped(stop)
     }
 
     fn inspect(&mut self, cmd: Command) -> Response {
