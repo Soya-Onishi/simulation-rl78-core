@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use sim_kernel::{
-    Addr, Breakpoint, BreakpointId, Cpu, FirmwareError, MemoryBus, PendingStop, Quantum, RegId, Resettable, SimError, resolve_after_tlib_execute,
+    Addr, Breakpoint, BreakpointId, Cpu, FirmwareError, MemoryBus, PendingStop, Quantum, RegId,
+    Resettable, SimError, resolve_after_tlib_execute,
 };
 
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
@@ -97,7 +98,9 @@ pub struct Rl78Cpu {
 
 impl Resettable for Rl78Cpu {
     fn reset(&mut self, _bus: &mut MemoryBus) {
-        unsafe { ffi::tlib_reset(); }
+        unsafe {
+            ffi::tlib_reset();
+        }
     }
 }
 
@@ -523,7 +526,8 @@ mod map_probe {
             .unwrap()
             .map(0xF0100, Box::new(Ram::new(1024)))
             .unwrap()
-            .build().unwrap();
+            .build()
+            .unwrap();
         let mut cpu = Rl78Cpu::new();
         cpu.bind_memory(&mut bus);
         assert!(cpu.memory_bound);
@@ -601,7 +605,8 @@ mod map_probe {
             .unwrap()
             .map(0xF0100, Box::new(Ram::new(1024)))
             .unwrap()
-            .build().unwrap();
+            .build()
+            .unwrap();
         let mut cpu = Rl78Cpu::new();
         cpu.bind_memory(&mut bus);
         assert!(!crate::callbacks::rl78_host_guest_offset_to_host_ptr(0).is_null());

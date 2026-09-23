@@ -46,7 +46,7 @@ pub enum SimState {
 /// Optional hook invoked at the start of each [`Simulator::poll`] quantum.
 ///
 /// Used by multi-board nodes to drain B-lite receive mailboxes into
-/// `ExternalSource` on the simulation thread only.
+/// `InPort` on the simulation thread only.
 pub trait BeforeQuantum: Send {
     fn before_quantum(&mut self);
 }

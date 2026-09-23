@@ -85,14 +85,20 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
     let mut loaded = false;
     for ph in elf.elf_program_headers() {
         let paddr = ph.p_paddr(endianness);
-        let addr = if paddr == 0 { ph.p_vaddr(endianness) } else { paddr };
-        let data = ph.data(endianness, elf.data()).map_err(|_| LoadError::Truncated)?;
+        let addr = if paddr == 0 {
+            ph.p_vaddr(endianness)
+        } else {
+            paddr
+        };
+        let data = ph
+            .data(endianness, elf.data())
+            .map_err(|_| LoadError::Truncated)?;
 
         if data.is_empty() || ph.p_type(endianness) != object::elf::PT_LOAD {
             continue;
         }
 
-        bus.load(addr as u64, data).map_err(LoadError::Bus)?; 
+        bus.load(addr as u64, data).map_err(LoadError::Bus)?;
         loaded = true;
     }
 

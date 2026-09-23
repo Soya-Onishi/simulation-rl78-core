@@ -8,7 +8,7 @@ use sim_kernel::Cpu;
 
 #[test]
 fn ack_clears_if_and_reinjects_next_pending() {
-    let mut machine = g23_machine(G23MachineConfig::default());
+    let (mut machine, _ports) = g23_machine(G23MachineConfig::default());
     load_vectors_and_idle(&mut machine);
     machine.reset();
     arm_cpu(&mut machine);

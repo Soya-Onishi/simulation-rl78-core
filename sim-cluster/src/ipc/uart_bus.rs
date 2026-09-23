@@ -8,9 +8,10 @@ use iceoryx2::prelude::*;
 
 use crate::topology::{DirectedEdge, LogicalTopology, PayloadKind};
 
+use sim_kernel::UartFrame;
+
 use super::names;
 use super::runtime::IpcError;
-use super::wire::UartFrame;
 
 type UartPub = Publisher<ipc::Service, UartFrame, ()>;
 type UartSub = Subscriber<ipc::Service, UartFrame, ()>;

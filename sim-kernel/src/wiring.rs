@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use typenum::{Add1, B1, Unsigned};
 
+use iceoryx2_bb_derive_macros::ZeroCopySend;
+use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
+
 use crate::Tick;
 
 pub use typenum::{U0, U1};
@@ -27,27 +30,37 @@ pub enum DigitalLevel {
 pub struct AnalogVoltage(pub i64);
 
 /// UART stop-bit count carried on a [`UartFrame`].
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum UartStopBits {
     #[default]
-    One,
-    Two,
+    One = 0,
+    Two = 1,
 }
 
+// `#[repr(u8)]` (stable IPC size) cannot combine with `#[repr(C)]` required by
+// the ZeroCopySend derive; implement the trait by hand.
+unsafe impl ZeroCopySend for UartStopBits {}
+
 /// UART parity carried on a [`UartFrame`].
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum UartParity {
     #[default]
-    None,
-    Even,
-    Odd,
+    None = 0,
+    Even = 1,
+    Odd = 2,
 }
+
+unsafe impl ZeroCopySend for UartParity {}
 
 /// One UART character plus link parameters, used as a [`Wire`] payload.
 ///
 /// Serial lines are not modeled as [`DigitalLevel`] bit streams. `bit_time` is
 /// the duration of one bit on the virtual clock (not a raw baud integer).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ZeroCopySend)]
 pub struct UartFrame {
     pub data: u16,
     pub data_bits: u8,

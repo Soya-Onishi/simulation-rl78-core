@@ -8,3 +8,5 @@ description = "Architecture-independent virtual-time simulation kernel"
 [dependencies]
 gdbstub = "0.7"
 typenum = "1.17"
+iceoryx2-bb-elementary-traits = "0.9.3"
+iceoryx2-bb-derive-macros = "0.9.3"

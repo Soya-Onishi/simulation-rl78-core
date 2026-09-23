@@ -9,14 +9,14 @@ use std::thread;
 use std::time::Duration;
 
 use sim_kernel::{
-    Command, Cpu, FirmwareError, Machine, Response, SimConfig, SimState, Simulator, StopReason,
-    Tick,
+    BoardPorts, Command, Cpu, FirmwareError, Machine, Response, SimConfig, SimState, Simulator,
+    StopReason, Tick,
 };
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
+use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::ipc::{
-    IpcError, NodeControl, NodeUartPorts, board_hash_table, board_id_hash, create_node,
-    isolated_config,
+    IpcError, NodeControl, board_hash_table, board_id_hash, create_node, isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
@@ -42,6 +42,8 @@ pub enum BoardError {
     Topology(#[from] TopologyError),
     #[error("ipc error: {0}")]
     Ipc(#[from] IpcError),
+    #[error("data plane error: {0}")]
+    DataPlane(#[from] DataPlaneError),
     #[error("firmware error: {0}")]
     Firmware(#[from] FirmwareError),
     #[error("{0}")]
@@ -140,9 +142,12 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 /// `build` assembles ROM/RAM (and peripherals) only — it must not load firmware.
 /// When the topology board entry has an `elf` path, this function reads the file
 /// and calls [`Machine::load_firmware`].
+///
+/// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
+/// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
 pub fn run_board<C: Cpu>(
     opts: BoardOptions,
-    build: impl FnOnce() -> Machine<C>,
+    build: impl FnOnce() -> (Machine<C>, BoardPorts),
 ) -> Result<(), BoardError> {
     let board_id = opts.board_id.as_str();
     let board_hash = board_id_hash(board_id);
@@ -155,15 +160,19 @@ pub fn run_board<C: Cpu>(
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;
     let control = NodeControl::open(&iox_node, &opts.cluster_key, boards)?;
-    let uart = NodeUartPorts::open_for_board(&iox_node, &opts.cluster_key, board_id, &topo.edges)?;
+    let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
 
-    let mut sim = Simulator::new(build(), SimConfig::default());
+    let (machine, ports) = build();
+    let mut sim = Simulator::new(machine, SimConfig::default());
     if let Some(elf_path) = &board.elf {
         let image = fs::read(elf_path)?;
         sim.machine_mut().load_firmware(&image)?;
         eprintln!("board[{board_id}]: loaded firmware {}", elf_path);
     }
     sim.machine_mut().reset();
+    ports.clear_pending();
+
+    let mut data_planes = bind_data_planes(plane_maps, &ports)?;
 
     let mut state = NodeState::AwaitingStartup;
     let mut headroom_threshold_ns = 0_u64;
@@ -205,18 +214,13 @@ pub fn run_board<C: Cpu>(
                 eprintln!("board[{board_id}]: simulator Start");
             }
 
-            let drained = uart.drain_all(64)?;
-            for (edge_id, frames) in drained {
-                if !frames.is_empty() {
-                    eprintln!(
-                        "board[{board_id}]: uart recv {} frames on {edge_id}",
-                        frames.len()
-                    );
-                }
+            for plane in &mut data_planes {
+                plane.pump_rx()?;
             }
 
             if sim.waiting_on_allowed_ceiling() || sim.state() != SimState::Running {
-                // Ceiling wait, or a host-relevant stop left the sim Stopped.
+                // Do not pump_tx while the guest is not advancing: cross-board
+                // UART must not race ahead of virtual-time sync (ceiling / stop).
                 thread::sleep(BOARD_IDLE_POLL);
                 continue;
             }
@@ -259,6 +263,10 @@ pub fn run_board<C: Cpu>(
                         &mut last_time_report,
                     )?;
                 }
+            }
+
+            for plane in &mut data_planes {
+                plane.pump_tx()?;
             }
         } else {
             thread::sleep(BOARD_IDLE_POLL);
@@ -478,7 +486,8 @@ mod tests {
         let bus = MemoryMapBuilder::new()
             .map(0, Box::new(Rom::new(64)))
             .expect("map")
-            .build().unwrap();
+            .build()
+            .unwrap();
         Machine::new(FakeCpu::script(ops), bus, EventCtl::new())
     }
 

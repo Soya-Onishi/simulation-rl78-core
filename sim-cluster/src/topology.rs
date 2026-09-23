@@ -15,7 +15,7 @@ pub const DEFAULT_READY_TIMEOUT_MS: u64 = 10_000;
 pub const DEFAULT_UART_RING_LEN: u32 = 64;
 
 /// Payload carried on a board-edge endpoint / directed data edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadKind {
     Uart,

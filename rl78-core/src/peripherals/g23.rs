@@ -8,7 +8,6 @@ use sim_kernel::{
 };
 
 use crate::map::MemoryLayout;
-use crate::peripherals::byte_capture::ByteCapture;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
@@ -49,12 +48,7 @@ const TAU_IRQ: [IrqId; tau::CHANNELS] = [
     IrqId::INTTM07,
 ];
 
-fn wiring(
-    sau: &mut SauUnit,
-    tau: &mut TauUnit,
-    irq: &Arc<Mutex<IrqController>>,
-    uart_tx: &Arc<Mutex<ByteCapture>>,
-) {
+fn wiring(sau: &mut SauUnit, tau: &mut TauUnit, irq: &Arc<Mutex<IrqController>>) {
     for (ch, id) in SAU_IRQ.iter().copied().enumerate() {
         let irq = Arc::clone(irq);
         let _wire = Wire::new()
@@ -67,10 +61,6 @@ fn wiring(
             .source(sau.err_source(uart))
             .sink(move |values, changed| IrqController::on_input(&irq, id, values, changed));
     }
-    let uart_tx = Arc::clone(uart_tx);
-    let _tx = Wire::new()
-        .source(sau.tx_source())
-        .sink(move |values, changed| ByteCapture::on_input(&uart_tx, values, changed));
     for (ch, id) in TAU_IRQ.iter().copied().enumerate() {
         let irq = Arc::clone(irq);
         let _wire = Wire::new()
@@ -80,12 +70,14 @@ fn wiring(
 }
 
 /// Generic G23 core (clock / SAU0 / TAU0 / IRQ). Flash/RAM sizes come from the part.
+///
+/// Board-edge UART ports (`uart0_tx` / `uart0_rx`) are wired by [`crate::g23_machine`],
+/// not here — endpoint names belong to the board topology.
 pub struct Rl78G23Core {
     pub clock: Arc<Mutex<ClockGenerator>>,
     pub sau: Arc<Mutex<SauUnit>>,
     pub tau: Arc<Mutex<TauUnit>>,
     pub irq: Arc<Mutex<IrqController>>,
-    pub uart_tx: Arc<Mutex<ByteCapture>>,
 }
 
 impl Rl78G23Core {
@@ -94,16 +86,14 @@ impl Rl78G23Core {
         let clock = Arc::new(Mutex::new(ClockGenerator::new()));
         let outputs = clock.lock().expect("clock").outputs();
         let irq = Arc::new(Mutex::new(IrqController::new()));
-        let uart_tx = Arc::new(Mutex::new(ByteCapture::default()));
         let mut sau_unit = SauUnit::new(ctl.clone(), outputs.clone());
         let mut tau_unit = TauUnit::new(ctl, outputs);
-        wiring(&mut sau_unit, &mut tau_unit, &irq, &uart_tx);
+        wiring(&mut sau_unit, &mut tau_unit, &irq);
         Self {
             clock,
             sau: Arc::new(Mutex::new(sau_unit)),
             tau: Arc::new(Mutex::new(tau_unit)),
             irq,
-            uart_tx,
         }
     }
 }
@@ -114,7 +104,6 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.sau.lock().expect("sau"), bus);
         Resettable::reset(&mut *self.tau.lock().expect("tau"), bus);
         Resettable::reset(&mut *self.irq.lock().expect("irq"), bus);
-        Resettable::reset(&mut *self.uart_tx.lock().expect("tx"), bus);
     }
 }
 
@@ -215,7 +204,7 @@ impl HasMemoryMap for R7F100Gxl {
             MemoryMapBuilder::new()
                 .map(layout.rom_base, Box::new(Rom::erased(layout.rom_size)))?
                 .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
-                .alias(0xF3000, 0x3000, 3840)?
+                .alias(0xF3000, 0x3000, 3840)?,
         )
     }
 }

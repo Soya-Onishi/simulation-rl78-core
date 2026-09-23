@@ -22,12 +22,15 @@ pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 pub use peripherals::{
-    ByteCapture, ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqController, IrqId,
-    IrqRequest, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
+    ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqController, IrqId, IrqRequest,
+    R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
 };
 
+use std::sync::Arc;
+
 use sim_kernel::{
-    EventCtl, HasMemoryMap, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy,
+    BoardPorts, EventCtl, HasMemoryMap, InPort, Machine, MapError, MemoryBus, MemoryMapBuilder,
+    OutPort, Ram, Rom, UnmappedPolicy, Wire,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
@@ -85,19 +88,48 @@ pub struct G23MachineConfig {
     pub unmapped: UnmappedPolicy,
 }
 
+/// Wire board-edge UART0 (`uart0_tx` / `uart0_rx`) to SAU channel TX / RX.
+///
+/// Endpoint names match the cluster topology; this is board glue, not SoC wiring.
+fn wire_board_uart0(core: &Rl78G23Core) -> BoardPorts {
+    let uart_tx = OutPort::new("uart0_tx").expect("uart0_tx");
+    let mut uart_rx = InPort::new("uart0_rx").expect("uart0_rx");
+    {
+        let mut sau = core.sau.lock().expect("sau");
+        let tx = uart_tx.clone();
+        let _tx = Wire::new()
+            .source(sau.tx_source())
+            .sink(move |values, changed| tx.on_input(values, changed));
+    }
+    {
+        let sau = Arc::clone(&core.sau);
+        let _rx = Wire::new()
+            .source(uart_rx.port_mut())
+            .sink(move |values, changed| SauUnit::on_rx(&sau, 1, values, changed));
+    }
+    let mut ports = BoardPorts::new();
+    ports.insert_out(uart_tx).expect("uart0_tx");
+    ports.insert_in(uart_rx).expect("uart0_rx");
+    ports
+}
+
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
-pub fn g23_machine(cfg: G23MachineConfig) -> Machine<Rl78Cpu> {
+///
+/// Returns the machine plus board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx`).
+pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<Rl78Cpu>, BoardPorts) {
     let ctl = EventCtl::new();
     let part = R7F100Gxl::new(ctl.clone());
+    let ports = wire_board_uart0(&part.core);
     let bus = part
         .memory_map()
         .expect("g23 memory map")
         .policy(cfg.unmapped)
-        .build().unwrap();
-    let irq = std::sync::Arc::clone(&part.core.irq);
+        .build()
+        .unwrap();
+    let irq = Arc::clone(&part.core.irq);
     let machine = Machine::with_devices(Rl78Cpu::new(), bus, ctl, vec![Box::new(part)]);
     peripherals::irq::bind_cpu_line(irq);
-    machine
+    (machine, ports)
 }
 
 #[cfg(test)]
@@ -106,13 +138,32 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::{BusError, HasMemoryMap, Resettable, SourcePort, Tick, UartFrame, Wire};
+    use sim_kernel::{BoardPorts, BusError, HasMemoryMap, Resettable, Tick, UartFrame};
 
-    fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
+    fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus, BoardPorts) {
         let mut part = R7F100Gxl::new(ctl);
+        let ports = wire_board_uart0(&part.core);
         let mut bus = part.memory_map().unwrap().build().unwrap();
         Resettable::reset(&mut part, &mut bus);
-        (part, bus)
+        ports.clear_pending();
+        (part, bus, ports)
+    }
+
+    fn uart0_tx_bytes(ports: &BoardPorts) -> Vec<u8> {
+        ports
+            .out_port::<UartFrame>("uart0_tx")
+            .expect("uart0_tx")
+            .pending()
+            .into_iter()
+            .map(|f| (f.data & 0xFF) as u8)
+            .collect()
+    }
+
+    fn uart0_tx_frames(ports: &BoardPorts) -> Vec<UartFrame> {
+        ports
+            .out_port::<UartFrame>("uart0_tx")
+            .expect("uart0_tx")
+            .pending()
     }
 
     #[derive(Clone, Default)]
@@ -178,7 +229,7 @@ mod tests {
     #[test]
     fn g23_clock_and_timer_sfr_are_mapped() {
         let ctl = EventCtl::new();
-        let (_, mut bus) = g23_part(ctl);
+        let (_, mut bus, _ports) = g23_part(ctl);
         let mut ckc = [0u8; 1];
         bus.read(0xFFFA4, &mut ckc).unwrap();
         assert_eq!(ckc[0], 0);
@@ -225,7 +276,7 @@ mod tests {
     #[test]
     fn tau_interval_sets_overflow_after_tdr_counts() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl.clone());
+        let (part, mut bus, _ports) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -242,7 +293,7 @@ mod tests {
     #[test]
     fn tau_restart_after_tt_ignores_stale_deadline() {
         let ctl = EventCtl::new();
-        let (_, mut bus) = g23_part(ctl.clone());
+        let (_, mut bus, _ports) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -265,7 +316,7 @@ mod tests {
     #[test]
     fn tau_arms_when_fclk_returns() {
         let ctl = EventCtl::new();
-        let (_, mut bus) = g23_part(ctl.clone());
+        let (_, mut bus, _ports) = g23_part(ctl.clone());
         bus.write(0xFFFA1, &[0xC1]).unwrap();
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
@@ -282,23 +333,23 @@ mod tests {
     #[test]
     fn sau_uart_tx_emits_byte_after_frame_time() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl.clone());
+        let (_part, mut bus, ports) = g23_part(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
         bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
-        assert!(part.core.uart_tx.lock().unwrap().bytes().is_empty());
+        assert!(uart0_tx_bytes(&ports).is_empty());
         pump(&mut bus, &ctl, sim_kernel::Tick(624));
-        assert!(part.core.uart_tx.lock().unwrap().bytes().is_empty());
+        assert!(uart0_tx_bytes(&ports).is_empty());
         pump(&mut bus, &ctl, sim_kernel::Tick(625));
-        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"A");
+        assert_eq!(uart0_tx_bytes(&ports), b"A");
     }
 
     #[test]
     fn irq_reset_masks_if_until_mk_cleared() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl);
+        let (part, mut bus, _ports) = g23_part(ctl);
         let mut mk0 = [0u8; 2];
         bus.read(0xFFFE4, &mut mk0).unwrap();
         assert_eq!(mk0, [0xFF, 0xFF]);
@@ -313,7 +364,7 @@ mod tests {
     #[test]
     fn tau_interval_latches_inttm00() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl.clone());
+        let (part, mut bus, _ports) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -327,7 +378,7 @@ mod tests {
     #[test]
     fn sau_uart_tx_latches_intst0() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl.clone());
+        let (part, mut bus, _ports) = g23_part(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
@@ -355,13 +406,8 @@ mod tests {
         }
     }
 
-    fn bind_uart0_rx(part: &R7F100Gxl) -> SourcePort<UartFrame> {
-        let mut src = SourcePort::new();
-        let sau = Arc::clone(&part.core.sau);
-        let _wire = Wire::new()
-            .source(&mut src)
-            .sink(move |values, changed| SauUnit::on_rx(&sau, 1, values, changed));
-        src
+    fn uart0_rx(ports: &BoardPorts) -> &sim_kernel::InPort<UartFrame> {
+        ports.in_port::<UartFrame>("uart0_rx").expect("uart0_rx")
     }
 
     fn enable_uart0_rx(bus: &mut MemoryBus, scr: u16) {
@@ -372,14 +418,14 @@ mod tests {
     #[test]
     fn sau_uart_tx_capture_includes_frame_parameters() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl.clone());
+        let (_part, mut bus, ports) = g23_part(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
         bus.write(0xFFF10, &[b'A', 0x00]).unwrap();
         pump(&mut bus, &ctl, Tick(0));
         pump(&mut bus, &ctl, Tick(625));
-        let frames = part.core.uart_tx.lock().unwrap().frames().to_vec();
+        let frames = uart0_tx_frames(&ports);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0], matching_uart_frame(b'A'));
     }
@@ -387,7 +433,7 @@ mod tests {
     #[test]
     fn sau_uart_tx_second_sdr_write_starts_after_first_frame() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl.clone());
+        let (_part, mut bus, ports) = g23_part(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
@@ -395,15 +441,15 @@ mod tests {
         bus.write(0xFFF10, &[b'B', 0x00]).unwrap();
         pump(&mut bus, &ctl, Tick(0));
         pump(&mut bus, &ctl, Tick(624));
-        assert!(part.core.uart_tx.lock().unwrap().bytes().is_empty());
+        assert!(uart0_tx_bytes(&ports).is_empty());
         pump(&mut bus, &ctl, Tick(625));
-        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"A");
+        assert_eq!(uart0_tx_bytes(&ports), b"A");
         pump(&mut bus, &ctl, Tick(1249));
-        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"A");
+        assert_eq!(uart0_tx_bytes(&ports), b"A");
         pump(&mut bus, &ctl, Tick(1250));
-        assert_eq!(part.core.uart_tx.lock().unwrap().bytes(), b"AB");
+        assert_eq!(uart0_tx_bytes(&ports), b"AB");
         assert_eq!(
-            part.core.uart_tx.lock().unwrap().frames(),
+            uart0_tx_frames(&ports),
             [matching_uart_frame(b'A'), matching_uart_frame(b'B')]
         );
     }
@@ -411,10 +457,9 @@ mod tests {
     #[test]
     fn sau_uart_rx_loads_sdr_from_matching_frame() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_part(ctl);
         enable_uart0_rx(&mut bus, 0x4004);
-        let src = bind_uart0_rx(&part);
-        src.drive(matching_uart_frame(b'Z'));
+        uart0_rx(&ports).receive(matching_uart_frame(b'Z'));
         let mut sdr = [0u8; 2];
         bus.read(0xFFF12, &mut sdr).unwrap();
         assert_eq!(sdr[0], b'Z');
@@ -425,10 +470,9 @@ mod tests {
     #[test]
     fn sau_uart_rx_parity_mismatch_sets_pef_and_intsre() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_part(ctl);
         enable_uart0_rx(&mut bus, 0x4204);
-        let src = bind_uart0_rx(&part);
-        src.drive(matching_uart_frame(b'A'));
+        uart0_rx(&ports).receive(matching_uart_frame(b'A'));
         let mut ssr = [0u8; 2];
         bus.read(0xF0102, &mut ssr).unwrap();
         assert_eq!(ssr[0] & 0x02, 0x02);
@@ -439,12 +483,11 @@ mod tests {
     #[test]
     fn sau_uart_rx_bit_time_mismatch_sets_fef_and_intsre() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_part(ctl);
         enable_uart0_rx(&mut bus, 0x4004);
-        let src = bind_uart0_rx(&part);
         let mut frame = matching_uart_frame(b'A');
         frame.bit_time = Tick(1_000);
-        src.drive(frame);
+        uart0_rx(&ports).receive(frame);
         let mut ssr = [0u8; 2];
         bus.read(0xF0102, &mut ssr).unwrap();
         assert_eq!(ssr[0] & 0x04, 0x04);
@@ -455,11 +498,37 @@ mod tests {
     #[test]
     fn sau_uart_rx_error_with_eoc_suppresses_intsr() {
         let ctl = EventCtl::new();
-        let (part, mut bus) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_part(ctl);
         enable_uart0_rx(&mut bus, 0x4A04);
-        let src = bind_uart0_rx(&part);
-        src.drive(matching_uart_frame(b'A'));
+        uart0_rx(&ports).receive(matching_uart_frame(b'A'));
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
         assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
+    }
+
+    #[test]
+    fn uart_out_port_pending_loopback_to_sau_rx() {
+        let ctl = EventCtl::new();
+        let (part, mut bus, ports) = g23_part(ctl.clone());
+        bus.write(0xF0118, &[0x04, 0x80]).unwrap();
+        bus.write(0xF012A, &[0x01, 0x00]).unwrap();
+        bus.write(0xF0122, &[0x01, 0x00]).unwrap();
+        bus.write(0xFFF10, &[b'Q', 0x00]).unwrap();
+        pump(&mut bus, &ctl, Tick(0));
+        pump(&mut bus, &ctl, Tick(625));
+        let frames = uart0_tx_frames(&ports);
+        assert_eq!(frames, [matching_uart_frame(b'Q')]);
+
+        enable_uart0_rx(&mut bus, 0x4004);
+        for frame in ports
+            .out_port::<UartFrame>("uart0_tx")
+            .unwrap()
+            .drain_pending()
+        {
+            uart0_rx(&ports).receive(frame);
+        }
+        let mut sdr = [0u8; 2];
+        bus.read(0xFFF12, &mut sdr).unwrap();
+        assert_eq!(sdr[0], b'Q');
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
 }
