@@ -252,8 +252,13 @@ impl DataPlane for UartDataPlane {
             for frame in lane.port.drain_pending() {
                 for puber in &lane.pubs {
                     if let Err(err) = puber.send_copy(frame) {
-                        // Drop the frame: SHM pool exhaustion is rare with a
-                        // large enough ring; do not stall later frames.
+                        // Drop on failure and continue later frames. iceoryx
+                        // SendError here is typically publisher data-segment
+                        // exhaustion (fixed SHM pool), not host OOM; with the
+                        // default uart_ring_len (~1 ms at 4 µs/frame) that is
+                        // rare. Re-queuing would stall the TX path or reorder
+                        // characters if later frames were sent first. Board
+                        // shutdown on send failure is intentionally avoided.
                         eprintln!("uart tx try_send: {err:?}");
                     }
                 }
