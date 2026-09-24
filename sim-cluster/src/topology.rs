@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_READY_TIMEOUT_MS: u64 = 10_000;
 
 /// Default UART ring capacity (frames) when an edge omits `uart_ring_len`.
-pub const DEFAULT_UART_RING_LEN: u32 = 64;
+///
+/// Sized for ~1 ms of backlog at one frame per 4 µs of virtual time (250),
+/// rounded up to 256.
+pub const DEFAULT_UART_RING_LEN: u32 = 256;
 
 /// Payload carried on a board-edge endpoint / directed data edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -269,7 +272,7 @@ mod tests {
         assert_eq!(topo.margin_ns, 1000);
         assert_eq!(topo.headroom_threshold_ns, 200);
         assert_eq!(topo.ready_timeout_ms, DEFAULT_READY_TIMEOUT_MS);
-        assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[0]), 64);
+        assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[0]), 256);
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[1]), 128);
     }
 

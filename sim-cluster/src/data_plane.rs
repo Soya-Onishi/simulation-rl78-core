@@ -249,26 +249,14 @@ impl DataPlane for UartDataPlane {
 
     fn pump_tx(&mut self) -> Result<(), DataPlaneError> {
         for lane in &self.tx {
-            let frames = lane.port.drain_pending();
-            let mut idx = 0;
-            while idx < frames.len() {
-                let frame = frames[idx];
-                let mut ok = true;
+            for frame in lane.port.drain_pending() {
                 for puber in &lane.pubs {
                     if let Err(err) = puber.send_copy(frame) {
+                        // Drop the frame: SHM pool exhaustion is rare with a
+                        // large enough ring; do not stall later frames.
                         eprintln!("uart tx try_send: {err:?}");
-                        ok = false;
-                        break;
                     }
                 }
-                if !ok {
-                    // Keep order: this frame and any not-yet-sent frames stay pending.
-                    for frame in frames.into_iter().skip(idx) {
-                        lane.port.push_pending(frame);
-                    }
-                    break;
-                }
-                idx += 1;
             }
         }
         Ok(())
