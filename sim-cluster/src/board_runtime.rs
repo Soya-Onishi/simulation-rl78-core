@@ -237,6 +237,11 @@ pub fn run_board<C: Cpu>(
                         &mut last_time_report,
                     )?;
                     if let Some(host_reason) = cluster_host_stop_reason(&reason) {
+                        // Flush OutPort pending into IPC before leaving the loop;
+                        // otherwise a Step/breakpoint after SAU TX drops the frame.
+                        for plane in &mut data_planes {
+                            plane.pump_tx()?;
+                        }
                         control.publish(&ControlToArbiter::HostStop {
                             from: board_hash,
                             reason: host_reason,

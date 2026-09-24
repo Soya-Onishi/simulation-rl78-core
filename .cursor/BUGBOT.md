@@ -1,1 +1,1 @@
-- Write comments in **Japanese**
+- Keep code comments and rustdoc in **English** (README / issue notes may be Japanese).

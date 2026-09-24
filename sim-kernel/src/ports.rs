@@ -192,6 +192,16 @@ impl<T> OutPort<T> {
     pub fn clear_pending(&self) {
         self.inner.pending.lock().expect("out port pending").clear();
     }
+
+    /// Re-queues a value previously taken from [`Self::drain_pending`] (e.g. after
+    /// a transient IPC send failure).
+    pub fn push_pending(&self, value: T) {
+        self.inner
+            .pending
+            .lock()
+            .expect("out port pending")
+            .push(value);
+    }
 }
 
 impl<T: Clone> OutPort<T> {

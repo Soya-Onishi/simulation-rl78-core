@@ -195,7 +195,9 @@ impl UartDataPlaneMap {
 
         let mut tx = Vec::with_capacity(self.pending_tx.len());
         for pending in self.pending_tx {
-            let port = ports.out_port::<UartFrame>(&pending.ep).cloned()
+            let port = ports
+                .out_port::<UartFrame>(&pending.ep)
+                .cloned()
                 .ok_or_else(|| {
                     DataPlaneError::Message(format!(
                         "uart tx: no OutPort for endpoint `{}`",
@@ -247,12 +249,26 @@ impl DataPlane for UartDataPlane {
 
     fn pump_tx(&mut self) -> Result<(), DataPlaneError> {
         for lane in &self.tx {
-            for frame in lane.port.drain_pending() {
+            let frames = lane.port.drain_pending();
+            let mut idx = 0;
+            while idx < frames.len() {
+                let frame = frames[idx];
+                let mut ok = true;
                 for puber in &lane.pubs {
                     if let Err(err) = puber.send_copy(frame) {
                         eprintln!("uart tx try_send: {err:?}");
+                        ok = false;
+                        break;
                     }
                 }
+                if !ok {
+                    // Keep order: this frame and any not-yet-sent frames stay pending.
+                    for frame in frames.into_iter().skip(idx) {
+                        lane.port.push_pending(frame);
+                    }
+                    break;
+                }
+                idx += 1;
             }
         }
         Ok(())
