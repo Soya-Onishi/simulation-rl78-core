@@ -237,11 +237,6 @@ pub fn run_board<C: Cpu>(
                         &mut last_time_report,
                     )?;
                     if let Some(host_reason) = cluster_host_stop_reason(&reason) {
-                        // Flush OutPort pending into IPC before leaving the loop;
-                        // otherwise a Step/breakpoint after SAU TX drops the frame.
-                        for plane in &mut data_planes {
-                            plane.pump_tx()?;
-                        }
                         control.publish(&ControlToArbiter::HostStop {
                             from: board_hash,
                             reason: host_reason,
@@ -249,7 +244,9 @@ pub fn run_board<C: Cpu>(
                         eprintln!(
                             "board[{board_id}]: HostStop ({host_reason}) at vt={virtual_time_ns}"
                         );
-                        return Ok(());
+                        // Stay in the loop: sim is Stopped so the next iteration
+                        // skips guest work; this iteration still falls through to
+                        // pump_tx below. ClusterStop moves NodeState to Stopped.
                     }
                     // Guest Halt is not surfaced as Response::Stopped anymore.
                     eprintln!("board[{board_id}]: unexpected non-host stop {reason:?}");
