@@ -13,12 +13,16 @@
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
+use iceoryx2_bb_derive_macros::ZeroCopySend;
+use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
+
 /// Nanoseconds in one SI second. Virtual time and [`Tick`] durations use this
 /// scale (same as QEMU `NANOSECONDS_PER_SECOND`).
 pub const NS_PER_SEC: u64 = 1_000_000_000;
 
 /// Monotonic virtual time, or a duration, in nanoseconds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, ZeroCopySend)]
 pub struct Tick(pub u64);
 
 impl Tick {

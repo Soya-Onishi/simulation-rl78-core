@@ -7,7 +7,7 @@
 use std::env;
 use std::process;
 
-use rl78_core::{g23_machine, G23MachineConfig};
+use rl78_core::{G23MachineConfig, g23_machine};
 use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_board};
 
 fn main() {

@@ -30,9 +30,14 @@ pub enum BusError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MapError {
     EmptyDevice,
-    Overlap { base: Addr, size: u64 },
+    Overlap {
+        base: Addr,
+        size: u64,
+    },
     /// [`MemoryMapBuilder::alias`] `target` hits no mapped region.
-    AliasTargetMissing { target: Addr },
+    AliasTargetMissing {
+        target: Addr,
+    },
     /// Alias window starting at `target` with `size` exceeds the hit region.
     AliasOutOfRange {
         target: Addr,
@@ -42,7 +47,9 @@ pub enum MapError {
     },
     /// Alias chain loops back on itself (detected in [`MemoryMapBuilder::build`]).
     /// `path` lists guest bases in visit order, ending with the repeated base.
-    AliasCycle { path: Vec<Addr> },
+    AliasCycle {
+        path: Vec<Addr>,
+    },
 }
 
 impl fmt::Display for BusError {
@@ -248,14 +255,10 @@ impl MemoryBus {
                 target_base,
                 target_offset,
             } => {
-                let target_idx = self.find_base(*target_base).ok_or(BusError::Unmapped {
-                    addr,
-                    len,
-                })?;
-                Ok((
-                    target_idx,
-                    target_offset.saturating_add(offset_in_window),
-                ))
+                let target_idx = self
+                    .find_base(*target_base)
+                    .ok_or(BusError::Unmapped { addr, len })?;
+                Ok((target_idx, target_offset.saturating_add(offset_in_window)))
             }
         }
     }
@@ -353,12 +356,7 @@ impl MemoryMapBuilder {
     /// `target` is resolved with a region hit test (`target_base + offset`).
     /// Alias-of-alias is allowed; [`Self::build`] flattens chains and rejects
     /// cycles.
-    pub fn alias(
-        mut self,
-        alias_base: Addr,
-        target: Addr,
-        size: u64,
-    ) -> Result<Self, MapError> {
+    pub fn alias(mut self, alias_base: Addr, target: Addr, size: u64) -> Result<Self, MapError> {
         if size == 0 {
             return Err(MapError::EmptyDevice);
         }
@@ -487,12 +485,11 @@ impl MemoryMapBuilder {
                     }
                     path.push(base);
                     accum = accum.saturating_add(*target_offset);
-                    idx = regions
-                        .iter()
-                        .position(|r| r.base == *target_base)
-                        .ok_or(MapError::AliasTargetMissing {
+                    idx = regions.iter().position(|r| r.base == *target_base).ok_or(
+                        MapError::AliasTargetMissing {
                             target: target_base.saturating_add(*target_offset),
-                        })?;
+                        },
+                    )?;
                 }
             }
         }
@@ -647,7 +644,8 @@ mod tests {
         let mut bus = MemoryMapBuilder::new()
             .map(0x1000, Box::new(Ram::new(16)))
             .unwrap()
-            .build().unwrap();
+            .build()
+            .unwrap();
         bus.write(0x1004, &[1, 2, 3, 4]).unwrap();
         let mut buf = [0u8; 4];
         bus.read(0x1004, &mut buf).unwrap();
@@ -659,7 +657,8 @@ mod tests {
         let mut bus = MemoryMapBuilder::new()
             .map(0, Box::new(Rom::from_bytes(vec![0xAA, 0xBB])))
             .unwrap()
-            .build().unwrap();
+            .build()
+            .unwrap();
         assert!(matches!(
             bus.write(0, &[0x00]),
             Err(BusError::ReadOnly { .. })
@@ -674,7 +673,8 @@ mod tests {
         let mut bus = MemoryMapBuilder::new()
             .map(0x8000, Box::new(Rom::from_bytes(vec![0; 16])))
             .unwrap()
-            .build().unwrap();
+            .build()
+            .unwrap();
         assert_eq!(
             bus.write(0x8004, &[0xFF]),
             Err(BusError::ReadOnly { addr: 0x8004 })
@@ -694,7 +694,10 @@ mod tests {
 
     #[test]
     fn unmapped_trap_policy() {
-        let mut bus = MemoryMapBuilder::new().policy(UnmappedPolicy::Trap).build().unwrap();
+        let mut bus = MemoryMapBuilder::new()
+            .policy(UnmappedPolicy::Trap)
+            .build()
+            .unwrap();
         let _ = bus.write(0x10, &[0xFF]);
         let trap = bus.take_trap().unwrap();
         assert!(trap.write);
@@ -717,7 +720,8 @@ mod tests {
         let mut bus = MemoryMapBuilder::new()
             .map(0x1000, Box::new(Rom::new(16)))
             .unwrap()
-            .build().unwrap();
+            .build()
+            .unwrap();
         bus.load(0x1000, &[1, 2, 3, 4]).unwrap();
         let mut buf = [0u8; 4];
         bus.read(0x1000, &mut buf).unwrap();
@@ -729,7 +733,8 @@ mod tests {
         let mut bus = MemoryMapBuilder::new()
             .map(0x1000, Box::new(Ram::new(16)))
             .unwrap()
-            .build().unwrap();
+            .build()
+            .unwrap();
         assert!(matches!(
             bus.load(0x1000, &[1, 2, 3, 4]),
             Err(BusError::NotLoadable { addr: 0x1000 })

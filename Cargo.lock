@@ -914,6 +914,8 @@ name = "sim-kernel"
 version = "0.1.0"
 dependencies = [
  "gdbstub",
+ "iceoryx2-bb-derive-macros",
+ "iceoryx2-bb-elementary-traits",
  "typenum",
 ]
 
