@@ -94,7 +94,7 @@ pub trait MemoryMapped: Send {
     ///
     /// The pointer must stay valid for the lifetime of the mapping (the device
     /// `Vec<u8>` owned by the bus). Architecture CPUs call this from
-    /// [`crate::Cpu::bind_memory`].
+    /// [`crate::Core::bind_memory`].
     fn host_ptr(&mut self) -> Option<*mut u8>;
 
     /// Image / flash load path. Only ROM-like devices accept this; others return

@@ -2,12 +2,12 @@
 //!
 //! Same role as QEMU's virtual clock: peripheral timers and other deadline work
 //! schedule against it (cf. `timer_init_ns`). CPU progress is converted with
-//! [`crate::SimConfig::ns_per_instruction`] so instruction retirement and
-//! nanosecond timers share one timeline.
+//! [`crate::Cpu::instruction_period`] so instruction retirement and nanosecond
+//! timers share one timeline.
 //!
 //! [`Tick`] is both an **instant** (`VirtualClock::now`, event deadlines) and a
 //! **duration** on the same nanosecond scale (timer periods, `max_quantum`,
-//! `ns_per_instruction`). A separate `DurationNs` type is not used: durations
+//! instruction period). A separate `DurationNs` type is not used: durations
 //! add to instants with saturating `Add` / [`Tick::saturating_add`].
 
 use std::fmt;
@@ -55,7 +55,7 @@ impl Tick {
         Self(self.0.saturating_mul(n))
     }
 
-    /// Floor-divide two durations (`budget / ns_per_instruction`).
+    /// Floor-divide two durations (`budget / instruction_period`).
     ///
     /// A zero divisor yields `0` so a misconfigured quantum cannot request an
     /// unbounded instruction count.

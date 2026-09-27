@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 
 use crate::breakpoint::Breakpoint;
-use crate::bus::{Addr, BusError, MemoryBus};
+use crate::bus::{Addr, BusError, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder};
+use crate::clock::Tick;
 use crate::command::SimError;
-use crate::cpu::{Cpu, Quantum, RegId};
+use crate::cpu::{Core, Cpu, Quantum, RegId};
 use crate::reset::Resettable;
 use crate::stop::StopReason;
 
@@ -27,7 +28,7 @@ pub enum ScriptOp {
 }
 
 /// Deterministic CPU for kernel unit tests.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ScriptedCpu {
     pc: Addr,
     regs: HashMap<u32, u64>,
@@ -36,6 +37,9 @@ pub struct ScriptedCpu {
     breakpoints: Vec<Breakpoint>,
     /// Address of the bus bound for this quantum (`bind_memory`). Sim-thread only.
     bus_addr: usize,
+    /// Virtual time charged per retired instruction. Clocked SoCs override this
+    /// via [`Cpu::instruction_period`]; the scripted core has no clock.
+    period: Tick,
 }
 
 impl ScriptedCpu {
@@ -48,7 +52,15 @@ impl ScriptedCpu {
             idx: 0,
             breakpoints: Vec::new(),
             bus_addr: 0,
+            period: Tick(1),
         }
+    }
+
+    /// Override [`Cpu::instruction_period`] for quantum scaling tests.
+    #[must_use]
+    pub fn with_period(mut self, period: Tick) -> Self {
+        self.period = period;
+        self
     }
 
     #[must_use]
@@ -80,7 +92,29 @@ impl Resettable for ScriptedCpu {
     }
 }
 
+impl HasMemoryMap for ScriptedCpu {
+    fn memory_map(&self) -> Result<MemoryMapBuilder, MapError> {
+        Ok(MemoryMapBuilder::new())
+    }
+}
+
 impl Cpu for ScriptedCpu {
+    type Core = Self;
+
+    fn core(&self) -> &Self {
+        self
+    }
+
+    fn core_mut(&mut self) -> &mut Self {
+        self
+    }
+
+    fn instruction_period(&self) -> Option<Tick> {
+        Some(self.period)
+    }
+}
+
+impl Core for ScriptedCpu {
     fn bind_memory(&mut self, bus: &mut MemoryBus) {
         self.bus_addr = bus as *mut MemoryBus as usize;
     }

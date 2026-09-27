@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::clock::Tick;
 use crate::command::{Command, InspectResult, Response, SimError};
-use crate::cpu::Cpu;
+use crate::cpu::{Core, Cpu};
 use crate::event::EventCtx;
 use crate::machine::Machine;
 use crate::stop::StopReason;
@@ -19,18 +19,12 @@ pub const DEFAULT_MAX_QUANTUM: Tick = Tick(10_000);
 pub struct SimConfig {
     /// Cap on virtual time advanced per [`Simulator::poll`].
     pub max_quantum: Tick,
-    /// Virtual time charged per retired instruction (icount scaling).
-    ///
-    /// Milestone 1 defaults to `Tick(1)` (1 insn = 1 ns). Real MCU timing
-    /// models can raise this without changing the event/timer API.
-    pub ns_per_instruction: Tick,
 }
 
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
             max_quantum: DEFAULT_MAX_QUANTUM,
-            ns_per_instruction: Tick(1),
         }
     }
 }
@@ -178,7 +172,6 @@ impl<C: Cpu> Simulator<C> {
             return None;
         }
 
-        let ns_per_insn = self.cfg.ns_per_instruction.max(Tick(1));
         let budget_ns = {
             let mut budget = self
                 .machine
@@ -192,6 +185,28 @@ impl<C: Cpu> Simulator<C> {
             }
             budget
         };
+        let Some(ns_per_insn) = self
+            .machine
+            .cpu()
+            .instruction_period()
+            .filter(|tick| !tick.is_zero())
+        else {
+            // Clock stopped: retire nothing, but still reach the next deadline.
+            if budget_ns.is_zero() {
+                return None;
+            }
+            self.machine.advance_clock(budget_ns);
+            return self.fire_due_events();
+        };
+        if ns_per_insn > self.cfg.max_quantum {
+            // One instruction cannot fit in a quantum, so the CPU would never retire.
+            self.step_once = false;
+            self.state = SimState::Stopped;
+            return Some(Response::Error(SimError::InstructionPeriodExceedsQuantum {
+                period: ns_per_insn,
+                max_quantum: self.cfg.max_quantum,
+            }));
+        }
         let max_instructions = if self.step_once {
             1
         } else {
@@ -200,9 +215,10 @@ impl<C: Cpu> Simulator<C> {
                 .min(u64::from(u32::MAX)) as u32
         };
         if max_instructions == 0 {
-            // Less than one instruction remains before the next deadline (or the
-            // quantum cap). Advancing by that remainder lets due events fire;
-            // returning without advancing would spin forever while Running.
+            // Less than one instruction remains before the next deadline or time
+            // ceiling. The period itself fits in `max_quantum` (checked above).
+            // Advancing by that remainder lets due events fire; returning without
+            // advancing would spin forever while Running.
             if budget_ns.is_zero() {
                 return None;
             }

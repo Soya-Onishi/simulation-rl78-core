@@ -2,8 +2,8 @@
 
 #![allow(dead_code)]
 
-use rl78_core::IrqId;
-use sim_kernel::{Cpu, EventCtx, Machine, RegId, Tick};
+use rl78_core::{IrqId, R7F100Gxl};
+use sim_kernel::{Core, Cpu, EventCtx, Machine, RegId, Tick};
 
 pub const REG_PC: RegId = RegId(8);
 pub const REG_SP: RegId = RegId(9);
@@ -14,7 +14,7 @@ pub const ISR_ST0: u64 = 0x0300;
 pub const MAIN: u64 = 0x0100;
 pub const SP: u64 = 0xFE00;
 
-pub fn fire_due(machine: &mut Machine<rl78_core::Rl78Cpu>) {
+pub fn fire_due(machine: &mut Machine<R7F100Gxl>) {
     loop {
         let now = machine.clock().now();
         let due = machine.events_mut().pop_due(now);
@@ -30,7 +30,7 @@ pub fn fire_due(machine: &mut Machine<rl78_core::Rl78Cpu>) {
     }
 }
 
-pub fn load_vectors_and_idle(machine: &mut Machine<rl78_core::Rl78Cpu>) {
+pub fn load_vectors_and_idle(machine: &mut Machine<R7F100Gxl>) {
     let mut image = vec![0u8; 0x302];
     image[0] = MAIN as u8;
     image[1] = (MAIN >> 8) as u8;
@@ -51,19 +51,19 @@ pub fn load_vectors_and_idle(machine: &mut Machine<rl78_core::Rl78Cpu>) {
     machine.bus_mut().load(0, &image).unwrap();
 }
 
-pub fn arm_cpu(machine: &mut Machine<rl78_core::Rl78Cpu>) {
-    machine.cpu_mut().set_pc(MAIN);
+pub fn arm_cpu(machine: &mut Machine<R7F100Gxl>) {
+    machine.cpu_mut().core_mut().set_pc(MAIN);
     machine.write_reg(REG_SP, SP).unwrap();
     machine.write_reg(REG_IE, 1).unwrap();
 }
 
-pub fn if0(machine: &mut Machine<rl78_core::Rl78Cpu>) -> u16 {
+pub fn if0(machine: &mut Machine<R7F100Gxl>) -> u16 {
     let mut buf = [0u8; 2];
     machine.bus_mut().read(0xFFFE0, &mut buf).unwrap();
     u16::from_le_bytes(buf)
 }
 
-pub fn expire_tau0(machine: &mut Machine<rl78_core::Rl78Cpu>) {
+pub fn expire_tau0(machine: &mut Machine<R7F100Gxl>) {
     machine.bus_mut().write(0xFFF18, &[31, 0]).unwrap();
     machine.bus_mut().write(0xF01B2, &[0x01, 0x00]).unwrap();
     fire_due(machine);

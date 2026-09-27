@@ -73,6 +73,11 @@ pub enum SimError {
     UnknownRegister(RegId),
     UnknownBreakpoint(BreakpointId),
     Bus(BusError),
+    /// One instruction costs more virtual time than [`crate::SimConfig::max_quantum`].
+    InstructionPeriodExceedsQuantum {
+        period: Tick,
+        max_quantum: Tick,
+    },
 }
 
 /// Notifications and command completions produced by the simulation thread.
@@ -121,6 +126,13 @@ impl fmt::Display for SimError {
             Self::UnknownRegister(id) => write!(f, "unknown register {}", id.0),
             Self::UnknownBreakpoint(id) => write!(f, "unknown breakpoint {}", id.0),
             Self::Bus(err) => write!(f, "{err}"),
+            Self::InstructionPeriodExceedsQuantum {
+                period,
+                max_quantum,
+            } => write!(
+                f,
+                "instruction period {period} exceeds max quantum {max_quantum}"
+            ),
         }
     }
 }

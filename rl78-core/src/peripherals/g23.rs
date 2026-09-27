@@ -3,9 +3,11 @@
 use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
-    Addr, Device, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram, Resettable,
-    Rom, Wire,
+    Addr, Cpu, Device, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram,
+    Resettable, Rom, Tick, Wire,
 };
+
+use crate::cpu::Rl78Cpu;
 
 use crate::map::MemoryLayout;
 use crate::peripherals::SemihostingUnit;
@@ -82,6 +84,8 @@ pub struct Rl78G23Core {
     pub tau: Arc<Mutex<TauUnit>>,
     pub semihosting: Arc<Mutex<SemihostingUnit>>,
     pub irq: Arc<Mutex<IrqController>>,
+    /// RL78 instruction engine. Created in [`Self::new`]. tlib allows one live instance.
+    core: Rl78Cpu,
 }
 
 impl Rl78G23Core {
@@ -93,7 +97,7 @@ impl Rl78G23Core {
         let mut sau_unit = SauUnit::new(ctl.clone(), outputs.clone());
         let mut tau_unit = TauUnit::new(ctl.clone(), outputs);
         let semihosting_unit = SemihostingUnit::new(ctl);
-
+        let core = Rl78Cpu::new();
         wiring(&mut sau_unit, &mut tau_unit, &irq);
 
         Self {
@@ -102,6 +106,7 @@ impl Rl78G23Core {
             tau: Arc::new(Mutex::new(tau_unit)),
             semihosting: Arc::new(Mutex::new(semihosting_unit)),
             irq,
+            core,
         }
     }
 }
@@ -113,6 +118,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.tau.lock().expect("tau"), bus);
         Resettable::reset(&mut *self.irq.lock().expect("irq"), bus);
         Resettable::reset(&mut *self.semihosting.lock().expect("semihosting"), bus);
+        Resettable::reset(&mut self.core, bus);
     }
 }
 
@@ -205,6 +211,22 @@ impl Resettable for R7F100Gxl {
             .expect("clock")
             .set_option_byte(option);
         Resettable::reset(&mut self.core, bus);
+    }
+}
+
+impl Cpu for R7F100Gxl {
+    type Core = Rl78Cpu;
+
+    fn core(&self) -> &Rl78Cpu {
+        &self.core.core
+    }
+
+    fn core_mut(&mut self) -> &mut Rl78Cpu {
+        &mut self.core.core
+    }
+
+    fn instruction_period(&self) -> Option<Tick> {
+        self.core.clock.lock().expect("clock").f_clk().period()
     }
 }
 

@@ -119,7 +119,7 @@ impl crate::Resettable for ZeroInsnCpu {
     fn reset(&mut self, _bus: &mut MemoryBus) {}
 }
 
-impl crate::Cpu for ZeroInsnCpu {
+impl crate::Core for ZeroInsnCpu {
     fn bind_memory(&mut self, _bus: &mut MemoryBus) {}
 
     fn run_quantum(&mut self, _max_instructions: u32) -> crate::Quantum {
@@ -144,6 +144,28 @@ impl crate::Cpu for ZeroInsnCpu {
     fn set_pc(&mut self, _pc: crate::Addr) {}
 }
 
+impl crate::HasMemoryMap for ZeroInsnCpu {
+    fn memory_map(&self) -> Result<crate::MemoryMapBuilder, crate::MapError> {
+        Ok(crate::MemoryMapBuilder::new())
+    }
+}
+
+impl crate::Cpu for ZeroInsnCpu {
+    type Core = Self;
+
+    fn core(&self) -> &Self {
+        self
+    }
+
+    fn core_mut(&mut self) -> &mut Self {
+        self
+    }
+
+    fn instruction_period(&self) -> Option<crate::Tick> {
+        Some(crate::Tick(1))
+    }
+}
+
 #[test]
 fn zero_instruction_quantum_without_stop_stays_running() {
     let mut sim = Simulator::new(
@@ -166,7 +188,6 @@ fn quantum_does_not_pass_next_event() {
         machine,
         SimConfig {
             max_quantum: Tick(50),
-            ..SimConfig::default()
         },
     );
     sim.command(Command::Start);
@@ -186,7 +207,6 @@ fn event_halt_stays_running_without_response() {
         machine,
         SimConfig {
             max_quantum: Tick(50),
-            ..SimConfig::default()
         },
     );
     sim.command(Command::Start);
@@ -199,17 +219,11 @@ fn event_halt_stays_running_without_response() {
 fn sub_instruction_remainder_advances_to_event() {
     // Event at 5ns with 10ns/insn: first poll cannot retire an instruction, but
     // must still advance to the deadline so the event fires (no spin).
-    let mut machine = empty_machine(ScriptedCpu::nops(100));
+    let mut machine = empty_machine(ScriptedCpu::nops(100).with_period(Tick(10)));
     machine
         .events_mut()
         .schedule(Tick(5), Box::new(ExternalStopAtFire));
-    let mut sim = Simulator::new(
-        machine,
-        SimConfig {
-            ns_per_instruction: Tick(10),
-            ..SimConfig::default()
-        },
-    );
+    let mut sim = Simulator::new(machine, SimConfig::default());
     sim.command(Command::Start);
     assert_eq!(
         sim.poll(),
@@ -296,7 +310,6 @@ fn breakpoint_reported_by_cpu_stop_reason() {
         empty_machine(ScriptedCpu::new(vec![ScriptOp::SetPc(0x100)])),
         SimConfig {
             max_quantum: Tick(1),
-            ..SimConfig::default()
         },
     );
     let Response::Inspect(InspectResult::Breakpoint { id }) =
@@ -311,23 +324,39 @@ fn breakpoint_reported_by_cpu_stop_reason() {
 }
 
 #[test]
-fn ns_per_instruction_scales_virtual_time() {
+fn instruction_period_scales_virtual_time() {
     let mut sim = Simulator::new(
-        empty_machine(ScriptedCpu::new(vec![
-            ScriptOp::Nop,
-            ScriptOp::Nop,
-            ScriptOp::Halt,
-        ])),
-        SimConfig {
-            ns_per_instruction: Tick(10),
-            ..SimConfig::default()
-        },
+        empty_machine(
+            ScriptedCpu::new(vec![ScriptOp::Nop, ScriptOp::Nop, ScriptOp::Halt])
+                .with_period(Tick(10)),
+        ),
+        SimConfig::default(),
     );
     sim.command(Command::Start);
     assert_eq!(sim.poll(), None);
     assert_eq!(sim.state(), SimState::Running);
     // 3 instructions × 10 ns
     assert_eq!(sim.machine().clock().now(), Tick(30));
+}
+
+#[test]
+fn instruction_period_longer_than_max_quantum_stops_with_error() {
+    let mut sim = Simulator::new(
+        empty_machine(ScriptedCpu::nops(8).with_period(Tick(10_001))),
+        SimConfig {
+            max_quantum: Tick(10_000),
+        },
+    );
+    sim.command(Command::Start);
+    assert_eq!(
+        sim.poll(),
+        Some(Response::Error(SimError::InstructionPeriodExceedsQuantum {
+            period: Tick(10_001),
+            max_quantum: Tick(10_000),
+        }))
+    );
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.machine().clock().now(), Tick::ZERO);
 }
 
 #[test]
@@ -451,7 +480,6 @@ fn spawn_start_stop_quit() {
         empty_machine(ScriptedCpu::nops(1_000_000)),
         SimConfig {
             max_quantum: Tick(64),
-            ..SimConfig::default()
         },
     );
     ctrl.start().unwrap();

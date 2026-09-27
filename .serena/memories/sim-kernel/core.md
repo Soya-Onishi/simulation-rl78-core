@@ -3,13 +3,13 @@
 Arch-independent simulation kernel crate.
 
 ## Modules
-- `machine`: `Machine<C: Cpu>` — CPU + boxed `MemoryBus` + `VirtualClock` + `EventQueue` + breakpoints; exclusive to sim thread.
+- `machine`: `Machine<C: Cpu>` — SoC `Cpu` + boxed `MemoryBus` + `VirtualClock` + `EventQueue` + breakpoints; exclusive to sim thread. `Cpu` owns an instruction `Core`. Extra `Device`s are board peripherals, not the SoC.
 - `wiring`: `Wire<T, Sinks, Sources>` (typenum; 1-N or N-1) / `SourcePort<T>`. Ports hold the wire `Arc`. `drive(value)` invokes `'static` sink closures immediately (closures capture sink-side components). Combinational chaining is allowed. Loop detection is not implemented.
 - `ports`: `InPort<T>` / `OutPort<T>` board-edge endpoints (topology `In`/`Out`). Aggregated in `BoardPorts`. Process-unique `PortId` (never reused). Endpoint names are unique within a `BoardPorts` instance (not process-global); drop the board to rebuild with the same names. `OutPort` is `Clone` (shared TX queue for Wire / data-plane). `InPort::receive` drives the in-board `SourcePort`; `OutPort::on_input` / `drain_pending` capture TX. IPC sockets are out of scope.
-- `sim`: `Simulator`, `spawn` → `(SimControl, SimEvents)` mpsc; default quantum `DEFAULT_MAX_QUANTUM` = 10_000 ns, `ns_per_instruction = 1`. `SimControl::subscribe` fans out `Response` for CLI + GDB. Starts in `Stopped` (virtual time does not advance until `Start`/`Step`).
+- `sim`: `Simulator`, `spawn` → `(SimControl, SimEvents)` mpsc; default quantum cap `DEFAULT_MAX_QUANTUM` = 10_000 ns. Instruction time comes from `Cpu::instruction_period` (`None` = clock stopped: no retirement, advance to the next deadline). `SimControl::subscribe` fans out `Response` for CLI + GDB. Starts in `Stopped` (virtual time does not advance until `Start`/`Step`).
 - `gdb`: QEMU-style GDB stub via the `gdbstub` crate (`listen_gdb`, `parse_gdb_dev`). `SimGdbTarget` implements `Target` / resume / SW breakpoints over `Command`/`Response`. Does **not** send `NotifyHalt`. `tcp::PORT` binds `0.0.0.0`.
 - `bus`: `MemoryMapped`, `MemoryBus`, `MemoryMapBuilder` (`map` / `alias` / `merge` / `policy`), `Rom`/`Ram`, `UnmappedPolicy`. `alias(alias_base, target, size)` takes an absolute guest `target` (hit-tested to a region = base+offset); alias-of-alias allowed; `build() -> Result` flattens chains and returns `MapError::AliasCycle` on loops.
-- `cpu`: `Cpu` trait, `Quantum`, `PendingStop`, `TlibExit`, `map_tlib_exit` / `resolve_after_tlib_execute`.
+- `cpu`: `Core` (instruction engine: `run_quantum`, regs, PC, breakpoints) and `Cpu` (`Resettable` + `HasMemoryMap`, owns a `Core`, `instruction_period`). `Quantum`, `PendingStop`, `TlibExit`, `map_tlib_exit` / `resolve_after_tlib_execute`.
 - `command`: `Command` / `Response` / inspect surface. `NotifyHalt` is a no-op placeholder — future kernel stop-commit hook for multi-board arbiter; must **not** cluster-halt on guest-local `StopReason::Halt` (RL78 STOP / WFI).
 - `clock` / `event` / `stop` / `breakpoint`: virtual time, scheduled events, stop reasons, BP store. `EventCtx` is bus + stop only.
 - `testing` (cfg test): fake CPU for kernel unit tests.

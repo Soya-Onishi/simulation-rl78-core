@@ -6,7 +6,7 @@ use crate::breakpoint::BreakpointStore;
 use crate::bus::{Addr, BusError, MemoryBus};
 use crate::clock::{Tick, VirtualClock};
 use crate::command::SimError;
-use crate::cpu::{Cpu, FirmwareError, RegId};
+use crate::cpu::{Core, Cpu, FirmwareError, RegId};
 use crate::event::{EventCtl, EventQueue};
 use crate::reset::Device;
 
@@ -15,11 +15,12 @@ use crate::reset::Device;
 /// The memory map is finished before construction: pass a [`MemoryBus`] built
 /// with [`crate::MemoryMapBuilder`], rather than mutating regions afterward.
 /// The bus is heap-allocated so its address stays stable across `Machine` moves
-/// after the one-time [`Cpu::bind_memory`] at construction.
+/// after the one-time [`Core::bind_memory`] at construction.
 ///
-/// Logical devices (SoC parts, board peripherals) are kept separately from the
-/// bus so [`Self::reset`] can hold-reset each device once, even when its MMIO
-/// is split across multiple mapped regions.
+/// `cpu` is the SoC ([`Cpu`]): it owns the instruction [`Core`] and, for a clocked
+/// part, the frequency used to size quanta. Extra [`Device`]s are board peripherals
+/// kept separately from the bus so [`Self::reset`] can hold-reset each one once,
+/// even when its MMIO is split across multiple mapped regions.
 pub struct Machine<C: Cpu> {
     cpu: C,
     bus: Box<MemoryBus>,
@@ -45,7 +46,7 @@ impl<C: Cpu> Machine<C> {
         devices: Vec<Box<dyn Device>>,
     ) -> Self {
         let mut bus = Box::new(bus);
-        cpu.bind_memory(bus.as_mut());
+        cpu.core_mut().bind_memory(bus.as_mut());
         ctl.set_now(Tick::ZERO);
         Self {
             cpu,
@@ -88,9 +89,9 @@ impl<C: Cpu> Machine<C> {
         &mut self.bus
     }
 
-    /// Load guest firmware bytes via [`Cpu::load_firmware`].
+    /// Load guest firmware bytes via [`Core::load_firmware`].
     pub fn load_firmware(&mut self, image: &[u8]) -> Result<(), FirmwareError> {
-        self.cpu.load_firmware(self.bus.as_mut(), image)
+        self.cpu.core_mut().load_firmware(self.bus.as_mut(), image)
     }
 
     #[must_use]
@@ -117,11 +118,11 @@ impl<C: Cpu> Machine<C> {
     }
 
     pub fn read_reg(&self, id: RegId) -> Result<u64, SimError> {
-        self.cpu.read_reg(id)
+        self.cpu.core().read_reg(id)
     }
 
     pub fn write_reg(&mut self, id: RegId, value: u64) -> Result<(), SimError> {
-        self.cpu.write_reg(id, value)
+        self.cpu.core_mut().write_reg(id, value)
     }
 
     pub fn read_mem(&mut self, addr: Addr, buf: &mut [u8]) -> Result<(), BusError> {
@@ -132,7 +133,11 @@ impl<C: Cpu> Machine<C> {
         self.bus.write(addr, buf)
     }
 
-    pub(crate) fn parts_mut(&mut self) -> (&mut C, &mut MemoryBus, &mut BreakpointStore) {
-        (&mut self.cpu, &mut self.bus, &mut self.breakpoints)
+    pub(crate) fn parts_mut(&mut self) -> (&mut C::Core, &mut MemoryBus, &mut BreakpointStore) {
+        (
+            self.cpu.core_mut(),
+            self.bus.as_mut(),
+            &mut self.breakpoints,
+        )
     }
 }

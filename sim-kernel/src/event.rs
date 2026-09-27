@@ -10,7 +10,7 @@
 //!
 //! Deadlines are [`Tick`] nanoseconds. CPU quanta are sized as
 //! `min(max_quantum_ns, next_deadline - now)` and converted to an instruction
-//! budget with [`crate::SimConfig::ns_per_instruction`].
+//! budget with [`crate::Cpu::instruction_period`].
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
