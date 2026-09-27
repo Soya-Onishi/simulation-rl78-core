@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::clock::Tick;
 use crate::command::{Command, InspectResult, Response, SimError};
-use crate::cpu::Cpu;
+use crate::cpu::{Core, Cpu};
 use crate::event::EventCtx;
 use crate::machine::Machine;
 use crate::stop::StopReason;
@@ -19,18 +19,12 @@ pub const DEFAULT_MAX_QUANTUM: Tick = Tick(10_000);
 pub struct SimConfig {
     /// Cap on virtual time advanced per [`Simulator::poll`].
     pub max_quantum: Tick,
-    /// Virtual time charged per retired instruction (icount scaling).
-    ///
-    /// Milestone 1 defaults to `Tick(1)` (1 insn = 1 ns). Real MCU timing
-    /// models can raise this without changing the event/timer API.
-    pub ns_per_instruction: Tick,
 }
 
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
             max_quantum: DEFAULT_MAX_QUANTUM,
-            ns_per_instruction: Tick(1),
         }
     }
 }
@@ -178,7 +172,6 @@ impl<C: Cpu> Simulator<C> {
             return None;
         }
 
-        let ns_per_insn = self.cfg.ns_per_instruction.max(Tick(1));
         let budget_ns = {
             let mut budget = self
                 .machine
@@ -191,6 +184,19 @@ impl<C: Cpu> Simulator<C> {
                 budget = budget.min(allowed.saturating_sub(now));
             }
             budget
+        };
+        let Some(ns_per_insn) = self
+            .machine
+            .cpu()
+            .instruction_period()
+            .filter(|tick| !tick.is_zero())
+        else {
+            // Clock stopped: retire nothing, but still reach the next deadline.
+            if budget_ns.is_zero() {
+                return None;
+            }
+            self.machine.advance_clock(budget_ns);
+            return self.fire_due_events();
         };
         let max_instructions = if self.step_once {
             1

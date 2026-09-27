@@ -4,10 +4,10 @@
 //!
 //! [`Simulator::poll`][sim_kernel::Simulator] never calls it. Mapping tlib exit
 //! codes / [`PendingStop`] into [`Quantum::stop`] happens inside this CPU's
-//! [`Cpu::run_quantum`] via [`Rl78Cpu::finish_tlib_quantum`] right after
+//! [`Core::run_quantum`] via [`Rl78Cpu::finish_tlib_quantum`] right after
 //! `tlib_execute`.
 //!
-//! Memory callbacks live in [`crate::callbacks`]. [`Cpu::bind_memory`] maps
+//! Memory callbacks live in [`crate::callbacks`]. [`Core::bind_memory`] maps
 //! `Rom`/`Ram` host buffers into tlib and routes MMIO pages through the bound
 //! [`MemoryBus`] (via [`callbacks::set_io_bus`]).
 
@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use sim_kernel::{
-    Addr, Breakpoint, BreakpointId, Cpu, FirmwareError, MemoryBus, PendingStop, Quantum, RegId,
-    Resettable, SimError, resolve_after_tlib_execute,
+    Addr, Breakpoint, BreakpointId, Core, Cpu, FirmwareError, HasMemoryMap, MapError, MemoryBus,
+    MemoryMapBuilder, PendingStop, Quantum, RegId, Resettable, SimError, Tick,
+    resolve_after_tlib_execute,
 };
 
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
@@ -84,7 +85,7 @@ pub struct Rl78Cpu {
     /// Kernel breakpoint table (id + addr). tlib only stores addresses, not
     /// [`BreakpointId`], so `EXCP_DEBUG` is mapped back to an id via PC lookup.
     breakpoints: Vec<Breakpoint>,
-    /// True after [`Cpu::bind_memory`] has mapped the attached [`MemoryBus`].
+    /// True after [`Core::bind_memory`] has mapped the attached [`MemoryBus`].
     memory_bound: bool,
     /// Guest ranges passed to `tlib_map_range` while bound (unmapped on Drop).
     mapped_ranges: Vec<(u64, u64)>,
@@ -177,7 +178,7 @@ impl Rl78Cpu {
         }
     }
 
-    /// Tear down host/tlib mappings installed by [`Cpu::bind_memory`].
+    /// Tear down host/tlib mappings installed by [`Core::bind_memory`].
     ///
     /// Called from [`Drop`] so sequential unit-test Machines do not leave
     /// dangling host pointers or stale `tlib_map_range` windows after the bus
@@ -292,7 +293,32 @@ impl Drop for Rl78Cpu {
     }
 }
 
+impl HasMemoryMap for Rl78Cpu {
+    fn memory_map(&self) -> Result<MemoryMapBuilder, MapError> {
+        // The milestone-1 board assembles ROM/RAM itself and passes the finished bus
+        // to `Machine::new`. G23 parts own their map on the SoC type instead.
+        Ok(MemoryMapBuilder::new())
+    }
+}
+
 impl Cpu for Rl78Cpu {
+    type Core = Self;
+
+    fn core(&self) -> &Self {
+        self
+    }
+
+    fn core_mut(&mut self) -> &mut Self {
+        self
+    }
+
+    /// No on-chip clock in the milestone-1 wrapper: one instruction is one nanosecond.
+    fn instruction_period(&self) -> Option<Tick> {
+        Some(Tick(1))
+    }
+}
+
+impl Core for Rl78Cpu {
     fn bind_memory(&mut self, bus: &mut MemoryBus) {
         assert!(
             !self.memory_bound,
@@ -515,7 +541,7 @@ mod map_probe {
     use super::*;
     use crate::{MAGIC_PROBE_BASE, MinimalMachineConfig, ProbeSink, minimal_machine_with_probe};
     use serial_test::serial;
-    use sim_kernel::{Cpu, MemoryMapBuilder, Ram, Rom, StopReason, UnmappedPolicy};
+    use sim_kernel::{Core, MemoryMapBuilder, Ram, Rom, StopReason, UnmappedPolicy};
     use std::sync::{Arc, Mutex};
 
     #[serial]

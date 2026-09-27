@@ -1,7 +1,7 @@
 //! RL78 core assembly: CPU wrapper, minimal map, Magic probe, ELF hook.
 //!
 //! tlib (`rl78` branch) is built from the `tlib/` submodule via `build.rs` and
-//! linked statically. [`Rl78Cpu`] owns the tlib session; [`Cpu::bind_memory`]
+//! linked statically. [`Rl78Cpu`] owns the tlib session; [`sim_kernel::Core::bind_memory`]
 //! wires ROM/RAM/MMIO into the bus.
 
 mod callbacks;
@@ -116,7 +116,7 @@ fn wire_board_uart0(core: &Rl78G23Core) -> BoardPorts {
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
 ///
 /// Returns the machine plus board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx`).
-pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<Rl78Cpu>, BoardPorts) {
+pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<R7F100Gxl>, BoardPorts) {
     let ctl = EventCtl::new();
     let part = R7F100Gxl::new(ctl.clone());
     let ports = wire_board_uart0(&part.core);
@@ -127,7 +127,7 @@ pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<Rl78Cpu>, BoardPorts) {
         .build()
         .unwrap();
     let irq = Arc::clone(&part.core.irq);
-    let machine = Machine::with_devices(Rl78Cpu::new(), bus, ctl, vec![Box::new(part)]);
+    let machine = Machine::new(part, bus, ctl);
     peripherals::irq::bind_cpu_line(irq);
     (machine, ports)
 }
@@ -138,7 +138,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::{BoardPorts, BusError, HasMemoryMap, Resettable, Tick, UartFrame};
+    use sim_kernel::{BoardPorts, BusError, Cpu, HasMemoryMap, Resettable, Tick, UartFrame};
 
     fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus, BoardPorts) {
         let mut part = R7F100Gxl::new(ctl);
@@ -226,6 +226,16 @@ mod tests {
         let _ = minimal_machine(cfg);
     }
 
+    #[serial]
+    #[test]
+    fn g23_instruction_period_follows_fclk() {
+        let ctl = EventCtl::new();
+        let (part, _bus, _ports) = g23_part(ctl);
+        // Hold-reset latches HOCO at 32 MHz; one cycle is 31 ns (integer division).
+        assert_eq!(Cpu::instruction_period(&part), Some(Tick(31)));
+    }
+
+    #[serial]
     #[test]
     fn g23_clock_and_timer_sfr_are_mapped() {
         let ctl = EventCtl::new();
@@ -273,6 +283,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[test]
     fn tau_interval_sets_overflow_after_tdr_counts() {
         let ctl = EventCtl::new();
@@ -290,6 +301,7 @@ mod tests {
         assert!(part.core.tau.lock().unwrap().channel_enabled(0));
     }
 
+    #[serial]
     #[test]
     fn tau_restart_after_tt_ignores_stale_deadline() {
         let ctl = EventCtl::new();
@@ -313,6 +325,7 @@ mod tests {
         assert_eq!(tsr[0] & 1, 1);
     }
 
+    #[serial]
     #[test]
     fn tau_arms_when_fclk_returns() {
         let ctl = EventCtl::new();
@@ -330,6 +343,7 @@ mod tests {
         assert_eq!(tsr[0] & 1, 1);
     }
 
+    #[serial]
     #[test]
     fn sau_uart_tx_emits_byte_after_frame_time() {
         let ctl = EventCtl::new();
@@ -346,6 +360,7 @@ mod tests {
         assert_eq!(uart0_tx_bytes(&ports), b"A");
     }
 
+    #[serial]
     #[test]
     fn irq_reset_masks_if_until_mk_cleared() {
         let ctl = EventCtl::new();
@@ -361,6 +376,7 @@ mod tests {
         assert_eq!(pending.index, IrqId::INTTM00);
     }
 
+    #[serial]
     #[test]
     fn tau_interval_latches_inttm00() {
         let ctl = EventCtl::new();
@@ -375,6 +391,7 @@ mod tests {
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTTM00));
     }
 
+    #[serial]
     #[test]
     fn sau_uart_tx_latches_intst0() {
         let ctl = EventCtl::new();
@@ -415,6 +432,7 @@ mod tests {
         bus.write(0xF0122, &[0x02, 0x00]).unwrap();
     }
 
+    #[serial]
     #[test]
     fn sau_uart_tx_capture_includes_frame_parameters() {
         let ctl = EventCtl::new();
@@ -430,6 +448,7 @@ mod tests {
         assert_eq!(frames[0], matching_uart_frame(b'A'));
     }
 
+    #[serial]
     #[test]
     fn sau_uart_tx_second_sdr_write_starts_after_first_frame() {
         let ctl = EventCtl::new();
@@ -454,6 +473,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn sau_uart_rx_loads_sdr_from_matching_frame() {
         let ctl = EventCtl::new();
@@ -467,6 +487,7 @@ mod tests {
         assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
     }
 
+    #[serial]
     #[test]
     fn sau_uart_rx_parity_mismatch_sets_pef_and_intsre() {
         let ctl = EventCtl::new();
@@ -480,6 +501,7 @@ mod tests {
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
 
+    #[serial]
     #[test]
     fn sau_uart_rx_bit_time_mismatch_sets_fef_and_intsre() {
         let ctl = EventCtl::new();
@@ -495,6 +517,7 @@ mod tests {
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
 
+    #[serial]
     #[test]
     fn sau_uart_rx_error_with_eoc_suppresses_intsr() {
         let ctl = EventCtl::new();
@@ -505,6 +528,7 @@ mod tests {
         assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
 
+    #[serial]
     #[test]
     fn uart_out_port_pending_loopback_to_sau_rx() {
         let ctl = EventCtl::new();

@@ -2,8 +2,9 @@
 //!
 //! Owns virtual time, the event queue, the memory bus contract, typed pin
 //! wires, off-board [`InPort`] / [`OutPort`] endpoints, and the
-//! start/stop/quit control surface. Architecture crates implement [`Cpu`] and
-//! assemble a [`Machine`]; host front-ends (CLI, GDB) talk through
+//! start/stop/quit control surface. Architecture crates implement [`Core`] inside
+//! a [`Cpu`] (on-chip part) and assemble a [`Machine`]; host front-ends (CLI, GDB)
+//! talk through
 //! [`Command`] / [`Response`] on the simulation thread. The optional GDB
 //! stub lives in this crate and uses the same control plane.
 
@@ -32,7 +33,7 @@ pub use bus::{
 pub use clock::{NS_PER_SEC, Tick, VirtualClock};
 pub use command::{Command, InspectResult, Response, SimError};
 pub use cpu::{
-    Cpu, FirmwareError, PendingStop, Quantum, RegId, TlibExit, map_tlib_exit,
+    Core, Cpu, FirmwareError, PendingStop, Quantum, RegId, TlibExit, map_tlib_exit,
     resolve_after_tlib_execute,
 };
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};

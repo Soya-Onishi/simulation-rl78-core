@@ -331,8 +331,8 @@ fn maybe_time_report(
 mod tests {
     use super::*;
     use sim_kernel::{
-        Addr, Breakpoint, EventCtl, MemoryBus, MemoryMapBuilder, Quantum, RegId, Resettable, Rom,
-        SimError,
+        Addr, Breakpoint, Core, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder,
+        Quantum, RegId, Resettable, Rom, SimError, Tick,
     };
 
     #[test]
@@ -416,7 +416,7 @@ mod tests {
         }
     }
 
-    impl Cpu for FakeCpu {
+    impl Core for FakeCpu {
         fn load_firmware(
             &mut self,
             _bus: &mut MemoryBus,
@@ -482,6 +482,28 @@ mod tests {
         }
 
         fn sync_breakpoints(&mut self, _breakpoints: &[Breakpoint]) {}
+    }
+
+    impl HasMemoryMap for FakeCpu {
+        fn memory_map(&self) -> Result<MemoryMapBuilder, MapError> {
+            Ok(MemoryMapBuilder::new())
+        }
+    }
+
+    impl Cpu for FakeCpu {
+        type Core = Self;
+
+        fn core(&self) -> &Self {
+            self
+        }
+
+        fn core_mut(&mut self) -> &mut Self {
+            self
+        }
+
+        fn instruction_period(&self) -> Option<Tick> {
+            Some(Tick(1))
+        }
     }
 
     fn fake_machine(ops: Vec<FakeOp>) -> Machine<FakeCpu> {

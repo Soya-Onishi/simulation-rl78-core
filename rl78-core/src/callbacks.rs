@@ -55,7 +55,7 @@ fn latch_bus_error(_addr: Addr, write: bool, err: &BusError) {
 
 struct CallbackState {
     regions: Vec<HostRegion>,
-    /// Bound by [`set_io_bus`] from [`crate::Cpu::bind_memory`].
+    /// Bound by [`set_io_bus`] from [`sim_kernel::Core::bind_memory`].
     /// `Machine` boxes the bus before bind and does not move it afterward.
     io_bus: Option<*mut MemoryBus>,
 }
@@ -146,7 +146,7 @@ pub fn clear_host_regions() {
 ///
 /// # Safety
 /// `bus` must remain valid and uniquely used until [`clear_io_bus`] (`Machine`
-/// boxes the bus before [`crate::Cpu::bind_memory`]).
+/// boxes the bus before [`sim_kernel::Core::bind_memory`]).
 pub unsafe fn set_io_bus(bus: *mut MemoryBus) {
     state().lock().expect("tlib callback state").io_bus = Some(bus);
 }

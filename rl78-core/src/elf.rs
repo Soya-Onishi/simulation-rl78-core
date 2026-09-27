@@ -1,7 +1,7 @@
 //! ELF loader for guest images (ELF only; no bin/mot).
 //!
 //! Parsing uses the [`object`] crate (`PT_LOAD` segments). Firmware load for a
-//! live machine goes through [`sim_kernel::Cpu::load_firmware`] on [`Rl78Cpu`];
+//! live machine goes through [`sim_kernel::Core::load_firmware`] on [`Rl78Cpu`];
 //! the helpers here remain thin compatibility wrappers.
 
 use object::{Endianness, Object, read::elf::ProgramHeader};
@@ -113,7 +113,7 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
 
 /// Load `image` into `machine` ROM. Does not change PC (see reset).
 ///
-/// Thin wrapper over [`Machine::load_firmware`] / [`Cpu::load_firmware`].
+/// Thin wrapper over [`Machine::load_firmware`] / [`sim_kernel::Core::load_firmware`].
 pub fn load_elf_into_machine(
     image: &[u8],
     machine: &mut Machine<Rl78Cpu>,

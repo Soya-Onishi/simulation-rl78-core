@@ -2,11 +2,12 @@
 
 use crate::Resettable;
 use crate::breakpoint::{Breakpoint, BreakpointId};
-use crate::bus::{Addr, BusError, MemoryBus};
+use crate::bus::{Addr, BusError, HasMemoryMap, MemoryBus};
+use crate::clock::Tick;
 use crate::command::SimError;
 use crate::stop::StopReason;
 
-/// Failure while loading guest firmware into a [`Cpu`] / bus.
+/// Failure while loading guest firmware into a [`Core`] / bus.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FirmwareError {
     /// Bytes are not a recognized firmware image for this CPU.
@@ -154,7 +155,7 @@ pub fn map_tlib_exit(exit: i32, breakpoint_at_pc: Option<BreakpointId>) -> Optio
 
 /// Build [`Quantum::stop`] after `tlib_execute` returns.
 ///
-/// Call this from the architecture [`Cpu::run_quantum`] implementation (e.g.
+/// Call this from the architecture [`Core::run_quantum`] implementation (e.g.
 /// `Rl78Cpu`), **not** from [`crate::Simulator::poll`]. The kernel is
 /// arch-agnostic and only consumes the resulting [`Quantum::stop`].
 ///
@@ -172,8 +173,8 @@ pub fn resolve_after_tlib_execute(
         .or_else(|| map_tlib_exit(exit, breakpoint_at_pc))
 }
 
-/// Architecture CPU. All mutation happens on the simulation thread.
-pub trait Cpu: Send + Resettable {
+/// Instruction engine owned by a [`Cpu`]. All mutation happens on the simulation thread.
+pub trait Core: Send + Resettable {
     /// Install the guest memory map used by load/store callbacks.
     ///
     /// Called **once** when the CPU is placed into a [`crate::Machine`] (bus
@@ -212,6 +213,24 @@ pub trait Cpu: Send + Resettable {
 
     /// Push the kernel breakpoint table into the backend (`tlib_add_breakpoint`).
     fn sync_breakpoints(&mut self, _breakpoints: &[Breakpoint]) {}
+}
+
+/// SoC placed in [`crate::Machine::cpu`].
+///
+/// A [`Core`] (the RL78 execution engine, a scripted test core, …) lives inside
+/// the CPU. [`Self::instruction_period`] is the virtual time charged per retired
+/// instruction; a clocked part derives it from its frequency instead of a fixed tick.
+pub trait Cpu: Send + Resettable + HasMemoryMap {
+    type Core: Core;
+
+    fn core(&self) -> &Self::Core;
+    fn core_mut(&mut self) -> &mut Self::Core;
+
+    /// Nanoseconds charged for one retired instruction.
+    ///
+    /// `None` means the CPU clock is stopped. The kernel then retires nothing
+    /// and advances virtual time up to the next deadline (or the quantum cap).
+    fn instruction_period(&self) -> Option<Tick>;
 }
 
 #[cfg(test)]
