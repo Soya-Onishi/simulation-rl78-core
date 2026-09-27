@@ -13,6 +13,7 @@ pub mod control;
 pub mod data_plane;
 pub mod ipc;
 pub mod lifecycle;
+pub mod log_msg;
 pub mod node;
 pub mod server;
 pub mod time_sync;
@@ -26,6 +27,7 @@ pub use board_runtime::{
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
+pub use log_msg::{ClusterLog, LogConsole, LogLevel, LogOrigin};
 pub use node::notify_host_stop;
 pub use server::{ServerError, ServerOptions, run_server};
 pub use sim_kernel::UartFrame;

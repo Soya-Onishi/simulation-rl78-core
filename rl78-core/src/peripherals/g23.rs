@@ -10,11 +10,13 @@ use sim_kernel::{
 use crate::cpu::Rl78Cpu;
 
 use crate::map::MemoryLayout;
+use crate::peripherals::SemihostingUnit;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
 use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqId};
 use crate::peripherals::sau::{self, SauCtrlMmio, SauSdrMmio, SauUnit};
+use crate::peripherals::semihosting::SemihostingMmio;
 use crate::peripherals::tau::{self, TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
 
 /// G23 clock / SAU0 / TAU0 window bases (wiring, not device internals).
@@ -32,6 +34,7 @@ const TAU_TIS: Addr = 0xF0074;
 const IRQ_IFMK0: Addr = 0xFFFE0;
 const IRQ_IFMK1: Addr = 0xFFFD0;
 const IRQ_EDGE: Addr = 0xFFF38;
+const SEMIHOSTING: Addr = 0xE0000;
 /// Flash option byte `FRQSEL` (QEMU `rom_ptr(0x000C2)`).
 const OPTION_BYTE_ADDR: Addr = 0x000C2;
 
@@ -79,6 +82,7 @@ pub struct Rl78G23Core {
     pub clock: Arc<Mutex<ClockGenerator>>,
     pub sau: Arc<Mutex<SauUnit>>,
     pub tau: Arc<Mutex<TauUnit>>,
+    pub semihosting: Arc<Mutex<SemihostingUnit>>,
     pub irq: Arc<Mutex<IrqController>>,
     /// RL78 instruction engine. Created in [`Self::new`]. tlib allows one live instance.
     core: Rl78Cpu,
@@ -91,13 +95,16 @@ impl Rl78G23Core {
         let outputs = clock.lock().expect("clock").outputs();
         let irq = Arc::new(Mutex::new(IrqController::new()));
         let mut sau_unit = SauUnit::new(ctl.clone(), outputs.clone());
-        let mut tau_unit = TauUnit::new(ctl, outputs);
+        let mut tau_unit = TauUnit::new(ctl.clone(), outputs);
+        let semihosting_unit = SemihostingUnit::new(ctl);
         let core = Rl78Cpu::new();
         wiring(&mut sau_unit, &mut tau_unit, &irq);
+
         Self {
             clock,
             sau: Arc::new(Mutex::new(sau_unit)),
             tau: Arc::new(Mutex::new(tau_unit)),
+            semihosting: Arc::new(Mutex::new(semihosting_unit)),
             irq,
             core,
         }
@@ -110,6 +117,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.sau.lock().expect("sau"), bus);
         Resettable::reset(&mut *self.tau.lock().expect("tau"), bus);
         Resettable::reset(&mut *self.irq.lock().expect("irq"), bus);
+        Resettable::reset(&mut *self.semihosting.lock().expect("semihosting"), bus);
         Resettable::reset(&mut self.core, bus);
     }
 }
@@ -160,7 +168,11 @@ impl HasMemoryMap for Rl78G23Core {
                 IRQ_IFMK1,
                 Box::new(IrqBankMmio::new(Arc::clone(&self.irq), 1)),
             )?
-            .map(IRQ_EDGE, Box::new(IrqEdgeMmio::new(Arc::clone(&self.irq))))
+            .map(IRQ_EDGE, Box::new(IrqEdgeMmio::new(Arc::clone(&self.irq))))?
+            .map(
+                SEMIHOSTING,
+                Box::new(SemihostingMmio::new(Arc::clone(&self.semihosting))),
+            )
     }
 }
 
