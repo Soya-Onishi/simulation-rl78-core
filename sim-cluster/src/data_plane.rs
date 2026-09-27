@@ -259,7 +259,7 @@ impl DataPlane for UartDataPlane {
                         // rare. Re-queuing would stall the TX path or reorder
                         // characters if later frames were sent first. Board
                         // shutdown on send failure is intentionally avoided.
-                        eprintln!("uart tx try_send: {err:?}");
+                        log::warn!("uart tx try_send: {err:?}");
                     }
                 }
             }

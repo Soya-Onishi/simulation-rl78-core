@@ -16,7 +16,7 @@ use sim_kernel::{
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::ipc::{
-    IpcError, NodeControl, board_hash_table, board_id_hash, create_node, isolated_config,
+    IpcError, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node, isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
@@ -159,7 +159,8 @@ pub fn run_board<C: Cpu>(
 
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;
-    let control = NodeControl::open(&iox_node, &opts.cluster_key, boards)?;
+    let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
+    let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
     let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
 
     let (machine, ports) = build();
@@ -167,7 +168,7 @@ pub fn run_board<C: Cpu>(
     if let Some(elf_path) = &board.elf {
         let image = fs::read(elf_path)?;
         sim.machine_mut().load_firmware(&image)?;
-        eprintln!("board[{board_id}]: loaded firmware {}", elf_path);
+        log::info!("loaded firmware {}", elf_path);
     }
     sim.machine_mut().reset();
     ports.clear_pending();
@@ -192,17 +193,10 @@ pub fn run_board<C: Cpu>(
             }
             let (next, effect) = state.on_message(msg);
             if let Some(effect) = effect {
-                apply_effect(
-                    board_id,
-                    board_hash,
-                    &control,
-                    effect,
-                    &mut allowed_ns,
-                    &mut sim,
-                )?;
+                apply_effect(board_hash, &control, effect, &mut allowed_ns, &mut sim)?;
             }
             if next != state {
-                eprintln!("board[{board_id}]: {state:?} -> {next:?}");
+                log::trace!("{state:?} -> {next:?}");
             }
             state = next;
         }
@@ -211,7 +205,7 @@ pub fn run_board<C: Cpu>(
             if !guest_started {
                 let _ = sim.command(Command::Start);
                 guest_started = true;
-                eprintln!("board[{board_id}]: simulator Start");
+                log::info!("simulator Start");
             }
 
             for plane in &mut data_planes {
@@ -241,18 +235,17 @@ pub fn run_board<C: Cpu>(
                             from: board_hash,
                             reason: host_reason,
                         })?;
-                        eprintln!(
-                            "board[{board_id}]: HostStop ({host_reason}) at vt={virtual_time_ns}"
-                        );
+                        log::info!("HostStop ({host_reason}) at vt={virtual_time_ns}");
                         // Stay in the loop: sim is Stopped so the next iteration
                         // skips guest work; this iteration still falls through to
                         // pump_tx below. ClusterStop moves NodeState to Stopped.
+                    } else {
+                        // Guest Halt is not surfaced as Response::Stopped anymore.
+                        log::error!("unexpected non-host stop {reason:?}");
                     }
-                    // Guest Halt is not surfaced as Response::Stopped anymore.
-                    eprintln!("board[{board_id}]: unexpected non-host stop {reason:?}");
                 }
                 Some(other) => {
-                    eprintln!("board[{board_id}]: unexpected sim response {other:?}");
+                    log::warn!("unexpected sim response {other:?}");
                 }
                 None => {
                     let virtual_time_ns = sim.machine().clock().now().0;
@@ -284,7 +277,6 @@ fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a Board
 }
 
 fn apply_effect<C: Cpu>(
-    board_id: &str,
     board_hash: u64,
     control: &NodeControl,
     effect: NodeEffect,
@@ -294,15 +286,15 @@ fn apply_effect<C: Cpu>(
     match effect {
         NodeEffect::SendReady => {
             control.publish(&ControlToArbiter::Ready { from: board_hash })?;
-            eprintln!("board[{board_id}]: Ready");
+            log::trace!("Ready");
         }
         NodeEffect::SetAllowed { allowed_ns: next } => {
             *allowed_ns = next;
             let _ = sim.command(Command::SetAllowed { tick: Tick(next) });
-            eprintln!("board[{board_id}]: Allowed={next}");
+            log::trace!("Allowed={next}");
         }
         NodeEffect::Warn(msg) => {
-            eprintln!("board[{board_id}]: warning: {msg}");
+            log::warn!("{msg}");
         }
     }
     Ok(())

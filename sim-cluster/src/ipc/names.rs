@@ -14,6 +14,18 @@ pub fn ctrl_n2a(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/ctrl/n2a")
 }
 
+/// Service name: nodes → arbiter log channel.
+#[must_use]
+pub fn log_n2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/log/n2a")
+}
+
+/// Service name: arbiter → server log channel.
+#[must_use]
+pub fn log_a2s(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/log/a2s")
+}
+
 /// Service name for one directed UART edge.
 ///
 /// Uses a content hash of the full logical [`edge_id`] so distinct edges cannot
