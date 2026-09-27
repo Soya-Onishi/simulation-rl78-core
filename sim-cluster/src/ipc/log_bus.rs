@@ -60,10 +60,7 @@ impl NodeLog {
                 );
             }) {
             Ok(worker) => worker,
-            Err(err) => {
-                clear_process_log(&queue);
-                return Err(IpcError::Message(format!("node log thread: {err}")));
-            }
+            Err(err) => return Err(IpcError::Message(format!("node log thread: {err}"))),
         };
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
@@ -72,12 +69,10 @@ impl NodeLog {
             }),
             Ok(Err(err)) => {
                 let _ = worker.join();
-                clear_process_log(&queue);
                 Err(IpcError::Message(err))
             }
             Err(_) => {
                 let _ = worker.join();
-                clear_process_log(&queue);
                 Err(IpcError::Message(
                     "node log thread exited before the publisher was ready".into(),
                 ))
@@ -90,7 +85,6 @@ impl NodeLog {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        clear_process_log(&self.queue);
     }
 }
 
@@ -181,7 +175,6 @@ impl ArbiterLogBus {
             }) {
             Ok(worker) => worker,
             Err(err) => {
-                clear_process_log(&queue);
                 return Err(IpcError::Message(format!("log forwarder thread: {err}")));
             }
         };
@@ -192,12 +185,10 @@ impl ArbiterLogBus {
             }),
             Ok(Err(err)) => {
                 let _ = worker.join();
-                clear_process_log(&queue);
                 Err(IpcError::Message(err))
             }
             Err(_) => {
                 let _ = worker.join();
-                clear_process_log(&queue);
                 Err(IpcError::Message(
                     "log forwarder exited before the log ports were ready".into(),
                 ))
@@ -211,7 +202,6 @@ impl ArbiterLogBus {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        clear_process_log(&self.queue);
     }
 }
 
@@ -262,16 +252,6 @@ fn install_process_log(queue: Arc<LogQueue>) {
     });
 
     *PROCESS_LOG.write().unwrap_or_else(|err| err.into_inner()) = Some(queue);
-}
-
-fn clear_process_log(queue: &Arc<LogQueue>) {
-    let mut slot = PROCESS_LOG.write().unwrap_or_else(|err| err.into_inner());
-    if slot
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, queue))
-    {
-        *slot = None;
-    }
 }
 
 fn publish_node_logs(

@@ -126,7 +126,6 @@ pub fn run_arbiter_with_topology(
         let _ = child.kill();
         let _ = child.wait();
     }
-    let _ = fs::remove_dir_all(&opts.iox_root);
     result
 }
 
