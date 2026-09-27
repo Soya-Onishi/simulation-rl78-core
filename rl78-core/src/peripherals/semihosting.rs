@@ -7,7 +7,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{Addr, BusError, EventCtl, EventCtx, MemoryBus, MemoryMapped, Resettable, SimEvent};
+use sim_kernel::{
+    Addr, BusError, EventCtl, EventCtx, MemoryBus, MemoryMapped, Resettable, SimEvent,
+};
 
 const WINDOW_LEN: usize = 6;
 
