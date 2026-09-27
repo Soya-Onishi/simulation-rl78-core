@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sim_kernel::{Addr, BusError, EventCtl, EventCtx, MemoryBus, MemoryMapped, SimEvent};
+use sim_kernel::{Addr, BusError, EventCtl, EventCtx, MemoryBus, MemoryMapped, Resettable, SimEvent};
 
 const WINDOW_LEN: usize = 6;
 
@@ -56,6 +56,12 @@ impl SemihostingMmio {
     #[must_use]
     pub fn new(inner: Arc<Mutex<SemihostingUnit>>) -> Self {
         Self { inner }
+    }
+}
+
+impl Resettable for SemihostingUnit {
+    fn reset(&mut self, _bus: &mut MemoryBus) {
+        self.data_addr = 0;
     }
 }
 

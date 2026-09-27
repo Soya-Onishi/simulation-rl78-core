@@ -112,6 +112,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.sau.lock().expect("sau"), bus);
         Resettable::reset(&mut *self.tau.lock().expect("tau"), bus);
         Resettable::reset(&mut *self.irq.lock().expect("irq"), bus);
+        Resettable::reset(&mut *self.semihosting.lock().expect("semihosting"), bus);
     }
 }
 
