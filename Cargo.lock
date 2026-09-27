@@ -901,8 +901,10 @@ version = "0.1.0"
 dependencies = [
  "iceoryx2",
  "iceoryx2-bb-system-types",
+ "log",
  "serde",
  "serde_json",
+ "serial_test",
  "sim-kernel",
  "tempfile",
  "thiserror",

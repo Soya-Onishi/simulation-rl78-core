@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::ipc::{
-    ArbiterControl, IpcError, board_hash_table, create_node, isolated_config, new_cluster_key,
-    root_path_for_cluster,
+    ArbiterControl, ArbiterLogBus, IpcError, board_hash_table, create_node, isolated_config,
+    new_cluster_key, root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::topology::{LogicalTopology, TopologyError};
@@ -72,14 +72,6 @@ pub fn run_arbiter_with_topology(
     opts: &ArbiterOptions,
     topo: &LogicalTopology,
 ) -> Result<(), ArbiterError> {
-    eprintln!(
-        "cluster-arbiter: loaded topology ({} boards, {} edges, margin_ns={}, cluster_key={})",
-        topo.boards.len(),
-        topo.edges.len(),
-        topo.margin_ns,
-        opts.cluster_key
-    );
-
     if !opts.node_bin.is_file() {
         return Err(ArbiterError::Message(format!(
             "board binary not found at {} (build rl78-minimal-board or pass --node-bin)",
@@ -92,7 +84,17 @@ pub fn run_arbiter_with_topology(
 
     let config = isolated_config(&opts.iox_root)?;
     let node = create_node(&config, &format!("arbiter-{}", opts.cluster_key))?;
-    let control = ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards)?;
+    let control =
+        ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards.clone())?;
+    let mut logs =
+        ArbiterLogBus::create(&opts.iox_root, &opts.cluster_key, topo.boards.len(), boards)?;
+    log::info!(
+        "loaded topology ({} boards, {} edges, margin_ns={}, cluster_key={})",
+        topo.boards.len(),
+        topo.edges.len(),
+        topo.margin_ns,
+        opts.cluster_key
+    );
     // UART services are open_or_create'd by the TX/RX nodes (topology QoS).
 
     let mut children: Vec<Child> = Vec::new();
@@ -117,6 +119,7 @@ pub fn run_arbiter_with_topology(
     if result.is_ok() {
         std::thread::sleep(Duration::from_millis(50));
     }
+    logs.shutdown();
 
     // TODO(cluster-shutdown): replace OS-kill with ControlToNode::Shutdown.
     for child in &mut children {
@@ -170,15 +173,15 @@ fn ready_barrier_and_start(
                         continue;
                     };
                     let (next, effect) = state.on_message(msg);
-                    warn_peer(&board_id, effect);
+                    warn_peer(&board_id, effect)?;
                     if next != *state {
-                        eprintln!("cluster-arbiter: peer '{board_id}' {state:?} -> {next:?}");
+                        log::trace!("peer '{board_id}' {state:?} -> {next:?}");
                     }
                     *state = next;
                     progressed = true;
                 }
                 other => {
-                    eprintln!("cluster-arbiter: ignoring unexpected before Start: {other:?}");
+                    log::warn!("ignoring unexpected before Start: {other:?}");
                 }
             }
         }
@@ -187,16 +190,13 @@ fn ready_barrier_and_start(
         }
     }
 
-    eprintln!(
-        "cluster-arbiter: Ready barrier complete ({} nodes)",
-        peers.len()
-    );
+    log::info!("Ready barrier complete ({} nodes)", peers.len());
 
     control.publish(&ControlToNode::Start)?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
-    eprintln!("cluster-arbiter: Start broadcast");
+    log::info!("Start broadcast");
 
     run_time_sync(topo, control, &mut peers)?;
     Ok(())
@@ -214,7 +214,7 @@ fn run_time_sync(
     control.publish(&ControlToNode::Allowed {
         allowed_ns: allowed,
     })?;
-    eprintln!("cluster-arbiter: initial Allowed={allowed}");
+    log::info!("initial Allowed={allowed}");
 
     // TODO(cluster-loop): MVP wall-clock window only. Replace with an open loop
     // until ControlToNode::Shutdown (or equivalent) ends the run.
@@ -243,14 +243,12 @@ fn run_time_sync(
                     // HostStopReason variants are all cluster-relevant by construction.
                     cluster_stop = Some((board_id.clone(), reason));
                 }
-                other => warn_peer(&board_id, other),
+                other => warn_peer(&board_id, other)?,
             }
             *state = next;
         }
         if let Some((source, reason)) = cluster_stop {
-            eprintln!(
-                "cluster-arbiter: HostStop from '{source}' ({reason}); broadcasting ClusterStop"
-            );
+            log::info!("HostStop from '{source}' ({reason}); broadcasting ClusterStop");
             broadcast_cluster_stop(control, peers, &source, reason)?;
             return Ok(());
         }
@@ -261,7 +259,7 @@ fn run_time_sync(
                 control.publish(&ControlToNode::Allowed {
                     allowed_ns: allowed,
                 })?;
-                eprintln!("cluster-arbiter: Allowed={allowed}");
+                log::trace!("Allowed={allowed}");
             }
         }
         std::thread::sleep(ARBITER_POLL_IDLE);
@@ -298,13 +296,15 @@ fn ready_timeout(
     })
 }
 
-fn warn_peer(board_id: &str, effect: Option<PeerEffect>) {
+fn warn_peer(board_id: &str, effect: Option<PeerEffect>) -> Result<(), ArbiterError> {
     match effect {
         Some(PeerEffect::Warn(msg)) => {
-            eprintln!("cluster-arbiter: warning [{board_id}]: {msg}");
+            log::warn!("warning [{board_id}]: {msg}");
         }
         Some(PeerEffect::TimeReport { .. }) | Some(PeerEffect::HostStop { .. }) | None => {}
     }
+
+    Ok(())
 }
 
 /// Convenience for the binary: topology path only.
@@ -320,6 +320,7 @@ mod tests {
         ArbiterControl, NodeControl, board_hash_table, board_id_hash, create_node, isolated_config,
     };
     use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
+    use serial_test::serial;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -440,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn ready_barrier_succeeds_with_fake_nodes() {
         let dir = tempfile::tempdir().unwrap();
         let cluster_key = format!("t-ready-{}", std::process::id());
@@ -448,6 +450,9 @@ mod tests {
         let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, "arb-test-ready").unwrap();
+        let _logs =
+            ArbiterLogBus::create(&iox_root, &cluster_key, topo.boards.len(), boards.clone())
+                .unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
 
@@ -468,6 +473,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn ready_barrier_times_out_when_node_silent() {
         let dir = tempfile::tempdir().unwrap();
         let cluster_key = format!("t-timeout-{}", std::process::id());
@@ -476,6 +482,9 @@ mod tests {
         let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, "arb-test-timeout").unwrap();
+        let _logs =
+            ArbiterLogBus::create(&iox_root, &cluster_key, topo.boards.len(), boards.clone())
+                .unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
 
@@ -498,6 +507,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn host_stop_broadcasts_cluster_stop() {
         let dir = tempfile::tempdir().unwrap();
         let cluster_key = format!("t-hoststop-{}", std::process::id());
@@ -506,6 +516,9 @@ mod tests {
         let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, "arb-test-hoststop").unwrap();
+        let _logs =
+            ArbiterLogBus::create(&iox_root, &cluster_key, topo.boards.len(), boards.clone())
+                .unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
 

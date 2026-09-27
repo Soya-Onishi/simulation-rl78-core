@@ -1,11 +1,18 @@
 //! Cluster server: run Python DSL, validate topology, spawn arbiter.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::ipc::{
+    IpcError, ServerLogInbox, board_hash_table, create_node, isolated_config, new_cluster_key,
+    root_path_for_cluster,
+};
+use crate::log_msg::{LogConsole, LogLevel};
 use crate::topology::{LogicalTopology, TopologyError};
 
 /// Options for [`run_server`].
@@ -19,6 +26,8 @@ pub struct ServerOptions {
     pub arbiter_bin: PathBuf,
     /// Python interpreter (default `python3`).
     pub python_bin: PathBuf,
+    /// Most verbose level the server prints. More verbose records are dropped.
+    pub log_level: LogLevel,
 }
 
 impl ServerOptions {
@@ -36,6 +45,7 @@ impl ServerOptions {
             python_path,
             arbiter_bin,
             python_bin: PathBuf::from("python3"),
+            log_level: LogLevel::Info,
         })
     }
 }
@@ -49,6 +59,8 @@ pub enum ServerError {
     Topology(#[from] TopologyError),
     #[error("python exited with status {status}: {stderr}")]
     PythonFailed { status: String, stderr: String },
+    #[error("ipc error: {0}")]
+    Ipc(#[from] IpcError),
     #[error("{0}")]
     Message(String),
 }
@@ -71,19 +83,50 @@ pub fn run_server(opts: &ServerOptions) -> Result<i32, ServerError> {
     let json = run_python_topology(opts)?;
     let topo = LogicalTopology::from_json_str(&json)?;
     let json_path = write_temp_topology(&topo)?;
+    let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
+        .map_err(ServerError::Message)?;
+
+    let cluster_key = new_cluster_key();
+    let iox_root = root_path_for_cluster(&cluster_key);
+    let config = isolated_config(&iox_root)?;
+    let iox_node = create_node(&config, &format!("server-{cluster_key}"))?;
+    // Subscriber must exist before the arbiter publishes.
+    let inbox = ServerLogInbox::create(&iox_node, &cluster_key)?;
+    let console = LogConsole::new(opts.log_level);
 
     let mut child = Command::new(&opts.arbiter_bin)
         .arg("--topology")
         .arg(&json_path)
+        .arg("--cluster-key")
+        .arg(&cluster_key)
+        .arg("--iox-root")
+        .arg(&iox_root)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(ServerError::Io)?;
 
-    let status = child.wait().map_err(ServerError::Io)?;
+    let code = wait_and_print_logs(&mut child, &inbox, &console, &boards)?;
     let _ = fs::remove_file(&json_path);
-    Ok(status.code().unwrap_or(1))
+    Ok(code)
+}
+
+fn wait_and_print_logs(
+    child: &mut Child,
+    inbox: &ServerLogInbox,
+    console: &LogConsole,
+    boards: &HashMap<u64, String>,
+) -> Result<i32, ServerError> {
+    loop {
+        inbox.drain(console, boards)?;
+        if let Some(status) = child.try_wait().map_err(ServerError::Io)? {
+            thread::sleep(Duration::from_millis(30));
+            inbox.drain(console, boards)?;
+            return Ok(status.code().unwrap_or(1));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn run_python_topology(opts: &ServerOptions) -> Result<String, ServerError> {
@@ -195,6 +238,7 @@ emit(t)
             python_path: python_root,
             arbiter_bin: PathBuf::from("/nonexistent"),
             python_bin: PathBuf::from("python3"),
+            log_level: LogLevel::Info,
         };
         let json = run_python_topology(&opts).expect("python run");
         let topo = LogicalTopology::from_json_str(&json).expect("parse");
@@ -224,6 +268,7 @@ emit(t)
             python_path: python_root,
             arbiter_bin: arbiter,
             python_bin: PathBuf::from("python3"),
+            log_level: LogLevel::Info,
         };
         let code = run_server(&opts).expect("run_server");
         assert_eq!(code, 0);

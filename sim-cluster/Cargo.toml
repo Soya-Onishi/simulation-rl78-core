@@ -21,6 +21,8 @@ iceoryx2 = "0.9.3"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 iceoryx2-bb-system-types = "0.9.3"
 sim-kernel = { path = "../sim-kernel" }
+log = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+serial_test = "3.5.0"
