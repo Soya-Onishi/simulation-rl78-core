@@ -340,6 +340,26 @@ fn instruction_period_scales_virtual_time() {
 }
 
 #[test]
+fn instruction_period_longer_than_max_quantum_stops_with_error() {
+    let mut sim = Simulator::new(
+        empty_machine(ScriptedCpu::nops(8).with_period(Tick(10_001))),
+        SimConfig {
+            max_quantum: Tick(10_000),
+        },
+    );
+    sim.command(Command::Start);
+    assert_eq!(
+        sim.poll(),
+        Some(Response::Error(SimError::InstructionPeriodExceedsQuantum {
+            period: Tick(10_001),
+            max_quantum: Tick(10_000),
+        }))
+    );
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.machine().clock().now(), Tick::ZERO);
+}
+
+#[test]
 fn step_into_halt_completes_as_step() {
     let mut sim = Simulator::new(
         empty_machine(ScriptedCpu::new(vec![ScriptOp::Halt])),

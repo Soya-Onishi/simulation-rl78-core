@@ -198,6 +198,15 @@ impl<C: Cpu> Simulator<C> {
             self.machine.advance_clock(budget_ns);
             return self.fire_due_events();
         };
+        if ns_per_insn > self.cfg.max_quantum {
+            // One instruction cannot fit in a quantum, so the CPU would never retire.
+            self.step_once = false;
+            self.state = SimState::Stopped;
+            return Some(Response::Error(SimError::InstructionPeriodExceedsQuantum {
+                period: ns_per_insn,
+                max_quantum: self.cfg.max_quantum,
+            }));
+        }
         let max_instructions = if self.step_once {
             1
         } else {
@@ -206,9 +215,10 @@ impl<C: Cpu> Simulator<C> {
                 .min(u64::from(u32::MAX)) as u32
         };
         if max_instructions == 0 {
-            // Less than one instruction remains before the next deadline (or the
-            // quantum cap). Advancing by that remainder lets due events fire;
-            // returning without advancing would spin forever while Running.
+            // Less than one instruction remains before the next deadline or time
+            // ceiling. The period itself fits in `max_quantum` (checked above).
+            // Advancing by that remainder lets due events fire; returning without
+            // advancing would spin forever while Running.
             if budget_ns.is_zero() {
                 return None;
             }
