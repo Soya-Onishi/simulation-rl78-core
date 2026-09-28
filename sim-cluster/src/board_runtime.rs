@@ -15,6 +15,7 @@ use sim_kernel::{
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
+use crate::elf_source;
 use crate::ipc::{
     IpcError, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node, isolated_config,
 };
@@ -168,11 +169,11 @@ pub fn run_board<C: Cpu>(
     let (machine, ports) = build();
     let mut sim = Simulator::new(machine, SimConfig::default());
     if let Some(elf) = &board.elf {
-        let image = crate::elf_source::load(elf)?;
+        let image = elf_source::load(elf)?;
         sim.machine_mut().load_firmware(&image)?;
         log::info!(
             "loaded firmware {} ({} bytes)",
-            crate::elf_source::describe(elf),
+            elf_source::describe(elf),
             image.len()
         );
     }
@@ -185,7 +186,6 @@ pub fn run_board<C: Cpu>(
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
-    let mut guest_started = false;
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
@@ -197,23 +197,51 @@ pub fn run_board<C: Cpu>(
             {
                 headroom_threshold_ns = thr;
             }
+            let prev = state;
             let (next, effect) = state.on_message(msg);
             if let Some(effect) = effect {
-                apply_effect(board_hash, &control, effect, &mut allowed_ns, &mut sim)?;
+                match effect {
+                    NodeEffect::SendReady => {
+                        control.publish(&ControlToArbiter::Ready { from: board_hash })?;
+                        log::trace!("Ready");
+                    }
+                    NodeEffect::SetAllowed {
+                        allowed_ns: next_allowed,
+                    } => {
+                        allowed_ns = next_allowed;
+                        let _ = sim.command(Command::SetAllowed {
+                            tick: Tick(next_allowed),
+                        });
+                        log::trace!("Allowed={next_allowed}");
+                    }
+                    NodeEffect::Reset => {
+                        last_time_report = None;
+                        sim.machine_mut().reset();
+                        log::info!("simulator Reset");
+                        for plane in &mut data_planes {
+                            plane.discard_rx()?;
+                        }
+                        log::info!("discarded queued uart rx");
+                    }
+                    NodeEffect::Warn(msg) => {
+                        log::warn!("{msg}");
+                    }
+                }
             }
             if next != state {
                 log::trace!("{state:?} -> {next:?}");
             }
             state = next;
+            if prev != NodeState::Running && state == NodeState::Running {
+                let _ = sim.command(Command::Start);
+                log::info!("simulator Start");
+            } else if prev == NodeState::Running && state != NodeState::Running {
+                let _ = sim.command(Command::Stop);
+                log::info!("simulator Stop");
+            }
         }
 
         if state == NodeState::Running {
-            if !guest_started {
-                let _ = sim.command(Command::Start);
-                guest_started = true;
-                log::info!("simulator Start");
-            }
-
             for plane in &mut data_planes {
                 plane.pump_rx()?;
             }
@@ -280,30 +308,6 @@ fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a Board
         .iter()
         .find(|b| b.id == board_id)
         .ok_or_else(|| BoardError::Message(format!("board id `{board_id}` not in topology")))
-}
-
-fn apply_effect<C: Cpu>(
-    board_hash: u64,
-    control: &NodeControl,
-    effect: NodeEffect,
-    allowed_ns: &mut u64,
-    sim: &mut Simulator<C>,
-) -> Result<(), BoardError> {
-    match effect {
-        NodeEffect::SendReady => {
-            control.publish(&ControlToArbiter::Ready { from: board_hash })?;
-            log::trace!("Ready");
-        }
-        NodeEffect::SetAllowed { allowed_ns: next } => {
-            *allowed_ns = next;
-            let _ = sim.command(Command::SetAllowed { tick: Tick(next) });
-            log::trace!("Allowed={next}");
-        }
-        NodeEffect::Warn(msg) => {
-            log::warn!("{msg}");
-        }
-    }
-    Ok(())
 }
 
 fn maybe_time_report(

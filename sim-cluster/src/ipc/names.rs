@@ -26,6 +26,18 @@ pub fn log_a2s(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/log/a2s")
 }
 
+/// Service name: server → arbiter host commands.
+#[must_use]
+pub fn ctrl_s2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/ctrl/s2a")
+}
+
+/// Service name: arbiter → server session status.
+#[must_use]
+pub fn status_a2s(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/status/a2s")
+}
+
 /// Service name for one directed UART edge.
 ///
 /// Uses a content hash of the full logical [`edge_id`] so distinct edges cannot

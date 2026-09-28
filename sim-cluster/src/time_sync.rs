@@ -29,8 +29,13 @@ impl TimeCeiling {
     /// `allowed = min(reports) + margin`.
     #[must_use]
     pub fn allowed_ns(&self) -> u64 {
-        let min = self.reports.values().copied().min().unwrap_or(0);
-        min.saturating_add(self.margin_ns)
+        self.virtual_time_ns().saturating_add(self.margin_ns)
+    }
+
+    /// Minimum reported virtual time across boards (`0` before any report).
+    #[must_use]
+    pub fn virtual_time_ns(&self) -> u64 {
+        self.reports.values().copied().min().unwrap_or(0)
     }
 
     #[must_use]

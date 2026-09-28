@@ -41,6 +41,8 @@ pub trait DataPlaneMap {
 pub trait DataPlane {
     fn pump_rx(&mut self) -> Result<(), DataPlaneError>;
     fn pump_tx(&mut self) -> Result<(), DataPlaneError>;
+    /// Drop queued subscriber samples without driving the guest in-port.
+    fn discard_rx(&mut self) -> Result<(), DataPlaneError>;
 }
 
 struct UartRxLane {
@@ -266,6 +268,18 @@ impl DataPlane for UartDataPlane {
         }
         Ok(())
     }
+
+    fn discard_rx(&mut self) -> Result<(), DataPlaneError> {
+        for lane in &self.rx {
+            while lane
+                .sub
+                .receive()
+                .map_err(|e| DataPlaneError::Message(format!("uart recv: {e:?}")))?
+                .is_some()
+            {}
+        }
+        Ok(())
+    }
 }
 
 /// Open every data-plane map needed by `board_id` for the given topology.
@@ -379,6 +393,50 @@ mod tests {
         });
         ports.insert_in(rx).unwrap();
         (ports, tap)
+    }
+
+    #[test]
+    fn uart_dataplane_discards_queued_rx_without_driving_the_guest() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = new_cluster_key();
+        let config = isolated_config(dir.path()).unwrap();
+        let topo = two_board_topo();
+        let board_a = &topo.boards[0];
+        let board_b = &topo.boards[1];
+
+        let na = create_node(&config, "dp-discard-a").unwrap();
+        let nb = create_node(&config, "dp-discard-b").unwrap();
+        let map_a = UartDataPlaneMap::open(&na, &key, "a", board_a, &topo.edges).unwrap();
+        let map_b = UartDataPlaneMap::open(&nb, &key, "b", board_b, &topo.edges).unwrap();
+
+        let frame = UartFrame {
+            data: 0x41,
+            data_bits: 8,
+            ..UartFrame::default()
+        };
+
+        {
+            let (ports_a, _tap_a) = board_ports_with_rx_tap("a_rx_tap");
+            let mut plane_a = map_a.bind(&ports_a).unwrap();
+            ports_a
+                .out_port::<UartFrame>("uart0_tx")
+                .unwrap()
+                .on_input(&[frame], 0);
+            plane_a.pump_tx().unwrap();
+        }
+
+        let (ports_b, tap_b) = board_ports_with_rx_tap("b_rx_tap");
+        let mut plane_b = map_b.bind(&ports_b).unwrap();
+        for _ in 0..50 {
+            plane_b.discard_rx().unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        plane_b.discard_rx().unwrap();
+        plane_b.pump_rx().unwrap();
+        assert!(
+            tap_b.pending().is_empty(),
+            "queued uart rx must be dropped before the guest sees it"
+        );
     }
 
     #[test]
