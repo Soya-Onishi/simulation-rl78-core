@@ -1,7 +1,7 @@
 //! Shared board-process framework for cluster participation.
 //!
 //! Board binaries supply a machine factory; this module owns CLI parsing, IPC,
-//! topology lookup, firmware file I/O, and the same-thread guest loop.
+//! topology lookup, firmware loading, and the same-thread guest loop.
 
 use std::fs;
 use std::path::PathBuf;
@@ -46,6 +46,8 @@ pub enum BoardError {
     DataPlane(#[from] DataPlaneError),
     #[error("firmware error: {0}")]
     Firmware(#[from] FirmwareError),
+    #[error("{0}")]
+    ElfSource(#[from] crate::elf_source::ElfSourceError),
     #[error("{0}")]
     Message(String),
 }
@@ -140,8 +142,8 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 /// Run the board framework with a machine built by `build`.
 ///
 /// `build` assembles ROM/RAM (and peripherals) only — it must not load firmware.
-/// When the topology board entry has an `elf` path, this function reads the file
-/// and calls [`Machine::load_firmware`].
+/// When the topology board entry has an `elf` source, this function loads those
+/// bytes and calls [`Machine::load_firmware`].
 ///
 /// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
 /// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
@@ -165,10 +167,14 @@ pub fn run_board<C: Cpu>(
 
     let (machine, ports) = build();
     let mut sim = Simulator::new(machine, SimConfig::default());
-    if let Some(elf_path) = &board.elf {
-        let image = fs::read(elf_path)?;
+    if let Some(elf) = &board.elf {
+        let image = crate::elf_source::load(elf)?;
         sim.machine_mut().load_firmware(&image)?;
-        log::info!("loaded firmware {}", elf_path);
+        log::info!(
+            "loaded firmware {} ({} bytes)",
+            crate::elf_source::describe(elf),
+            image.len()
+        );
     }
     sim.machine_mut().reset();
     ports.clear_pending();

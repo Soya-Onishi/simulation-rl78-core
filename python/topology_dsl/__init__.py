@@ -30,6 +30,8 @@ class EndpointRef:
 class Board:
     id: str
     kind: str
+    # One firmware source: filesystem path, file://, http(s)://, or
+    # base64:<payload>. These are alternatives and are not combined.
     elf: Optional[str] = None
     _endpoints: dict[str, EndpointRef] = field(default_factory=dict, repr=False)
 

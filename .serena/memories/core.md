@@ -11,7 +11,7 @@ RL78 guest sim: Rust workspace + tlib (TCG) submodule. No config files — machi
 
 ## Source map (exclude vendored tlib tree unless changing FFI)
 - Root: `Cargo.toml` workspace, `tests/cli_lifecycle.rs`, `python/topology_dsl/`, `python/examples/`.
-- `sim-cluster/src/{lib,topology,server,arbiter,board_runtime,control,lifecycle,cluster_stop,time_sync,node}.rs`, `sim-cluster/src/ipc/{mod,hash,names,wire,runtime,control_bus,uart_bus}.rs`, bins `cluster_{server,arbiter}.rs`. Control plane: a2n `ControlToNode` (broadcast variants) and n2a `ControlToArbiter` (`from` sender hash), both `repr(C)` + `ZeroCopySend` / `HostStopReason` — no separate `ControlWire`. Logs: `ClusterLog` (`LogLevel` + `LogOrigin` + text) on `log/n2a` (node→arbiter) and `log/a2s` (arbiter→server). The server creates `log/a2s` before spawning the arbiter. Call sites use the `log` crate (`log::info!` and siblings). Each node or arbiter process installs one global queue (mutex, cap 256); a thread owns the iceoryx ports and forwards to the server. Tests that install that queue are `#[serial]`. The server prints by level (`--log-level`, default info; error/warn on stderr, info and above on stdout).
+- `sim-cluster/src/{lib,topology,elf_source,server,arbiter,board_runtime,control,lifecycle,cluster_stop,time_sync,node}.rs`, `sim-cluster/src/ipc/{mod,hash,names,wire,runtime,control_bus,uart_bus}.rs`, bins `cluster_{server,arbiter}.rs`. Control plane: a2n `ControlToNode` (broadcast variants) and n2a `ControlToArbiter` (`from` sender hash), both `repr(C)` + `ZeroCopySend` / `HostStopReason` — no separate `ControlWire`. Logs: `ClusterLog` (`LogLevel` + `LogOrigin` + text) on `log/n2a` (node→arbiter) and `log/a2s` (arbiter→server). The server creates `log/a2s` before spawning the arbiter. Call sites use the `log` crate (`log::info!` and siblings). Each node or arbiter process installs one global queue (mutex, cap 256); a thread owns the iceoryx ports and forwards to the server. Tests that install that queue are `#[serial]`. The server prints by level (`--log-level`, default info; error/warn on stderr, info and above on stdout).
 - `sim-kernel/src/{lib,machine,sim,bus,cpu,command,clock,event,stop,breakpoint}.rs` — `Cpu::load_firmware` / `Machine::load_firmware` / `FirmwareError`.
 - `rl78-core/src/{lib,cpu,callbacks,ffi,map,magic,elf}.rs`, `build.rs`, `src/host_callbacks.c`, submodule `rl78-core/tlib` (git branch `rl78`).
 - `rl78-minimal-board/src/main.rs`.
@@ -23,6 +23,7 @@ RL78 guest sim: Rust workspace + tlib (TCG) submodule. No config files — machi
 - tlib host arch support in build: x86 / x86_64 only (`HOST_ARCH=i386`).
 - First build needs `git submodule update --init --recursive`.
 - `sim-cluster` depends on `sim-kernel` only (not `rl78-core`).
+- Topology `elf` is one string. Exclusive forms: filesystem path, `file://`, `http(s)://`, or `base64:` payload. Loaded by `sim-cluster/src/elf_source.rs`. JSON validate checks the form only (no local stat, no fetch).
 
 ## Related
 - Stack/tooling: `mem:tech_stack`

@@ -47,7 +47,12 @@ pub struct BoardSpec {
     pub id: String,
     /// Board kind string (e.g. `"rl78"`). Validated later by the node.
     pub kind: String,
-    /// Optional guest firmware path for the node to load.
+    /// Optional guest firmware source for the node to load.
+    ///
+    /// One string selects exactly one source: a filesystem path, `file://`,
+    /// `http://` or `https://`, or `base64:` plus a standard Base64
+    /// payload. A path and inline bytes are not combined, and a JSON object
+    /// is rejected. See [`crate::elf_source`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elf: Option<String>,
     pub endpoints: Vec<EndpointSpec>,
@@ -139,6 +144,11 @@ impl LogicalTopology {
                         board.id, ep.name
                     )));
                 }
+            }
+            if let Some(elf) = &board.elf {
+                crate::elf_source::check_spec(elf).map_err(|err| {
+                    TopologyError::Invalid(format!("board '{}': {err}", board.id))
+                })?;
             }
         }
 
@@ -295,5 +305,27 @@ mod tests {
         let text = topo.to_json_string().unwrap();
         let again = parse_logical_topology(&text).unwrap();
         assert_eq!(topo, again);
+    }
+
+    #[test]
+    fn accepts_remote_and_inline_elf_strings() {
+        for elf in ["a.elf", "https://example.test/fw.elf", "base64:AQI="] {
+            let elf_json = serde_json::to_string(elf).unwrap();
+            let text = format!(
+                r#"{{"boards":[{{"id":"a","kind":"rl78","elf":{elf_json},"endpoints":[]}}],"edges":[],"margin_ns":1,"headroom_threshold_ns":1}}"#
+            );
+            let topo = parse_logical_topology(&text).unwrap();
+            assert_eq!(topo.boards[0].elf.as_deref(), Some(elf));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_elf_and_combined_object() {
+        let scheme = r#"{"boards":[{"id":"a","kind":"rl78","elf":"ftp://example/a.elf","endpoints":[]}],"edges":[],"margin_ns":1,"headroom_threshold_ns":1}"#;
+        let err = parse_logical_topology(scheme).unwrap_err();
+        assert!(err.to_string().contains("unsupported elf URL scheme"));
+
+        let object = r#"{"boards":[{"id":"a","kind":"rl78","elf":{"path":"a.elf","base64":"AQI="},"endpoints":[]}],"edges":[],"margin_ns":1,"headroom_threshold_ns":1}"#;
+        assert!(parse_logical_topology(object).is_err());
     }
 }
