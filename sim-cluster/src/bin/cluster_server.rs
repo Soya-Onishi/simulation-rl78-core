@@ -1,76 +1,67 @@
-//! `cluster-server` — entry: run Python DSL, spawn `cluster-arbiter`.
+//! `cluster-server` — simulation control and the status page, in one process.
 
 use std::env;
 use std::path::PathBuf;
 use std::process;
 
-use sim_cluster::{LogLevel, ServerOptions, run_server};
+use sim_cluster::{ServerOptions, run_server};
 
 fn main() {
+    let mut listen = "127.0.0.1:8090".to_string();
+    let mut topology: Option<PathBuf> = None;
     let mut args = env::args().skip(1);
-    let mut log_level = LogLevel::Info;
-    let mut script: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 eprint!("{}", usage());
                 process::exit(0);
             }
-            "--log-level" => {
-                let Some(label) = args.next() else {
-                    eprintln!("cluster-server: --log-level requires a level");
+            "--listen" => {
+                let Some(addr) = args.next() else {
+                    eprintln!("cluster-server: --listen requires host:port");
                     eprint!("{}", usage());
                     process::exit(2);
                 };
-                let Some(level) = LogLevel::from_label(&label) else {
-                    eprintln!("cluster-server: unknown log level {label}");
-                    eprint!("{}", usage());
-                    process::exit(2);
-                };
-                log_level = level;
+                listen = addr;
             }
-            other if other.starts_with('-') => {
+            "--topology" => {
+                let Some(path) = args.next() else {
+                    eprintln!("cluster-server: --topology requires a .py or .json file");
+                    eprint!("{}", usage());
+                    process::exit(2);
+                };
+                topology = Some(PathBuf::from(path));
+            }
+            other => {
                 eprintln!("cluster-server: unknown argument {other}");
                 eprint!("{}", usage());
                 process::exit(2);
             }
-            other => {
-                if script.is_some() {
-                    eprintln!("cluster-server: unexpected extra arguments");
-                    eprint!("{}", usage());
-                    process::exit(2);
-                }
-                script = Some(PathBuf::from(other));
-            }
         }
     }
-    let Some(script) = script else {
-        eprint!("{}", usage());
-        process::exit(2);
-    };
 
-    let mut opts = match ServerOptions::from_script(script) {
+    let mut opts = match ServerOptions::new(listen) {
         Ok(opts) => opts,
         Err(err) => {
             eprintln!("cluster-server: {err}");
             process::exit(1);
         }
     };
-    opts.log_level = log_level;
-
-    match run_server(&opts) {
-        Ok(code) => process::exit(code),
-        Err(err) => {
-            eprintln!("cluster-server: {err}");
-            process::exit(1);
-        }
+    opts.topology = topology;
+    if let Err(err) = run_server(&opts) {
+        eprintln!("cluster-server: {err}");
+        process::exit(1);
     }
 }
 
 fn usage() -> &'static str {
-    "Usage: cluster-server [--log-level <error|warn|info|debug|trace>] <topology.py>\n\
+    "Usage: cluster-server [--listen host:port] [--topology file.py|file.json]\n\
      \n\
-     Cluster entry. Runs the Python topology DSL script, validates the logical\n\
-     JSON, and spawns cluster-arbiter with that topology. Node and arbiter logs\n\
-     are printed here. Default log level is info (error, warn, and info).\n"
+     Serves the simulation page and runs the arbiter in this process.\n\
+     With --topology, that simulation is loaded stopped until Start.\n\
+     Default listen address is 127.0.0.1:8090. Open the printed URL.\n\
+     \n\
+     Local elf paths are read here and stored as base64:. http(s) and base64:\n\
+     are kept as written. Logs are kept in this process and filtered only\n\
+     in the page.\n"
 }

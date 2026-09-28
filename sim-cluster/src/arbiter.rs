@@ -1,17 +1,24 @@
-//! Arbiter: create iceoryx services, spawn nodes, Ready barrier, Start.
+//! Arbiter: create iceoryx services, spawn nodes, Ready barrier, then wait.
+//!
+//! The guest stays stopped until a host `start` command. `stop` halts the
+//! guest without exiting this process, so a later `start` or `reset` can
+//! run. `shutdown` on the server→arbiter iceoryx channel ends the process.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
+use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
-    ArbiterControl, ArbiterLogBus, IpcError, board_hash_table, create_node, isolated_config,
-    new_cluster_key, root_path_for_cluster,
+    ArbiterControl, ArbiterHostPort, ArbiterLogBus, IpcError, board_hash_table, create_node,
+    isolated_config, new_cluster_key, root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
+use crate::time_sync::TimeCeiling;
 use crate::topology::{LogicalTopology, TopologyError};
 
 /// Idle poll while waiting for Ready / time-sync (arbiter side).
@@ -60,14 +67,16 @@ impl ArbiterOptions {
     }
 }
 
-/// Load topology, spawn nodes, wait for Ready, broadcast Start.
+/// Load topology, spawn nodes, wait for Ready, then follow iceoryx host commands.
 pub fn run_arbiter(opts: &ArbiterOptions) -> Result<(), ArbiterError> {
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
     run_arbiter_with_topology(opts, &topo)
 }
 
-/// Core arbiter loop (also used from tests with an in-memory topology).
+/// Spawn nodes and stay up until the server publishes `shutdown`.
+///
+/// Host commands arrive on `ctrl/s2a`. Status is published on `status/a2s`.
 pub fn run_arbiter_with_topology(
     opts: &ArbiterOptions,
     topo: &LogicalTopology,
@@ -78,61 +87,29 @@ pub fn run_arbiter_with_topology(
             opts.node_bin.display()
         )));
     }
-
-    let board_ids: Vec<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
-    let boards = board_hash_table(board_ids).map_err(ArbiterError::Message)?;
-
-    let config = isolated_config(&opts.iox_root)?;
-    let node = create_node(&config, &format!("arbiter-{}", opts.cluster_key))?;
-    let control =
-        ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards.clone())?;
-    let mut logs =
-        ArbiterLogBus::create(&opts.iox_root, &opts.cluster_key, topo.boards.len(), boards)?;
-    log::info!(
-        "loaded topology ({} boards, {} edges, margin_ns={}, cluster_key={})",
-        topo.boards.len(),
-        topo.edges.len(),
-        topo.margin_ns,
-        opts.cluster_key
-    );
-    // UART services are open_or_create'd by the TX/RX nodes (topology QoS).
-
-    let mut children: Vec<Child> = Vec::new();
-    for board in &topo.boards {
-        let child = Command::new(&opts.node_bin)
-            .arg("--board-id")
-            .arg(&board.id)
-            .arg("--cluster-key")
-            .arg(&opts.cluster_key)
-            .arg("--iox-root")
-            .arg(&opts.iox_root)
-            .arg("--topology")
-            .arg(&opts.topology_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        children.push(child);
-    }
-
-    let result = ready_barrier_and_start(topo, &control);
-    if result.is_ok() {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    logs.shutdown();
-
-    // TODO(cluster-shutdown): replace OS-kill with ControlToNode::Shutdown.
-    for child in &mut children {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    result
+    run_host_session(opts, topo)
 }
 
+/// Test helper: Ready barrier, immediate Start, then a short time-sync window.
+#[cfg(test)]
 fn ready_barrier_and_start(
     topo: &LogicalTopology,
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
+    let mut peers = await_ready(topo, control)?;
+    control.publish(&ControlToNode::Start)?;
+    for state in peers.values_mut() {
+        *state = state.on_start_broadcast();
+    }
+    log::info!("Start broadcast");
+    run_time_sync(topo, control, &mut peers)?;
+    Ok(())
+}
+
+fn await_ready(
+    topo: &LogicalTopology,
+    control: &ArbiterControl,
+) -> Result<HashMap<String, PeerState>, ArbiterError> {
     let timeout = Duration::from_millis(topo.ready_timeout_ms);
     let deadline = Instant::now() + timeout;
     let mut peers: HashMap<String, PeerState> = topo
@@ -141,18 +118,16 @@ fn ready_barrier_and_start(
         .map(|b| (b.id.clone(), PeerState::AwaitingReady))
         .collect();
 
-    // Broadcast one StartupRecord (nodes may still be opening).
     let startup = ControlToNode::StartupRecord {
         margin_ns: topo.margin_ns,
         headroom_threshold_ns: topo.headroom_threshold_ns,
     };
     control.publish(&startup)?;
-    // Re-publish periodically until Ready so late openers still see Startup.
     let mut last_startup = Instant::now();
 
     while peers.values().any(|p| *p != PeerState::Ready) {
         if Instant::now() >= deadline {
-            return ready_timeout(topo, &peers);
+            return Err(ready_timeout(topo, &peers));
         }
         if last_startup.elapsed() > Duration::from_millis(50)
             && peers.values().any(|p| *p == PeerState::AwaitingReady)
@@ -185,22 +160,15 @@ fn ready_barrier_and_start(
             }
         }
         if !progressed {
-            std::thread::sleep(ARBITER_POLL_IDLE);
+            thread::sleep(ARBITER_POLL_IDLE);
         }
     }
 
     log::info!("Ready barrier complete ({} nodes)", peers.len());
-
-    control.publish(&ControlToNode::Start)?;
-    for state in peers.values_mut() {
-        *state = state.on_start_broadcast();
-    }
-    log::info!("Start broadcast");
-
-    run_time_sync(topo, control, &mut peers)?;
-    Ok(())
+    Ok(peers)
 }
 
+#[cfg(test)]
 fn run_time_sync(
     topo: &LogicalTopology,
     control: &ArbiterControl,
@@ -235,8 +203,9 @@ fn run_time_sync(
                     from: _,
                     virtual_time_ns,
                 }) => {
-                    ceiling.report(&board_id, virtual_time_ns);
-                    changed = true;
+                    if ceiling.report(&board_id, virtual_time_ns) {
+                        changed = true;
+                    }
                 }
                 Some(PeerEffect::HostStop { from: _, reason }) => {
                     // HostStopReason variants are all cluster-relevant by construction.
@@ -266,6 +235,277 @@ fn run_time_sync(
     Ok(())
 }
 
+enum SyncStep {
+    Continue,
+    Stopped,
+}
+
+fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(), ArbiterError> {
+    let board_ids: Vec<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
+    let boards = board_hash_table(board_ids).map_err(ArbiterError::Message)?;
+
+    let config = isolated_config(&opts.iox_root)?;
+    let node = create_node(&config, &format!("arbiter-{}", opts.cluster_key))?;
+    let host = ArbiterHostPort::open(&node, &opts.cluster_key)?;
+    let control =
+        ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards.clone())?;
+    let mut logs =
+        ArbiterLogBus::create(&opts.iox_root, &opts.cluster_key, topo.boards.len(), boards)?;
+    log::info!(
+        "loaded topology ({} boards, {} edges, margin_ns={}, cluster_key={})",
+        topo.boards.len(),
+        topo.edges.len(),
+        topo.margin_ns,
+        opts.cluster_key
+    );
+
+    let mut children = spawn_nodes(opts, topo)?;
+    let mut peers = match await_ready(topo, &control) {
+        Ok(peers) => peers,
+        Err(err) => {
+            stop_children(&mut children);
+            logs.shutdown();
+            return Err(err);
+        }
+    };
+    let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
+    let mut allowed = ceiling.allowed_ns();
+    let mut running = false;
+    let mut last_status = Instant::now();
+    write_status(&host, running, ceiling.virtual_time_ns(), topo, &peers)?;
+    let mut reported_vt = ceiling.virtual_time_ns();
+    let mut reported_running = running;
+
+    let result = loop {
+        let mut shutdown = false;
+        loop {
+            match host.try_cmd()? {
+                Some(HostCommand::Shutdown) => {
+                    shutdown = true;
+                    break;
+                }
+                Some(HostCommand::Start) if !running => {
+                    begin_running(&control, &mut peers, allowed)?;
+                    running = true;
+                }
+                Some(HostCommand::Stop) if running => {
+                    log::info!("host Stop");
+                    broadcast_cluster_stop(
+                        &control,
+                        &mut peers,
+                        "server",
+                        HostStopReason::ExternalStop,
+                    )?;
+                    running = false;
+                }
+                Some(HostCommand::Reset) => {
+                    log::info!("host Reset");
+                    broadcast_cluster_stop(
+                        &control,
+                        &mut peers,
+                        "server",
+                        HostStopReason::ExternalStop,
+                    )?;
+
+                    control.publish(&ControlToNode::Reset)?;
+                    discard_n2a(&control)?;
+                    let node_time = allowed.saturating_add(ceiling.margin_ns());
+                    ceiling.place_reports_at(node_time);
+                    allowed = node_time.saturating_add(ceiling.margin_ns());
+                    control.publish(&ControlToNode::Allowed {
+                        allowed_ns: allowed,
+                    })?;
+                    log::info!("host Reset: Allowed={allowed}");
+                    broadcast_start(&control, &mut peers)?;
+                    running = true;
+                    log::info!("host Reset: Start");
+                }
+                Some(HostCommand::Start) | Some(HostCommand::Stop) => {}
+                None => break,
+            }
+        }
+
+        if shutdown {
+            break Ok(());
+        }
+
+        if running {
+            match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed)? {
+                SyncStep::Continue => {}
+                SyncStep::Stopped => {
+                    running = false;
+                }
+            }
+        } else {
+            thread::sleep(ARBITER_POLL_IDLE);
+        }
+
+        let vt = ceiling.virtual_time_ns();
+        if running != reported_running
+            || vt != reported_vt
+            || last_status.elapsed() >= Duration::from_millis(100)
+        {
+            write_status(&host, running, vt, topo, &peers)?;
+            reported_running = running;
+            reported_vt = vt;
+            last_status = Instant::now();
+        }
+    };
+
+    logs.shutdown();
+    stop_children(&mut children);
+    result
+}
+
+fn begin_running(
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
+    allowed: u64,
+) -> Result<(), ArbiterError> {
+    broadcast_start(control, peers)?;
+    control.publish(&ControlToNode::Allowed {
+        allowed_ns: allowed,
+    })?;
+    log::info!("Allowed={allowed}");
+    Ok(())
+}
+
+fn broadcast_start(
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
+) -> Result<(), ArbiterError> {
+    control.publish(&ControlToNode::Start)?;
+    for state in peers.values_mut() {
+        *state = state.on_start_broadcast();
+    }
+    log::info!("Start broadcast");
+    Ok(())
+}
+
+fn step_time_sync(
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
+    ceiling: &mut TimeCeiling,
+    allowed: &mut u64,
+) -> Result<SyncStep, ArbiterError> {
+    let mut changed = false;
+    let mut cluster_stop: Option<(String, HostStopReason)> = None;
+    while let Some(msg) = control.try_recv()? {
+        let from = msg.from_board();
+        let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
+            continue;
+        };
+        let Some(state) = peers.get_mut(&board_id) else {
+            continue;
+        };
+        let (next, effect) = state.on_message(msg);
+        match effect.clone() {
+            Some(PeerEffect::TimeReport {
+                from: _,
+                virtual_time_ns,
+            }) => {
+                if ceiling.report(&board_id, virtual_time_ns) {
+                    changed = true;
+                }
+            }
+            Some(PeerEffect::HostStop { from: _, reason }) => {
+                cluster_stop = Some((board_id.clone(), reason));
+            }
+            other => warn_peer(&board_id, other)?,
+        }
+        *state = next;
+    }
+    if let Some((source, reason)) = cluster_stop {
+        log::info!("HostStop from '{source}' ({reason}); broadcasting ClusterStop");
+        broadcast_cluster_stop(control, peers, &source, reason)?;
+        return Ok(SyncStep::Stopped);
+    }
+    if changed {
+        let next_allowed = ceiling.allowed_ns();
+        if next_allowed != *allowed {
+            *allowed = next_allowed;
+            control.publish(&ControlToNode::Allowed {
+                allowed_ns: *allowed,
+            })?;
+            log::trace!("Allowed={allowed}");
+        }
+    }
+    thread::sleep(ARBITER_POLL_IDLE);
+    Ok(SyncStep::Continue)
+}
+
+fn discard_n2a(control: &ArbiterControl) -> Result<(), ArbiterError> {
+    while control.try_recv()?.is_some() {}
+    Ok(())
+}
+
+fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Child>, ArbiterError> {
+    let mut children = Vec::new();
+    for board in &topo.boards {
+        let child = Command::new(&opts.node_bin)
+            .arg("--board-id")
+            .arg(&board.id)
+            .arg("--cluster-key")
+            .arg(&opts.cluster_key)
+            .arg("--iox-root")
+            .arg(&opts.iox_root)
+            .arg("--topology")
+            .arg(&opts.topology_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        children.push(child);
+    }
+    Ok(children)
+}
+
+fn stop_children(children: &mut Vec<Child>) {
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    children.clear();
+}
+
+fn write_status(
+    host: &ArbiterHostPort,
+    running: bool,
+    virtual_time_ns: u64,
+    topo: &LogicalTopology,
+    peers: &HashMap<String, PeerState>,
+) -> Result<(), ArbiterError> {
+    let nodes = topo
+        .boards
+        .iter()
+        .map(|board| SessionNode {
+            id: board.id.clone(),
+            kind: board.kind.clone(),
+            state: peers
+                .get(&board.id)
+                .map(peer_state_name)
+                .unwrap_or("unknown")
+                .to_string(),
+        })
+        .collect();
+    let status = SessionStatus {
+        state: if running { "running" } else { "stopped" }.to_string(),
+        virtual_time_ns,
+        nodes,
+    };
+    host.publish_status(&status)?;
+    Ok(())
+}
+
+fn peer_state_name(state: &PeerState) -> &'static str {
+    match state {
+        PeerState::AwaitingReady => "awaiting_ready",
+        PeerState::Ready => "ready",
+        PeerState::Running => "running",
+        PeerState::Stopped => "stopped",
+    }
+}
+
 fn broadcast_cluster_stop(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
@@ -279,20 +519,17 @@ fn broadcast_cluster_stop(
     Ok(())
 }
 
-fn ready_timeout(
-    topo: &LogicalTopology,
-    peers: &HashMap<String, PeerState>,
-) -> Result<(), ArbiterError> {
+fn ready_timeout(topo: &LogicalTopology, peers: &HashMap<String, PeerState>) -> ArbiterError {
     let missing = peers
         .iter()
         .filter(|(_, p)| **p != PeerState::Ready)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>()
         .join(",");
-    Err(ArbiterError::ReadyTimeout {
+    ArbiterError::ReadyTimeout {
         timeout_ms: topo.ready_timeout_ms,
         missing,
-    })
+    }
 }
 
 fn warn_peer(board_id: &str, effect: Option<PeerEffect>) -> Result<(), ArbiterError> {

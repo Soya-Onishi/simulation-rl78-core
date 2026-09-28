@@ -30,6 +30,8 @@ pub enum NodeEffect {
     SendReady,
     /// Apply a new virtual-time ceiling locally.
     SetAllowed { allowed_ns: u64 },
+    /// [`sim_kernel::Machine::reset`], then move virtual time to `allowed + margin`.
+    Reset,
     /// Log-only; state is unchanged aside from the warning.
     Warn(String),
 }
@@ -50,10 +52,15 @@ impl NodeState {
                 (NodeState::Stopped, Some(NodeEffect::SendReady))
             }
             (NodeState::Stopped, ControlToNode::Start) => (NodeState::Running, None),
-            (NodeState::Running, ControlToNode::Allowed { allowed_ns }) => (
-                NodeState::Running,
-                Some(NodeEffect::SetAllowed { allowed_ns }),
-            ),
+            // Ceiling may be republished while stopped, immediately after Reset
+            // and before the following Start.
+            (
+                state @ (NodeState::Stopped | NodeState::Running),
+                ControlToNode::Allowed { allowed_ns },
+            ) => (state, Some(NodeEffect::SetAllowed { allowed_ns })),
+            (NodeState::Stopped, ControlToNode::Reset) => {
+                (NodeState::Stopped, Some(NodeEffect::Reset))
+            }
             (NodeState::Running, ControlToNode::ClusterStop { reason }) => (
                 NodeState::Stopped,
                 Some(NodeEffect::Warn(format!("ClusterStop ({reason})"))),
@@ -139,7 +146,8 @@ impl PeerState {
     #[must_use]
     pub fn on_start_broadcast(self) -> Self {
         match self {
-            PeerState::Ready | PeerState::Running => PeerState::Running,
+            // Stopped is included so a later host Start resumes the same peers.
+            PeerState::Ready | PeerState::Running | PeerState::Stopped => PeerState::Running,
             other => other,
         }
     }
@@ -179,6 +187,22 @@ mod tests {
     }
 
     #[test]
+    fn node_reset_then_ceiling_then_start() {
+        let mut s = NodeState::Stopped;
+        let (n, eff) = s.on_message(ControlToNode::Reset);
+        assert_eq!(n, NodeState::Stopped);
+        assert_eq!(eff, Some(NodeEffect::Reset));
+        s = n;
+        let (n, eff) = s.on_message(ControlToNode::Allowed { allowed_ns: 1_000 });
+        assert_eq!(n, NodeState::Stopped);
+        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 1_000 }));
+        s = n;
+        let (n, eff) = s.on_message(ControlToNode::Start);
+        assert_eq!(n, NodeState::Running);
+        assert!(eff.is_none());
+    }
+
+    #[test]
     fn node_ignores_startup_after_running() {
         let s = NodeState::Running;
         let (n, eff) = s.on_message(ControlToNode::StartupRecord {
@@ -200,6 +224,16 @@ mod tests {
         let (n, eff) = s.on_message(ControlToArbiter::Ready { from: hash_a });
         assert_eq!(n, PeerState::Ready);
         assert!(matches!(eff, Some(PeerEffect::Warn(_))));
+    }
+
+    #[test]
+    fn peer_start_from_stopped_resumes() {
+        assert_eq!(PeerState::Stopped.on_start_broadcast(), PeerState::Running);
+        assert_eq!(PeerState::Ready.on_start_broadcast(), PeerState::Running);
+        assert_eq!(
+            PeerState::AwaitingReady.on_start_broadcast(),
+            PeerState::AwaitingReady
+        );
     }
 
     #[test]

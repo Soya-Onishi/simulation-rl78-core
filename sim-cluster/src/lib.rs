@@ -11,6 +11,9 @@ pub mod board_runtime;
 pub mod cluster_stop;
 pub mod control;
 pub mod data_plane;
+pub mod elf_source;
+pub mod host;
+pub mod http_util;
 pub mod ipc;
 pub mod lifecycle;
 pub mod log_msg;
@@ -26,10 +29,13 @@ pub use board_runtime::{
 };
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
+pub use elf_source::ElfSourceError;
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use log_msg::{ClusterLog, LogConsole, LogLevel, LogOrigin};
 pub use node::notify_host_stop;
-pub use server::{ServerError, ServerOptions, run_server};
+pub use server::{
+    ServerError, ServerOptions, execute_python_script, execute_python_source, run_server,
+};
 pub use sim_kernel::UartFrame;
 pub use time_sync::TimeCeiling;
 pub use topology::{

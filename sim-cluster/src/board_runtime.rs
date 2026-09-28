@@ -1,7 +1,7 @@
 //! Shared board-process framework for cluster participation.
 //!
 //! Board binaries supply a machine factory; this module owns CLI parsing, IPC,
-//! topology lookup, firmware file I/O, and the same-thread guest loop.
+//! topology lookup, firmware loading, and the same-thread guest loop.
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,6 +15,7 @@ use sim_kernel::{
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
+use crate::elf_source;
 use crate::ipc::{
     IpcError, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node, isolated_config,
 };
@@ -46,6 +47,8 @@ pub enum BoardError {
     DataPlane(#[from] DataPlaneError),
     #[error("firmware error: {0}")]
     Firmware(#[from] FirmwareError),
+    #[error("{0}")]
+    ElfSource(#[from] crate::elf_source::ElfSourceError),
     #[error("{0}")]
     Message(String),
 }
@@ -140,8 +143,9 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 /// Run the board framework with a machine built by `build`.
 ///
 /// `build` assembles ROM/RAM (and peripherals) only — it must not load firmware.
-/// When the topology board entry has an `elf` path, this function reads the file
-/// and calls [`Machine::load_firmware`].
+/// When the topology board entry has an `elf` spec, this function loads a
+/// filesystem path, `base64:` image, or http(s) URL and calls
+/// [`Machine::load_firmware`].
 ///
 /// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
 /// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
@@ -165,10 +169,14 @@ pub fn run_board<C: Cpu>(
 
     let (machine, ports) = build();
     let mut sim = Simulator::new(machine, SimConfig::default());
-    if let Some(elf_path) = &board.elf {
-        let image = fs::read(elf_path)?;
+    if let Some(elf) = &board.elf {
+        let image = elf_source::load(elf)?;
         sim.machine_mut().load_firmware(&image)?;
-        log::info!("loaded firmware {}", elf_path);
+        log::info!(
+            "loaded firmware {} ({} bytes)",
+            elf_source::describe(elf),
+            image.len()
+        );
     }
     sim.machine_mut().reset();
     ports.clear_pending();
@@ -176,38 +184,51 @@ pub fn run_board<C: Cpu>(
     let mut data_planes = bind_data_planes(plane_maps, &ports)?;
 
     let mut state = NodeState::AwaitingStartup;
+    let mut margin_ns = 0_u64;
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
-    let mut guest_started = false;
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
         while let Some(msg) = control.try_recv()? {
             if let ControlToNode::StartupRecord {
+                margin_ns: margin,
                 headroom_threshold_ns: thr,
-                ..
             } = msg
             {
+                margin_ns = margin;
                 headroom_threshold_ns = thr;
             }
+            let prev = state;
             let (next, effect) = state.on_message(msg);
+            if matches!(effect, Some(NodeEffect::Reset)) {
+                last_time_report = None;
+            }
             if let Some(effect) = effect {
-                apply_effect(board_hash, &control, effect, &mut allowed_ns, &mut sim)?;
+                apply_effect(
+                    board_hash,
+                    &control,
+                    effect,
+                    margin_ns,
+                    &mut allowed_ns,
+                    &mut sim,
+                )?;
             }
             if next != state {
                 log::trace!("{state:?} -> {next:?}");
             }
             state = next;
+            if prev != NodeState::Running && state == NodeState::Running {
+                let _ = sim.command(Command::Start);
+                log::info!("simulator Start");
+            } else if prev == NodeState::Running && state != NodeState::Running {
+                let _ = sim.command(Command::Stop);
+                log::info!("simulator Stop");
+            }
         }
 
         if state == NodeState::Running {
-            if !guest_started {
-                let _ = sim.command(Command::Start);
-                guest_started = true;
-                log::info!("simulator Start");
-            }
-
             for plane in &mut data_planes {
                 plane.pump_rx()?;
             }
@@ -280,6 +301,7 @@ fn apply_effect<C: Cpu>(
     board_hash: u64,
     control: &NodeControl,
     effect: NodeEffect,
+    margin_ns: u64,
     allowed_ns: &mut u64,
     sim: &mut Simulator<C>,
 ) -> Result<(), BoardError> {
@@ -292,6 +314,12 @@ fn apply_effect<C: Cpu>(
             *allowed_ns = next;
             let _ = sim.command(Command::SetAllowed { tick: Tick(next) });
             log::trace!("Allowed={next}");
+        }
+        NodeEffect::Reset => {
+            let target = allowed_ns.saturating_add(margin_ns);
+            sim.machine_mut().set_virtual_time(Tick(target));
+            sim.machine_mut().reset();
+            log::info!("simulator Reset vt={target}");
         }
         NodeEffect::Warn(msg) => {
             log::warn!("{msg}");

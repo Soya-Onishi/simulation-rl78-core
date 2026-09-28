@@ -19,9 +19,24 @@ impl TimeCeiling {
         Self { margin_ns, reports }
     }
 
-    /// Update one board's last reported virtual time (kept even while stopped).
-    pub fn report(&mut self, board_id: &str, virtual_time_ns: u64) {
-        if let Some(slot) = self.reports.get_mut(board_id) {
+    /// Update one board's last reported virtual time.
+    ///
+    /// A report older than the stored value is ignored so a stale sample cannot
+    /// pull the ceiling backwards.
+    pub fn report(&mut self, board_id: &str, virtual_time_ns: u64) -> bool {
+        let Some(slot) = self.reports.get_mut(board_id) else {
+            return false;
+        };
+        if virtual_time_ns <= *slot {
+            return false;
+        }
+        *slot = virtual_time_ns;
+        true
+    }
+
+    /// Put every board's report at `virtual_time_ns`.
+    pub fn place_reports_at(&mut self, virtual_time_ns: u64) {
+        for slot in self.reports.values_mut() {
             *slot = virtual_time_ns;
         }
     }
@@ -29,8 +44,13 @@ impl TimeCeiling {
     /// `allowed = min(reports) + margin`.
     #[must_use]
     pub fn allowed_ns(&self) -> u64 {
-        let min = self.reports.values().copied().min().unwrap_or(0);
-        min.saturating_add(self.margin_ns)
+        self.virtual_time_ns().saturating_add(self.margin_ns)
+    }
+
+    /// Minimum reported virtual time across boards (`0` before any report).
+    #[must_use]
+    pub fn virtual_time_ns(&self) -> u64 {
+        self.reports.values().copied().min().unwrap_or(0)
     }
 
     #[must_use]
@@ -51,6 +71,11 @@ mod tests {
         assert_eq!(ceil.allowed_ns(), 1050);
         // Stopped/halted board keeps last report and pins the min.
         ceil.report("b", 5000);
+        assert_eq!(ceil.allowed_ns(), 1050);
+        assert!(
+            !ceil.report("b", 40),
+            "older reports must not move time backwards"
+        );
         assert_eq!(ceil.allowed_ns(), 1050);
     }
 }

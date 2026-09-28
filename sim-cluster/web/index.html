@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>シミュレーション</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    font-family: system-ui, sans-serif;
+    background: #f4f5f7;
+    color: #1c1e22;
+  }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 16px;
+    padding: 12px 16px;
+    background: #fff;
+    border-bottom: 1px solid #d8dbe2;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  .actions { display: flex; gap: 8px; }
+  button {
+    border: 1px solid #c5cad3;
+    background: #fff;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.primary { background: #146c43; color: #fff; border-color: #146c43; }
+  button.danger { background: #9b2c2c; color: #fff; border-color: #9b2c2c; }
+  .time { margin-left: auto; text-align: right; }
+  .time strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .time span, .meta { color: #5c6570; font-size: 12px; }
+  #error { width: 100%; color: #9b2c2c; font-size: 13px; }
+  details { width: 100%; }
+  details form { display: flex; flex-direction: column; gap: 8px; }
+  textarea {
+    width: 100%;
+    min-height: 120px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
+  #nodes {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+    align-content: start;
+  }
+  .node {
+    background: #fff;
+    border: 1px solid #d8dbe2;
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .node h2 { margin: 0 0 6px; font-size: 16px; }
+  .node .state { font-weight: 650; }
+  .state.running { color: #146c43; }
+  .state.stopped, .state.ready, .state.starting { color: #8a5a00; }
+  .state.exited { color: #9b2c2c; }
+  #logs {
+    height: 34vh;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+    background: #111;
+    color: #e7e7e7;
+    border-top: 1px solid #000;
+  }
+  #logbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 12px;
+    background: #1c1e22;
+    color: #ddd;
+  }
+  #logbar label { display: flex; gap: 8px; align-items: center; }
+  #logview {
+    flex: 1;
+    overflow: auto;
+    margin: 0;
+    padding: 8px 12px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
+  .lv-error { color: #ff8d8d; }
+  .lv-warn { color: #ffd27a; }
+  .lv-info { color: #e7e7e7; }
+  .lv-debug { color: #9ad; }
+  .lv-trace { color: #8a8f98; }
+</style>
+</head>
+<body>
+<header>
+  <h1>シミュレーション</h1>
+  <div class="actions">
+    <button id="start" class="primary" type="button">スタート</button>
+    <button id="stop" class="danger" type="button">ストップ</button>
+    <button id="reset" type="button">リセット</button>
+  </div>
+  <div class="time">
+    <div class="meta">仮想時間</div>
+    <strong id="vtime">—</strong>
+    <div class="meta" id="vraw"></div>
+  </div>
+  <div id="error"></div>
+  <details>
+    <summary>トポロジ（Python または JSON）</summary>
+    <p class="meta">Python のローカル elf は、このプロセスの作業ディレクトリからの相対パスで読み、base64 にします。トポロジファイルで起動したときは、そのファイルのディレクトリが基準です。http(s) と base64: はそのまま使います。適用後は停止のままです。</p>
+    <form id="topoform">
+      <input id="topofile" type="file" accept=".py,.json,application/json,text/x-python">
+      <textarea id="topotext" placeholder="Python スクリプト、または論理トポロジ JSON"></textarea>
+      <button type="submit">トポロジを適用</button>
+    </form>
+  </details>
+</header>
+<main id="nodes"></main>
+<section id="logs">
+  <div id="logbar">
+    <span>ログ</span>
+    <label>表示レベル
+      <select id="level">
+        <option value="error">error</option>
+        <option value="warn">warn</option>
+        <option value="info" selected>info</option>
+        <option value="debug">debug</option>
+        <option value="trace">trace</option>
+      </select>
+    </label>
+  </div>
+  <pre id="logview"></pre>
+</section>
+<script>
+const rank = { error: 1, warn: 2, info: 3, debug: 4, trace: 5 };
+const logs = [];
+let lastSeq = 0;
+let stick = true;
+
+function formatTime(ns) {
+  if (ns == null) return "—";
+  if (ns < 1000) return ns + " ns";
+  if (ns < 1e6) return (ns / 1e3).toFixed(3) + " µs";
+  if (ns < 1e9) return (ns / 1e6).toFixed(3) + " ms";
+  return (ns / 1e9).toFixed(6) + " s";
+}
+
+function renderNodes(nodes) {
+  const root = document.getElementById("nodes");
+  root.replaceChildren();
+  if (!nodes || nodes.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "meta";
+    empty.textContent = "ノードはまだありません。トポロジを適用してください。";
+    root.appendChild(empty);
+    return;
+  }
+  for (const node of nodes) {
+    const card = document.createElement("article");
+    card.className = "node";
+    const title = document.createElement("h2");
+    title.textContent = node.id;
+    const kind = document.createElement("div");
+    kind.className = "meta";
+    kind.textContent = node.kind || "";
+    const state = document.createElement("div");
+    state.className = "state " + (node.state || "");
+    state.textContent = node.state || "";
+    card.append(title, kind, state);
+    root.appendChild(card);
+  }
+}
+
+function renderLogs() {
+  const selected = rank[document.getElementById("level").value] || 5;
+  const view = document.getElementById("logview");
+  const lines = [];
+  for (const log of logs) {
+    const level = log.level || "info";
+    if ((rank[level] || 5) > selected) continue;
+    const who = log.board ? ("node " + log.board) : (log.origin || "log");
+    lines.push('<span class="lv-' + level + '">[' + level + "] " + who + ": " + escapeText(log.text || "") + "</span>");
+  }
+  view.innerHTML = lines.join("\n");
+  if (stick) view.scrollTop = view.scrollHeight;
+}
+
+function escapeText(text) {
+  return text.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+}
+
+function setButtons(state, hasSim) {
+  document.getElementById("start").disabled = !hasSim || state === "running";
+  document.getElementById("stop").disabled = !hasSim || state !== "running";
+  document.getElementById("reset").disabled = !hasSim;
+}
+
+async function refresh() {
+  const res = await fetch("/api/snapshot?after=" + lastSeq);
+  if (!res.ok) return;
+  const snap = await res.json();
+  document.getElementById("vtime").textContent = formatTime(snap.virtual_time_ns);
+  document.getElementById("vraw").textContent = (snap.virtual_time_ns ?? 0) + " ns";
+  document.getElementById("error").textContent = snap.error || "";
+  renderNodes(snap.nodes || []);
+  setButtons(snap.state, !!snap.simulation_id);
+  for (const log of snap.logs || []) {
+    logs.push(log);
+    if (log.seq > lastSeq) lastSeq = log.seq;
+  }
+  renderLogs();
+}
+
+async function command(name) {
+  const res = await fetch("/api/" + name, { method: "POST" });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) document.getElementById("error").textContent = body.error || res.statusText;
+  refresh();
+}
+
+document.getElementById("start").onclick = () => command("start");
+document.getElementById("stop").onclick = () => command("stop");
+document.getElementById("reset").onclick = () => command("reset");
+document.getElementById("level").onchange = () => renderLogs();
+document.getElementById("logview").onscroll = (ev) => {
+  const el = ev.target;
+  stick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+};
+document.getElementById("topofile").onchange = async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  document.getElementById("topotext").value = await file.text();
+};
+document.getElementById("topoform").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const text = document.getElementById("topotext").value;
+  const file = document.getElementById("topofile").files[0];
+  const name = file ? file.name.toLowerCase() : "";
+  let payload;
+  if (name.endsWith(".json") || text.trim().startsWith("{")) {
+    try {
+      payload = { topology: JSON.parse(text) };
+    } catch (err) {
+      document.getElementById("error").textContent = "JSON を解釈できません: " + err.message;
+      return;
+    }
+  } else {
+    payload = { python: text };
+  }
+  const res = await fetch("/api/topology", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    document.getElementById("error").textContent = body.error || res.statusText;
+    return;
+  }
+  logs.length = 0;
+  lastSeq = 0;
+  renderLogs();
+  refresh();
+};
+
+refresh();
+setInterval(refresh, 250);
+</script>
+</body>
+</html>

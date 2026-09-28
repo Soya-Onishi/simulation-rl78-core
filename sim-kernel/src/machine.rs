@@ -66,6 +66,15 @@ impl<C: Cpu> Machine<C> {
         self.cpu.reset(&mut self.bus);
     }
 
+    /// Move virtual time forward. A target at or behind `now` is ignored.
+    pub fn set_virtual_time(&mut self, now: Tick) {
+        if now <= self.clock.now() {
+            return;
+        }
+        self.clock.set(now);
+        self.ctl.set_now(now);
+    }
+
     #[must_use]
     pub fn event_ctl(&self) -> &EventCtl {
         &self.ctl

@@ -65,6 +65,11 @@ pub enum ControlToNode {
     Allowed { allowed_ns: u64 },
     /// Host-initiated cluster stop (always broadcast; no ack on same host).
     ClusterStop { reason: HostStopReason },
+    /// Hold-reset devices and the CPU via [`sim_kernel::Resettable`].
+    ///
+    /// The arbiter sends this only after [`Self::ClusterStop`], then republishes
+    /// [`Self::Allowed`] and [`Self::Start`].
+    Reset,
     // TODO: add Shutdown to end the node process (ClusterStop only halts to Stopped).
 }
 

@@ -1,8 +1,10 @@
 //! Cluster log samples carried node → arbiter → server.
 //!
 //! [`ClusterLog`] is the iceoryx2 sample. [`LogLevel`] and [`LogOrigin`] say
-//! how severe the line is and which process produced it. The server is the
-//! only place that filters and prints; other processes forward the sample.
+//! how severe the line is and which process produced it. The wire record has
+//! no cluster id: each simulation uses its own iceoryx service, and the
+//! server forwards that inbox only to the web front-end that created it.
+//! The server does not drop records by level; the web page filters display.
 
 use std::fmt;
 
@@ -53,6 +55,16 @@ impl LogLevel {
             "debug" => Some(Self::Debug),
             "trace" => Some(Self::Trace),
             _ => None,
+        }
+    }
+}
+
+impl LogOrigin {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Arbiter => "arbiter",
+            Self::Node => "node",
         }
     }
 }

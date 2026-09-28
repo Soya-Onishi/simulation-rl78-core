@@ -118,6 +118,10 @@ impl VirtualClock {
     pub fn advance(&mut self, delta: Tick) {
         self.now += delta;
     }
+
+    pub fn set(&mut self, now: Tick) {
+        self.now = now;
+    }
 }
 
 #[cfg(test)]
