@@ -143,9 +143,8 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 /// Run the board framework with a machine built by `build`.
 ///
 /// `build` assembles ROM/RAM (and peripherals) only — it must not load firmware.
-/// When the topology board entry has an `elf` spec, this function loads a
-/// filesystem path, `base64:` image, or http(s) URL and calls
-/// [`Machine::load_firmware`].
+/// When the topology board entry has an `elf` source, this function loads those
+/// bytes and calls [`Machine::load_firmware`].
 ///
 /// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
 /// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
