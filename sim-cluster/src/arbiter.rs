@@ -203,9 +203,8 @@ fn run_time_sync(
                     from: _,
                     virtual_time_ns,
                 }) => {
-                    if ceiling.report(&board_id, virtual_time_ns) {
-                        changed = true;
-                    }
+                    ceiling.report(&board_id, virtual_time_ns);
+                    changed = true;
                 }
                 Some(PeerEffect::HostStop { from: _, reason }) => {
                     // HostStopReason variants are all cluster-relevant by construction.
@@ -308,14 +307,6 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     )?;
 
                     control.publish(&ControlToNode::Reset)?;
-                    discard_n2a(&control)?;
-                    let node_time = allowed.saturating_add(ceiling.margin_ns());
-                    ceiling.place_reports_at(node_time);
-                    allowed = node_time.saturating_add(ceiling.margin_ns());
-                    control.publish(&ControlToNode::Allowed {
-                        allowed_ns: allowed,
-                    })?;
-                    log::info!("host Reset: Allowed={allowed}");
                     broadcast_start(&control, &mut peers)?;
                     running = true;
                     log::info!("host Reset: Start");
@@ -329,15 +320,11 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             break Ok(());
         }
 
-        if running {
-            match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed)? {
-                SyncStep::Continue => {}
-                SyncStep::Stopped => {
-                    running = false;
-                }
+        match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed)? {
+            SyncStep::Continue => {}
+            SyncStep::Stopped => {
+                running = false;
             }
-        } else {
-            thread::sleep(ARBITER_POLL_IDLE);
         }
 
         let vt = ceiling.virtual_time_ns();
@@ -404,9 +391,8 @@ fn step_time_sync(
                 from: _,
                 virtual_time_ns,
             }) => {
-                if ceiling.report(&board_id, virtual_time_ns) {
-                    changed = true;
-                }
+                ceiling.report(&board_id, virtual_time_ns);
+                changed = true;
             }
             Some(PeerEffect::HostStop { from: _, reason }) => {
                 cluster_stop = Some((board_id.clone(), reason));
@@ -432,11 +418,6 @@ fn step_time_sync(
     }
     thread::sleep(ARBITER_POLL_IDLE);
     Ok(SyncStep::Continue)
-}
-
-fn discard_n2a(control: &ArbiterControl) -> Result<(), ArbiterError> {
-    while control.try_recv()?.is_some() {}
-    Ok(())
 }
 
 fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Child>, ArbiterError> {

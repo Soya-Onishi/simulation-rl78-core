@@ -623,8 +623,8 @@ fn create_simulation(
 }
 
 fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Outgoing {
-    if sim.state == "exited" && !matches!(cmd, HostCommand::Reset | HostCommand::Shutdown) {
-        return Outgoing::json_error(409, "arbiter has exited; reset or create again");
+    if sim.state == "exited" {
+        return Outgoing::json_error(409, "arbiter has exited");
     }
     if let Err(err) = send_cmd(sim, cmd) {
         return Outgoing::json_error(500, err);

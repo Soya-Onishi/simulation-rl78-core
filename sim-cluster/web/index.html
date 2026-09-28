@@ -203,9 +203,10 @@ function escapeText(text) {
 }
 
 function setButtons(state, hasSim) {
-  document.getElementById("start").disabled = !hasSim || state === "running";
-  document.getElementById("stop").disabled = !hasSim || state !== "running";
-  document.getElementById("reset").disabled = !hasSim;
+  const dead = state === "exited";
+  document.getElementById("start").disabled = !hasSim || dead || state === "running";
+  document.getElementById("stop").disabled = !hasSim || dead || state !== "running";
+  document.getElementById("reset").disabled = !hasSim || dead;
 }
 
 async function refresh() {
@@ -215,6 +216,9 @@ async function refresh() {
   document.getElementById("vtime").textContent = formatTime(snap.virtual_time_ns);
   document.getElementById("vraw").textContent = (snap.virtual_time_ns ?? 0) + " ns";
   document.getElementById("error").textContent = snap.error || "";
+  if (snap.state === "exited") {
+    document.getElementById("error").textContent = "arbiter has exited";
+  }
   renderNodes(snap.nodes || []);
   setButtons(snap.state, !!snap.simulation_id);
   for (const log of snap.logs || []) {

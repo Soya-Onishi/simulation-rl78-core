@@ -30,7 +30,7 @@ pub enum NodeEffect {
     SendReady,
     /// Apply a new virtual-time ceiling locally.
     SetAllowed { allowed_ns: u64 },
-    /// [`sim_kernel::Machine::reset`], then move virtual time to `allowed + margin`.
+    /// Hold-reset devices and the CPU via [`sim_kernel::Machine::reset`].
     Reset,
     /// Log-only; state is unchanged aside from the warning.
     Warn(String),

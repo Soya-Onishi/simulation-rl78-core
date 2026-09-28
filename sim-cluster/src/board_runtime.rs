@@ -184,7 +184,6 @@ pub fn run_board<C: Cpu>(
     let mut data_planes = bind_data_planes(plane_maps, &ports)?;
 
     let mut state = NodeState::AwaitingStartup;
-    let mut margin_ns = 0_u64;
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
@@ -193,27 +192,42 @@ pub fn run_board<C: Cpu>(
     loop {
         while let Some(msg) = control.try_recv()? {
             if let ControlToNode::StartupRecord {
-                margin_ns: margin,
                 headroom_threshold_ns: thr,
+                ..
             } = msg
             {
-                margin_ns = margin;
                 headroom_threshold_ns = thr;
             }
             let prev = state;
             let (next, effect) = state.on_message(msg);
-            if matches!(effect, Some(NodeEffect::Reset)) {
-                last_time_report = None;
-            }
             if let Some(effect) = effect {
-                apply_effect(
-                    board_hash,
-                    &control,
-                    effect,
-                    margin_ns,
-                    &mut allowed_ns,
-                    &mut sim,
-                )?;
+                match effect {
+                    NodeEffect::SendReady => {
+                        control.publish(&ControlToArbiter::Ready { from: board_hash })?;
+                        log::trace!("Ready");
+                    }
+                    NodeEffect::SetAllowed {
+                        allowed_ns: next_allowed,
+                    } => {
+                        allowed_ns = next_allowed;
+                        let _ = sim.command(Command::SetAllowed {
+                            tick: Tick(next_allowed),
+                        });
+                        log::trace!("Allowed={next_allowed}");
+                    }
+                    NodeEffect::Reset => {
+                        last_time_report = None;
+                        sim.machine_mut().reset();
+                        log::info!("simulator Reset");
+                        for plane in &mut data_planes {
+                            plane.discard_rx()?;
+                        }
+                        log::info!("discarded queued uart rx");
+                    }
+                    NodeEffect::Warn(msg) => {
+                        log::warn!("{msg}");
+                    }
+                }
             }
             if next != state {
                 log::trace!("{state:?} -> {next:?}");
@@ -295,37 +309,6 @@ fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a Board
         .iter()
         .find(|b| b.id == board_id)
         .ok_or_else(|| BoardError::Message(format!("board id `{board_id}` not in topology")))
-}
-
-fn apply_effect<C: Cpu>(
-    board_hash: u64,
-    control: &NodeControl,
-    effect: NodeEffect,
-    margin_ns: u64,
-    allowed_ns: &mut u64,
-    sim: &mut Simulator<C>,
-) -> Result<(), BoardError> {
-    match effect {
-        NodeEffect::SendReady => {
-            control.publish(&ControlToArbiter::Ready { from: board_hash })?;
-            log::trace!("Ready");
-        }
-        NodeEffect::SetAllowed { allowed_ns: next } => {
-            *allowed_ns = next;
-            let _ = sim.command(Command::SetAllowed { tick: Tick(next) });
-            log::trace!("Allowed={next}");
-        }
-        NodeEffect::Reset => {
-            let target = allowed_ns.saturating_add(margin_ns);
-            sim.machine_mut().set_virtual_time(Tick(target));
-            sim.machine_mut().reset();
-            log::info!("simulator Reset vt={target}");
-        }
-        NodeEffect::Warn(msg) => {
-            log::warn!("{msg}");
-        }
-    }
-    Ok(())
 }
 
 fn maybe_time_report(
