@@ -229,7 +229,6 @@ fn run_time_sync(
                 log::trace!("Allowed={allowed}");
             }
         }
-        std::thread::sleep(ARBITER_POLL_IDLE);
     }
     Ok(())
 }
