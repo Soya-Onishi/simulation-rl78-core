@@ -1,1 +1,1 @@
-- Keep code comments and rustdoc in **English** (README / issue notes may be Japanese).
+- Use Japanese in reviews (e.g. PullRequest review comments).
