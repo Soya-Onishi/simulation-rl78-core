@@ -245,7 +245,11 @@ pub fn run_board<C: Cpu>(
                 plane.pump_rx()?;
             }
 
-            if sim.waiting_on_allowed_ceiling() || sim.state() != SimState::Running {
+           if sim.waiting_on_allowed_ceiling() {
+                continue;
+           }
+
+            if sim.state() != SimState::Running {
                 // Do not pump_tx while the guest is not advancing: cross-board
                 // UART must not race ahead of virtual-time sync (ceiling / stop).
                 thread::sleep(BOARD_IDLE_POLL);
@@ -296,8 +300,6 @@ pub fn run_board<C: Cpu>(
             for plane in &mut data_planes {
                 plane.pump_tx()?;
             }
-        } else {
-            thread::sleep(BOARD_IDLE_POLL);
         }
     }
 }

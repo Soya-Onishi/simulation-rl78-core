@@ -228,7 +228,6 @@ fn run_time_sync(
                 })?;
             }
         }
-        std::thread::sleep(ARBITER_POLL_IDLE);
     }
     Ok(())
 }
