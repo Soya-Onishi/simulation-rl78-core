@@ -212,7 +212,6 @@ pub fn run_board<C: Cpu>(
                         let _ = sim.command(Command::SetAllowed {
                             tick: Tick(next_allowed),
                         });
-                        log::trace!("Allowed={next_allowed}");
                     }
                     NodeEffect::Reset => {
                         last_time_report = None;

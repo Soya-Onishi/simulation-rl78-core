@@ -226,7 +226,6 @@ fn run_time_sync(
                 control.publish(&ControlToNode::Allowed {
                     allowed_ns: allowed,
                 })?;
-                log::trace!("Allowed={allowed}");
             }
         }
         std::thread::sleep(ARBITER_POLL_IDLE);
@@ -353,7 +352,6 @@ fn begin_running(
     control.publish(&ControlToNode::Allowed {
         allowed_ns: allowed,
     })?;
-    log::info!("Allowed={allowed}");
     Ok(())
 }
 
@@ -413,7 +411,6 @@ fn step_time_sync(
             control.publish(&ControlToNode::Allowed {
                 allowed_ns: *allowed,
             })?;
-            log::trace!("Allowed={allowed}");
         }
     }
     thread::sleep(ARBITER_POLL_IDLE);
