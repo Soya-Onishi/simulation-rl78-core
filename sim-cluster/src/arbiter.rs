@@ -18,6 +18,8 @@ use crate::ipc::{
     isolated_config, new_cluster_key, root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
+use crate::probe::ProbeWireKind;
+use crate::probe_hub::ArbiterProbeHub;
 use crate::time_sync::TimeCeiling;
 use crate::topology::{LogicalTopology, TopologyError};
 
@@ -96,7 +98,8 @@ fn ready_barrier_and_start(
     topo: &LogicalTopology,
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
-    let mut peers = await_ready(topo, control)?;
+    let mut probes = ArbiterProbeHub::new("test");
+    let mut peers = await_ready(topo, control, &mut probes)?;
     control.publish(&ControlToNode::Start)?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
@@ -109,6 +112,7 @@ fn ready_barrier_and_start(
 fn await_ready(
     topo: &LogicalTopology,
     control: &ArbiterControl,
+    probes: &mut ArbiterProbeHub,
 ) -> Result<HashMap<String, PeerState>, ArbiterError> {
     let timeout = Duration::from_millis(topo.ready_timeout_ms);
     let deadline = Instant::now() + timeout;
@@ -139,6 +143,32 @@ fn await_ready(
         let mut progressed = false;
         while let Some(msg) = control.try_recv()? {
             match msg {
+                ControlToArbiter::ProbeAdvertise {
+                    from,
+                    name_hash,
+                    probe_id,
+                    kind,
+                    name_len,
+                    name,
+                } => {
+                    let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
+                        continue;
+                    };
+                    let Some(kind) = ProbeWireKind::from_u8(kind) else {
+                        log::warn!("ignoring probe advertise with bad kind {kind} from {from:#x}");
+                        continue;
+                    };
+                    let n = (name_len as usize).min(name.len());
+                    probes.record_wire_advertise(
+                        board_id,
+                        from,
+                        name_hash,
+                        probe_id,
+                        kind,
+                        &name[..n],
+                    );
+                    progressed = true;
+                }
                 ControlToArbiter::Ready { from } => {
                     let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
                         continue;
@@ -164,7 +194,11 @@ fn await_ready(
         }
     }
 
-    log::info!("Ready barrier complete ({} nodes)", peers.len());
+    log::info!(
+        "Ready barrier complete ({} nodes, {} probes)",
+        peers.len(),
+        probes.catalog().len()
+    );
     Ok(peers)
 }
 
@@ -257,7 +291,8 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     );
 
     let mut children = spawn_nodes(opts, topo)?;
-    let mut peers = match await_ready(topo, &control) {
+    let mut probe_hub = ArbiterProbeHub::new(opts.cluster_key.clone());
+    let mut peers = match await_ready(topo, &control, &mut probe_hub) {
         Ok(peers) => peers,
         Err(err) => {
             stop_children(&mut children);
@@ -265,6 +300,9 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             return Err(err);
         }
     };
+    // Keep the hub alive for the session so subscribe/drain APIs can be used later
+    // (e.g. by server integration). Suppress unused warning until then.
+    let _probe_hub = probe_hub;
     let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
     let mut allowed = ceiling.allowed_ns();
     let mut running = false;

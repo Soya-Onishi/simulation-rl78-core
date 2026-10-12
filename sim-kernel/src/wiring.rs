@@ -17,13 +17,19 @@ use crate::Tick;
 pub use typenum::{U0, U1};
 
 /// Digital level used as a [`Wire`] payload.
+///
+/// Layout is shared with cluster probe IPC (`repr(u8)` + [`ZeroCopySend`]).
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum DigitalLevel {
     #[default]
-    HiZ,
-    High,
-    Low,
+    HiZ = 0,
+    High = 1,
+    Low = 2,
 }
+
+// `#[repr(u8)]` cannot combine with the ZeroCopySend derive's `#[repr(C)]`.
+unsafe impl ZeroCopySend for DigitalLevel {}
 
 /// Analog voltage in microvolts, used as a [`Wire`] payload.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

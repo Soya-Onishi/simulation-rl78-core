@@ -26,7 +26,7 @@ pub enum NodeState {
 /// Side effects requested by [`NodeState::on_message`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeEffect {
-    /// Send [`ControlToArbiter::Ready`] to the arbiter.
+    /// Send probe advertisements then [`ControlToArbiter::Ready`] to the arbiter.
     SendReady,
     /// Apply a new virtual-time ceiling locally.
     SetAllowed { allowed_ns: u64 },
@@ -133,6 +133,8 @@ impl PeerState {
                 PeerState::Stopped,
                 Some(PeerEffect::HostStop { from, reason }),
             ),
+            // Handled by the arbiter catalog before the peer FSM.
+            (state, ControlToArbiter::ProbeAdvertise { .. }) => (state, None),
             (state, msg) => (
                 state,
                 Some(PeerEffect::Warn(format!(

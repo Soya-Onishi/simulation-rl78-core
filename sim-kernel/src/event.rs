@@ -170,6 +170,7 @@ impl EventCtl {
 
     pub fn set_now(&self, now: Tick) {
         self.now.store(now.0, Ordering::SeqCst);
+        crate::set_global_virtual_time_ns(now.0);
     }
 
     pub fn schedule(&self, at: Tick, event: Box<dyn SimEvent>) -> EventId {

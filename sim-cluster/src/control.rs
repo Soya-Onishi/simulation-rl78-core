@@ -8,6 +8,8 @@ use std::fmt;
 
 use iceoryx2::prelude::ZeroCopySend;
 
+use crate::probe::PROBE_NAME_CAP;
+
 /// Host-initiated stop reasons on the control plane (no free-form strings).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
@@ -86,6 +88,16 @@ pub enum ControlToArbiter {
     /// Host-initiated stop (BP / external / step / unmapped).
     /// Guest-local Halt (sim stays Running) must not be sent.
     HostStop { from: u64, reason: HostStopReason },
+    /// Declare one probe point before [`Self::Ready`] (one message per probe).
+    ProbeAdvertise {
+        from: u64,
+        name_hash: u64,
+        probe_id: u64,
+        /// [`crate::probe::ProbeWireKind`] as `u8`.
+        kind: u8,
+        name_len: u8,
+        name: [u8; PROBE_NAME_CAP],
+    },
 }
 
 impl ControlToArbiter {
@@ -93,9 +105,10 @@ impl ControlToArbiter {
     #[must_use]
     pub fn from_board(self) -> u64 {
         match self {
-            Self::Ready { from } | Self::TimeReport { from, .. } | Self::HostStop { from, .. } => {
-                from
-            }
+            Self::Ready { from }
+            | Self::TimeReport { from, .. }
+            | Self::HostStop { from, .. }
+            | Self::ProbeAdvertise { from, .. } => from,
         }
     }
 }
