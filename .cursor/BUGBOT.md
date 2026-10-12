@@ -1,1 +1,1 @@
-- Keep code comments and rustdoc in **English** (README / issue notes may be Japanese).
+- PR/MRでレビューを行うときは日本語を使用すること
