@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -15,6 +15,15 @@ use futures_util::stream::{self, Stream};
 use crate::backend::{SimulationBackend, prepare_topology};
 use crate::contract::{ApiError, CreateSimulationRequest, CreateSimulationResponse};
 use crate::web::PAGE_HTML;
+
+/// Same ceiling as the previous hand-rolled server. One `base64:` elf is at most
+/// [`crate::elf_source::MAX_FIRMWARE_BYTES`] raw (~4/3 that once encoded).
+const MAX_BODY: usize = 64 * 1024 * 1024;
+
+const _: () = assert!(
+    MAX_BODY
+        >= crate::elf_source::MAX_FIRMWARE_BYTES * 4 / 3 + crate::elf_source::MAX_FIRMWARE_BYTES / 8
+);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -41,6 +50,7 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
         .route("/api/simulation/{id}/status", get(status_sse))
         .route("/api/simulation/{id}/log", get(log_sse))
         .route("/{id}", get(simulation_page))
+        .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
 

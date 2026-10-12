@@ -240,6 +240,12 @@ function apiError(body, fallback) {
   return fallback;
 }
 
+const STREAM_DISCONNECTED = "status stream disconnected";
+
+function setError(text) {
+  document.getElementById("error").textContent = text || "";
+}
+
 async function command(name) {
   if (!simId) return;
   const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/" + name, {
@@ -247,15 +253,22 @@ async function command(name) {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    document.getElementById("error").textContent = apiError(body, res.statusText);
+    setError(apiError(body, res.statusText));
+    return;
+  }
+  if (document.getElementById("error").textContent !== "arbiter has exited") {
+    setError("");
   }
 }
 
 function applyStatus(snap) {
   document.getElementById("vtime").textContent = formatTime(snap.virtual_time_ns);
   document.getElementById("vraw").textContent = (snap.virtual_time_ns ?? 0) + " ns";
+  const error = document.getElementById("error");
   if (snap.state === "exited") {
-    document.getElementById("error").textContent = "arbiter has exited";
+    error.textContent = "arbiter has exited";
+  } else if (error.textContent === STREAM_DISCONNECTED) {
+    error.textContent = "";
   }
   renderNodes(snap.nodes || []);
   setButtons(snap.state);
@@ -271,7 +284,7 @@ function connectStreams() {
     } catch (_) {}
   });
   statusSource.onerror = () => {
-    document.getElementById("error").textContent = "status stream disconnected";
+    setError(STREAM_DISCONNECTED);
   };
   logSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/log");
   logSource.addEventListener("log", (ev) => {
