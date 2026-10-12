@@ -7,13 +7,15 @@
 //! cluster participation loop (see `rl78-minimal-board`).
 
 pub mod arbiter;
+pub mod backend;
 pub mod board_runtime;
 pub mod cluster_stop;
+pub mod contract;
 pub mod control;
 pub mod data_plane;
 pub mod elf_source;
 pub mod host;
-pub mod http_util;
+pub mod http;
 pub mod ipc;
 pub mod lifecycle;
 pub mod log_msg;
@@ -21,13 +23,18 @@ pub mod node;
 pub mod server;
 pub mod time_sync;
 pub mod topology;
+pub mod web;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
+pub use backend::{LocalBackend, SimulationBackend};
 pub use board_runtime::{
     BoardCliError, BoardError, BoardOptions, board_usage, cluster_host_stop_reason,
     parse_board_args, run_board,
 };
 pub use cluster_stop::is_cluster_relevant_reason;
+pub use contract::{
+    ApiError, CreateSimulationRequest, CreateSimulationResponse, LogEvent, StatusEvent,
+};
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};

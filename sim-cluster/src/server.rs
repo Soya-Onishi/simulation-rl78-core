@@ -1,7 +1,7 @@
-//! Long-lived simulation server.
+//! Long-lived simulation server worker and process entry.
 //!
-//! One process serves the control page and owns each simulation's arbiter.
-//! Logs stay in that process. The page filters them for display only.
+//! HTTP is served by [`crate::http`]; this module owns arbiter processes and
+//! the control-plane job queue used by [`crate::backend::LocalBackend`].
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -11,15 +11,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use iceoryx2::prelude::{Node, ipc};
-use serde::Deserialize;
-
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use iceoryx2::prelude::{Node, ipc};
 
+use crate::backend::{LocalBackend, SimulationBackend};
+use crate::contract::{ApiError, LogEvent, StatusEvent};
 use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
-use crate::http_util::{self, Incoming, Outgoing};
 use crate::ipc::{
     IpcError, ServerHostPort, ServerLogInbox, board_hash_table, create_node, isolated_config,
     new_cluster_key, root_path_for_cluster,
@@ -27,9 +26,9 @@ use crate::ipc::{
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::topology::{LogicalTopology, TopologyError};
 
-const LOG_CAP: usize = 100_000;
-const PUSH_TIMEOUT: Duration = Duration::from_secs(2);
-pub const PAGE_HTML: &str = include_str!("../web/index.html");
+/// Live SSE readers start at the high-water mark, so this only covers logs
+/// that arrive between polls.
+const LOG_CAP: usize = 100;
 
 /// Options for [`run_server`].
 #[derive(Clone, Debug)]
@@ -42,7 +41,7 @@ pub struct ServerOptions {
     pub python_path: PathBuf,
     /// Python interpreter (default `python3`).
     pub python_bin: PathBuf,
-    /// Topology applied to the built-in page as soon as the listener is up.
+    /// Topology applied as soon as the listener is up (CLI convenience).
     pub topology: Option<PathBuf>,
 }
 
@@ -74,23 +73,11 @@ pub enum ServerError {
     PythonFailed { status: String, stderr: String },
     #[error("ipc error: {0}")]
     Ipc(#[from] IpcError),
-    #[error("http error: {0}")]
-    Http(#[from] crate::http_util::HttpError),
     #[error("{0}")]
     Message(String),
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateBody {
-    #[serde(default)]
-    topology: Option<LogicalTopology>,
-    #[serde(default)]
-    python: Option<String>,
-    #[serde(default)]
-    log_sink: Option<String>,
-}
-
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug)]
 struct StoredLog {
     seq: u64,
     level: String,
@@ -99,34 +86,51 @@ struct StoredLog {
     text: String,
 }
 
-#[derive(Debug)]
-struct PreparedCreate {
-    topo: LogicalTopology,
-    log_sink: Option<String>,
+impl StoredLog {
+    fn to_event(&self) -> LogEvent {
+        LogEvent {
+            seq: self.seq,
+            level: self.level.clone(),
+            origin: self.origin.clone(),
+            board: self.board.clone(),
+            text: self.text.clone(),
+        }
+    }
 }
 
-enum JobKind {
-    Create(PreparedCreate),
-    OpenPage(PreparedCreate),
-    PageNote(String),
-    PageSnapshot { after: u64 },
-    PageCommand(HostCommand),
+/// Work item for the simulation worker thread.
+pub struct Job {
+    pub kind: JobKind,
+    pub reply: Sender<JobReply>,
+}
+
+/// Operations handled by the worker.
+#[derive(Debug)]
+pub enum JobKind {
+    Create(LogicalTopology),
     Command { id: String, cmd: HostCommand },
     Delete { id: String },
-    Get { id: String },
-    Logs { id: String, after: u64 },
+    Exists { id: String },
+    GetStatus { id: String },
+    GetLogs { id: String, after: u64 },
+    LogHighWater { id: String },
 }
 
-struct Job {
-    kind: JobKind,
-    reply: Sender<Outgoing>,
+/// Worker → backend replies.
+#[derive(Debug)]
+pub enum JobReply {
+    Created { id: String },
+    Accepted,
+    Deleted,
+    Exists(bool),
+    Status(StatusEvent),
+    Logs(Vec<LogEvent>),
+    HighWater(u64),
+    Err(ApiError),
 }
 
 struct World {
     sims: HashMap<String, Simulation>,
-    /// Simulation shown by the built-in page.
-    page: Option<String>,
-    page_error: Option<String>,
 }
 
 type IoxNode = Node<ipc::Service>;
@@ -139,15 +143,11 @@ struct Simulation {
     state: String,
     virtual_time_ns: u64,
     nodes: Vec<SessionNode>,
-    log_sink: Option<String>,
     logs: VecDeque<StoredLog>,
     next_seq: u64,
-    pushed_seq: u64,
     boards: HashMap<u64, String>,
     inbox: ServerLogInbox,
     _iox: IoxNode,
-    status_dirty: bool,
-    retry_push_at: Option<std::time::Instant>,
 }
 
 /// Accept control requests until the process is killed.
@@ -164,23 +164,21 @@ pub fn run_server(opts: &ServerOptions) -> Result<(), ServerError> {
     let worker_opts = opts.clone();
     thread::spawn(move || worker_loop(rx, worker_opts));
 
-    let python_bin = opts.python_bin.clone();
-    let python_path = opts.python_path.clone();
-    let (listener, addr) = http_util::bind(&opts.listen)?;
+    let backend = LocalBackend::new(tx);
     if let Some(path) = opts.topology.clone() {
-        match topology_from_file(&path, &python_bin, &python_path) {
-            Ok(prepared) => {
-                let _ = rpc(&tx, JobKind::OpenPage(prepared));
-            }
-            Err(err) => {
-                let _ = rpc(&tx, JobKind::PageNote(err));
-            }
+        match topology_from_file(&path, &opts.python_bin, &opts.python_path) {
+            Ok(topo) => match backend.create(topo) {
+                Ok(id) => eprintln!("loaded topology as simulation {id} (stopped)"),
+                Err(err) => eprintln!("cluster-server: failed to create simulation: {err}"),
+            },
+            Err(err) => eprintln!("cluster-server: failed to load --topology: {err}"),
         }
     }
-    eprintln!("cluster-server listening on http://{addr}/");
-    http_util::serve(listener, move |req| {
-        handle_http(&req, &tx, &python_bin, &python_path)
-    });
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(crate::http::serve(&opts.listen, backend))?;
     Ok(())
 }
 
@@ -256,158 +254,22 @@ pub fn discover_python_package_root() -> Result<PathBuf, ServerError> {
     ))
 }
 
-fn handle_http(
-    req: &Incoming,
-    tx: &Sender<Job>,
-    python_bin: &Path,
-    python_path: &Path,
-) -> Outgoing {
-    let path = req.path.trim_end_matches('/');
-    let path = if path.is_empty() { "/" } else { path };
-    let result = match (req.method.as_str(), path) {
-        ("GET", "/") => return Outgoing::html(PAGE_HTML),
-        ("GET", "/api/snapshot") => {
-            let after = query_u64(&req.query, "after").unwrap_or(0);
-            rpc(tx, JobKind::PageSnapshot { after })
-        }
-        ("POST", "/api/start") => rpc(tx, JobKind::PageCommand(HostCommand::Start)),
-        ("POST", "/api/stop") => rpc(tx, JobKind::PageCommand(HostCommand::Stop)),
-        ("POST", "/api/reset") => rpc(tx, JobKind::PageCommand(HostCommand::Reset)),
-        ("POST", "/api/topology") => {
-            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            match prepare_create(&req.body, python_bin, python_path, &base) {
-                Ok(prepared) => rpc(tx, JobKind::OpenPage(prepared)),
-                Err(err) => Ok(err),
-            }
-        }
-        ("POST", "/v1/simulations") => {
-            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            match prepare_create(&req.body, python_bin, python_path, &base) {
-                Ok(prepared) => rpc(tx, JobKind::Create(prepared)),
-                Err(err) => Ok(err),
-            }
-        }
-        ("GET", path) if path.starts_with("/v1/simulations/") && path.ends_with("/logs") => {
-            let id = sim_id(path, "/logs").to_string();
-            let after = query_u64(&req.query, "after").unwrap_or(0);
-            rpc(tx, JobKind::Logs { id, after })
-        }
-        ("GET", path) if path.starts_with("/v1/simulations/") => {
-            let id = path.trim_start_matches("/v1/simulations/").to_string();
-            if id.is_empty() || id.contains('/') {
-                Ok(Outgoing::json_error(404, "not found"))
-            } else {
-                rpc(tx, JobKind::Get { id })
-            }
-        }
-        ("POST", path) if path.starts_with("/v1/simulations/") => {
-            let rest = path.trim_start_matches("/v1/simulations/");
-            match rest.rsplit_once('/') {
-                Some((id, "start")) => rpc(
-                    tx,
-                    JobKind::Command {
-                        id: id.to_string(),
-                        cmd: HostCommand::Start,
-                    },
-                ),
-                Some((id, "stop")) => rpc(
-                    tx,
-                    JobKind::Command {
-                        id: id.to_string(),
-                        cmd: HostCommand::Stop,
-                    },
-                ),
-                Some((id, "reset")) => rpc(
-                    tx,
-                    JobKind::Command {
-                        id: id.to_string(),
-                        cmd: HostCommand::Reset,
-                    },
-                ),
-                _ => Ok(Outgoing::json_error(404, "not found")),
-            }
-        }
-        ("DELETE", path) if path.starts_with("/v1/simulations/") => {
-            let id = path.trim_start_matches("/v1/simulations/").to_string();
-            rpc(tx, JobKind::Delete { id })
-        }
-        _ => Ok(Outgoing::json_error(404, "not found")),
-    };
-    match result {
-        Ok(outgoing) => outgoing,
-        Err(err) => Outgoing::json_error(500, err),
-    }
-}
-
-fn sim_id<'a>(path: &'a str, suffix: &str) -> &'a str {
-    path.trim_start_matches("/v1/simulations/")
-        .trim_end_matches(suffix)
-        .trim_end_matches('/')
-}
-
-fn prepare_create(
-    body: &[u8],
-    python_bin: &Path,
-    python_path: &Path,
+/// Validate topology JSON and embed local ELF paths for create.
+pub fn prepare_topology(
+    mut topology: LogicalTopology,
     base_dir: &Path,
-) -> Result<PreparedCreate, Outgoing> {
-    let parsed: CreateBody = serde_json::from_slice(body)
-        .map_err(|err| Outgoing::json_error(400, format!("invalid json: {err}")))?;
-    if parsed.topology.is_some() && parsed.python.is_some() {
-        return Err(Outgoing::json_error(
-            400,
-            "provide topology or python, not both",
-        ));
-    }
-    let topo = if let Some(topo) = parsed.topology {
-        topo.validate()
-            .map_err(|err| Outgoing::json_error(400, err.to_string()))?;
-        topo
-    } else if let Some(source) = parsed.python {
-        if source.trim().is_empty() {
-            return Err(Outgoing::json_error(400, "python script is empty"));
-        }
-        let json = execute_python_source(python_bin, python_path, &source)
-            .map_err(|err| Outgoing::json_error(400, err.to_string()))?;
-        LogicalTopology::from_json_str(&json)
-            .map_err(|err| Outgoing::json_error(400, err.to_string()))?
-    } else {
-        return Err(Outgoing::json_error(
-            400,
-            "topology json or python source is required",
-        ));
-    };
-    let mut topo = topo;
-    embed_local_elfs(&mut topo, base_dir)
-        .map_err(|err| Outgoing::json_error(400, err.to_string()))?;
-    if let Some(sink) = &parsed.log_sink {
-        if !sink.starts_with("http://") {
-            return Err(Outgoing::json_error(400, "log_sink must be an http:// URL"));
-        }
-    }
-    Ok(PreparedCreate {
-        topo,
-        log_sink: parsed.log_sink,
-    })
-}
-
-fn rpc(tx: &Sender<Job>, kind: JobKind) -> Result<Outgoing, String> {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    tx.send(Job {
-        kind,
-        reply: reply_tx,
-    })
-    .map_err(|_| "cluster-server worker is not running".to_string())?;
-    reply_rx
-        .recv_timeout(Duration::from_secs(60))
-        .map_err(|_| "cluster-server worker timed out".to_string())
+) -> Result<LogicalTopology, ApiError> {
+    topology
+        .validate()
+        .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
+    embed_local_elfs(&mut topology, base_dir)
+        .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
+    Ok(topology)
 }
 
 fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
     let mut world = World {
         sims: HashMap::new(),
-        page: None,
-        page_error: None,
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
@@ -422,132 +284,59 @@ fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
 }
 
 fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
-    let outgoing = match job.kind {
-        JobKind::Create(prepared) => match create_simulation(prepared, opts) {
+    let reply = match job.kind {
+        JobKind::Create(topo) => match create_simulation(topo, opts) {
             Ok(sim) => {
-                let body = snapshot_json(&sim, true);
-                adopt(world, sim, false);
-                Outgoing::json(201, &body)
+                let id = sim.id.clone();
+                world.sims.insert(id.clone(), sim);
+                JobReply::Created { id }
             }
-            Err(err) => Outgoing::json_error(500, err.to_string()),
-        },
-        JobKind::OpenPage(prepared) => match create_simulation(prepared, opts) {
-            Ok(sim) => {
-                let body = snapshot_json(&sim, true);
-                adopt(world, sim, true);
-                Outgoing::json(201, &body)
-            }
-            Err(err) => {
-                world.page_error = Some(err.to_string());
-                Outgoing::json_error(500, world.page_error.clone().unwrap_or_default())
-            }
-        },
-        JobKind::PageNote(message) => {
-            world.page_error = Some(message.clone());
-            Outgoing::json_error(400, message)
-        }
-        JobKind::PageSnapshot { after } => Outgoing::json(200, &page_snapshot(world, after)),
-        JobKind::PageCommand(cmd) => match world.page.clone() {
-            Some(id) => match world.sims.get_mut(&id) {
-                Some(sim) => command_simulation(sim, cmd),
-                None => Outgoing::json_error(409, "トポロジがまだ適用されていません"),
-            },
-            None => Outgoing::json_error(409, "トポロジがまだ適用されていません"),
+            Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
         },
         JobKind::Command { id, cmd } => match world.sims.get_mut(&id) {
-            Some(sim) => command_simulation(sim, cmd),
-            None => Outgoing::json_error(404, "unknown simulation"),
+            Some(sim) => match command_simulation(sim, cmd) {
+                Ok(()) => JobReply::Accepted,
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
         JobKind::Delete { id } => match world.sims.remove(&id) {
             Some(mut sim) => {
                 let _ = send_cmd(&mut sim, HostCommand::Shutdown);
-                if world.page.as_deref() == Some(id.as_str()) {
-                    world.page = None;
-                }
-                sim.state = "deleted".into();
-                Outgoing::json(200, &serde_json::json!({"id": id, "state": "deleted"}))
+                JobReply::Deleted
             }
-            None => Outgoing::json_error(404, "unknown simulation"),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::Get { id } => match world.sims.get(&id) {
-            Some(sim) => Outgoing::json(200, &snapshot_json(sim, false)),
-            None => Outgoing::json_error(404, "unknown simulation"),
+        JobKind::Exists { id } => JobReply::Exists(world.sims.contains_key(&id)),
+        JobKind::GetStatus { id } => match world.sims.get(&id) {
+            Some(sim) => JobReply::Status(status_event(sim)),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::Logs { id, after } => match world.sims.get(&id) {
+        JobKind::GetLogs { id, after } => match world.sims.get(&id) {
             Some(sim) => {
-                let logs: Vec<_> = sim
+                let logs = sim
                     .logs
                     .iter()
                     .filter(|log| log.seq > after)
-                    .cloned()
+                    .map(StoredLog::to_event)
                     .collect();
-                Outgoing::json(200, &serde_json::json!({"simulation_id": id, "logs": logs}))
+                JobReply::Logs(logs)
             }
-            None => Outgoing::json_error(404, "unknown simulation"),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::LogHighWater { id } => match world.sims.get(&id) {
+            Some(sim) => JobReply::HighWater(sim.next_seq.saturating_sub(1)),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
     };
-    let _ = job.reply.send(outgoing);
-}
-
-fn adopt(world: &mut World, sim: Simulation, replace_page: bool) {
-    if replace_page {
-        if let Some(old) = world.page.take() {
-            if old != sim.id {
-                if let Some(mut prev) = world.sims.remove(&old) {
-                    let _ = send_cmd(&mut prev, HostCommand::Shutdown);
-                }
-            }
-        }
-    }
-    if world.page.is_none() || replace_page {
-        world.page = Some(sim.id.clone());
-        world.page_error = None;
-    }
-    world.sims.insert(sim.id.clone(), sim);
-}
-
-fn page_snapshot(world: &World, after: u64) -> serde_json::Value {
-    let Some(id) = world.page.as_deref() else {
-        return serde_json::json!({
-            "simulation_id": null,
-            "state": "stopped",
-            "virtual_time_ns": 0,
-            "nodes": [],
-            "logs": [],
-            "error": world.page_error,
-        });
-    };
-    let Some(sim) = world.sims.get(id) else {
-        return serde_json::json!({
-            "simulation_id": null,
-            "state": "stopped",
-            "virtual_time_ns": 0,
-            "nodes": [],
-            "logs": [],
-            "error": world.page_error,
-        });
-    };
-    let logs: Vec<_> = sim
-        .logs
-        .iter()
-        .filter(|log| log.seq > after)
-        .cloned()
-        .collect();
-    serde_json::json!({
-        "simulation_id": sim.id,
-        "state": sim.state,
-        "virtual_time_ns": sim.virtual_time_ns,
-        "nodes": sim.nodes,
-        "logs": logs,
-        "error": world.page_error,
-    })
+    let _ = job.reply.send(reply);
 }
 
 fn topology_from_file(
     path: &Path,
     python_bin: &Path,
     python_path: &Path,
-) -> Result<PreparedCreate, String> {
+) -> Result<LogicalTopology, String> {
     let base = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
@@ -561,14 +350,11 @@ fn topology_from_file(
         LogicalTopology::from_json_str(&json).map_err(|err| err.to_string())?
     };
     embed_local_elfs(&mut topo, base).map_err(|err| err.to_string())?;
-    Ok(PreparedCreate {
-        topo,
-        log_sink: None,
-    })
+    Ok(topo)
 }
 
 fn create_simulation(
-    prepared: PreparedCreate,
+    topo: LogicalTopology,
     opts: &ServerOptions,
 ) -> Result<Simulation, ServerError> {
     let id = new_cluster_key();
@@ -577,9 +363,9 @@ fn create_simulation(
     let iox = create_node(&config, &format!("server-{id}"))?;
     let inbox = ServerLogInbox::create(&iox, &id)?;
     let host = ServerHostPort::create(&iox, &id)?;
-    let boards = board_hash_table(prepared.topo.boards.iter().map(|b| b.id.as_str()))
+    let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
         .map_err(ServerError::Message)?;
-    let topo_path = write_temp_topology(&prepared.topo)?;
+    let topo_path = write_temp_topology(&topo)?;
     let child = Command::new(&opts.arbiter_bin)
         .arg("--topology")
         .arg(&topo_path)
@@ -591,8 +377,7 @@ fn create_simulation(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()?;
-    let nodes = prepared
-        .topo
+    let nodes = topo
         .boards
         .iter()
         .map(|board| SessionNode {
@@ -601,7 +386,6 @@ fn create_simulation(
             state: "starting".into(),
         })
         .collect();
-    // The node process resolves base64:, http(s), and filesystem paths.
     Ok(Simulation {
         id,
         topo_path,
@@ -610,51 +394,38 @@ fn create_simulation(
         state: "stopped".into(),
         virtual_time_ns: 0,
         nodes,
-        log_sink: prepared.log_sink,
         logs: VecDeque::new(),
         next_seq: 1,
-        pushed_seq: 0,
         boards,
         inbox,
         _iox: iox,
-        status_dirty: true,
-        retry_push_at: None,
     })
 }
 
-fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Outgoing {
+fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiError> {
     if sim.state == "exited" {
-        return Outgoing::json_error(409, "arbiter has exited");
+        return Err(ApiError::conflict("arbiter has exited"));
     }
-    if let Err(err) = send_cmd(sim, cmd) {
-        return Outgoing::json_error(500, err);
-    }
-    let name = match cmd {
-        HostCommand::Start => "start",
-        HostCommand::Stop => "stop",
-        HostCommand::Reset => "reset",
-        HostCommand::Shutdown => "shutdown",
-    };
-    Outgoing::json(
-        202,
-        &serde_json::json!({"id": sim.id, "accepted": name, "state": sim.state}),
-    )
+    send_cmd(sim, cmd).map_err(ApiError::internal)
 }
 
 fn send_cmd(sim: &mut Simulation, cmd: HostCommand) -> Result<(), String> {
     sim.host.publish_cmd(cmd).map_err(|err| err.to_string())
 }
 
+fn status_event(sim: &Simulation) -> StatusEvent {
+    StatusEvent {
+        id: sim.id.clone(),
+        state: sim.state.clone(),
+        virtual_time_ns: sim.virtual_time_ns,
+        nodes: sim.nodes.clone(),
+    }
+}
+
 fn poll_simulation(sim: &mut Simulation) {
     loop {
         match sim.host.try_status() {
             Ok(Some(status)) => {
-                if sim.state != status.state
-                    || sim.virtual_time_ns != status.virtual_time_ns
-                    || sim.nodes != status.nodes
-                {
-                    sim.status_dirty = true;
-                }
                 sim.state = status.state;
                 sim.virtual_time_ns = status.virtual_time_ns;
                 sim.nodes = status.nodes;
@@ -681,7 +452,6 @@ fn poll_simulation(sim: &mut Simulation) {
             Ok(Some(status)) => {
                 let code = status.code().unwrap_or(-1);
                 sim.state = "exited".into();
-                sim.status_dirty = true;
                 append_log(
                     sim,
                     "info",
@@ -695,7 +465,6 @@ fn poll_simulation(sim: &mut Simulation) {
             Err(err) => eprintln!("cluster-server {}: wait arbiter: {err}", sim.id),
         }
     }
-    maybe_push(sim);
 }
 
 fn push_log(sim: &mut Simulation, record: &ClusterLog) {
@@ -733,87 +502,6 @@ fn append_log(sim: &mut Simulation, level: &str, origin: &str, board: Option<Str
     while sim.logs.len() > LOG_CAP {
         sim.logs.pop_front();
     }
-    sim.status_dirty = true;
-}
-
-fn maybe_push(sim: &mut Simulation) {
-    let Some(sink) = sim.log_sink.clone() else {
-        sim.pushed_seq = sim.next_seq.saturating_sub(1);
-        sim.status_dirty = false;
-        return;
-    };
-    let logs: Vec<_> = sim
-        .logs
-        .iter()
-        .filter(|log| log.seq > sim.pushed_seq)
-        .cloned()
-        .collect();
-    if logs.is_empty() && !sim.status_dirty {
-        return;
-    }
-    if sim
-        .retry_push_at
-        .is_some_and(|at| std::time::Instant::now() < at)
-    {
-        return;
-    }
-    let body = serde_json::json!({
-        "simulation_id": sim.id,
-        "state": sim.state,
-        "virtual_time_ns": sim.virtual_time_ns,
-        "nodes": sim.nodes,
-        "logs": logs,
-    });
-    let bytes = match serde_json::to_vec(&body) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            eprintln!("cluster-server {}: encode log push: {err}", sim.id);
-            return;
-        }
-    };
-    match http_util::exchange_timeout("POST", &sink, "application/json", &bytes, PUSH_TIMEOUT) {
-        Ok(resp) if (200..300).contains(&resp.status) => {
-            if let Some(last) = logs.last() {
-                sim.pushed_seq = last.seq;
-            }
-            sim.status_dirty = false;
-            sim.retry_push_at = None;
-        }
-        Ok(resp) => {
-            sim.retry_push_at = Some(std::time::Instant::now() + Duration::from_secs(1));
-            eprintln!(
-                "cluster-server {}: log sink {} returned {}",
-                sim.id, sink, resp.status
-            );
-        }
-        Err(err) => {
-            sim.retry_push_at = Some(std::time::Instant::now() + Duration::from_secs(1));
-            eprintln!("cluster-server {}: log sink {sink}: {err}", sim.id);
-        }
-    }
-}
-
-fn snapshot_json(sim: &Simulation, include_log_count: bool) -> serde_json::Value {
-    let mut body = serde_json::json!({
-        "id": sim.id,
-        "state": sim.state,
-        "virtual_time_ns": sim.virtual_time_ns,
-        "nodes": sim.nodes,
-    });
-    if include_log_count {
-        body["log_count"] = serde_json::json!(sim.logs.len());
-    }
-    body
-}
-
-fn query_u64(query: &str, key: &str) -> Option<u64> {
-    for pair in query.split('&') {
-        let (name, value) = pair.split_once('=')?;
-        if name == key {
-            return value.parse().ok();
-        }
-    }
-    None
 }
 
 fn prepend_pythonpath(extra: &Path, existing: Option<std::ffi::OsString>) -> std::ffi::OsString {
@@ -920,14 +608,19 @@ emit(t)
     }
 
     #[test]
-    fn create_rejects_empty_body() {
-        let err = prepare_create(
-            b"{}",
-            Path::new("python3"),
-            Path::new("/tmp"),
+    fn prepare_topology_requires_boards() {
+        let err = prepare_topology(
+            LogicalTopology {
+                boards: vec![],
+                edges: vec![],
+                margin_ns: 1000,
+                headroom_threshold_ns: 200,
+                ready_timeout_ms: 10_000,
+            },
             Path::new("."),
         )
         .unwrap_err();
         assert_eq!(err.status, 400);
+        assert_eq!(err.code, "invalid_topology");
     }
 }

@@ -41,14 +41,22 @@
   .time strong { font-size: 20px; font-variant-numeric: tabular-nums; }
   .time span, .meta { color: #5c6570; font-size: 12px; }
   #error { width: 100%; color: #9b2c2c; font-size: 13px; }
-  details { width: 100%; }
-  details form { display: flex; flex-direction: column; gap: 8px; }
+  #create {
+    max-width: 720px;
+    margin: 24px auto;
+    padding: 0 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  #create form { display: flex; flex-direction: column; gap: 8px; }
   textarea {
     width: 100%;
-    min-height: 120px;
+    min-height: 220px;
     font-family: ui-monospace, monospace;
     font-size: 12px;
   }
+  #sim { display: none; flex: 1; flex-direction: column; min-height: 0; }
   #nodes {
     flex: 1;
     overflow: auto;
@@ -102,15 +110,30 @@
   .lv-info { color: #e7e7e7; }
   .lv-debug { color: #9ad; }
   .lv-trace { color: #8a8f98; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
+<section id="create">
+  <h1>シミュレーションを作成</h1>
+  <p class="meta">論理トポロジ JSON を POST します。Python DSL はクライアント側で JSON に変換してから貼り付けてください（例: <code>python -m topology_dsl run file.py</code>）。作成後は停止状態です。</p>
+  <form id="topoform">
+    <input id="topofile" type="file" accept=".json,application/json">
+    <textarea id="topotext" placeholder='{"boards":[...],"edges":[...],"margin_ns":...,"headroom_threshold_ns":...}'></textarea>
+    <button class="primary" type="submit">作成して開く</button>
+  </form>
+  <div id="create-error" class="meta" style="color:#9b2c2c"></div>
+</section>
+
+<section id="sim">
 <header>
   <h1>シミュレーション</h1>
+  <div class="meta" id="sim-id"></div>
   <div class="actions">
     <button id="start" class="primary" type="button">スタート</button>
     <button id="stop" class="danger" type="button">ストップ</button>
     <button id="reset" type="button">リセット</button>
+    <a href="/" class="meta" style="align-self:center">新規作成</a>
   </div>
   <div class="time">
     <div class="meta">仮想時間</div>
@@ -118,15 +141,6 @@
     <div class="meta" id="vraw"></div>
   </div>
   <div id="error"></div>
-  <details>
-    <summary>トポロジ（Python または JSON）</summary>
-    <p class="meta">Python のローカル elf は、このプロセスの作業ディレクトリからの相対パスで読み、base64 にします。トポロジファイルで起動したときは、そのファイルのディレクトリが基準です。http(s) と base64: はそのまま使います。適用後は停止のままです。</p>
-    <form id="topoform">
-      <input id="topofile" type="file" accept=".py,.json,application/json,text/x-python">
-      <textarea id="topotext" placeholder="Python スクリプト、または論理トポロジ JSON"></textarea>
-      <button type="submit">トポロジを適用</button>
-    </form>
-  </details>
 </header>
 <main id="nodes"></main>
 <section id="logs">
@@ -144,11 +158,20 @@
   </div>
   <pre id="logview"></pre>
 </section>
+</section>
 <script>
 const rank = { error: 1, warn: 2, info: 3, debug: 4, trace: 5 };
 const logs = [];
-let lastSeq = 0;
 let stick = true;
+let simId = null;
+let statusSource = null;
+let logSource = null;
+
+function pathId() {
+  const path = location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/") return null;
+  return decodeURIComponent(path.slice(1));
+}
 
 function formatTime(ns) {
   if (ns == null) return "—";
@@ -164,7 +187,7 @@ function renderNodes(nodes) {
   if (!nodes || nodes.length === 0) {
     const empty = document.createElement("p");
     empty.className = "meta";
-    empty.textContent = "ノードはまだありません。トポロジを適用してください。";
+    empty.textContent = "ノードはまだありません。";
     root.appendChild(empty);
     return;
   }
@@ -202,37 +225,76 @@ function escapeText(text) {
   return text.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
 }
 
-function setButtons(state, hasSim) {
+function setButtons(state) {
   const dead = state === "exited";
-  document.getElementById("start").disabled = !hasSim || dead || state === "running";
-  document.getElementById("stop").disabled = !hasSim || dead || state !== "running";
-  document.getElementById("reset").disabled = !hasSim || dead;
+  document.getElementById("start").disabled = dead || state === "running";
+  document.getElementById("stop").disabled = dead || state !== "running";
+  document.getElementById("reset").disabled = dead;
 }
 
-async function refresh() {
-  const res = await fetch("/api/snapshot?after=" + lastSeq);
-  if (!res.ok) return;
-  const snap = await res.json();
+function apiError(body, fallback) {
+  if (body && body.error) {
+    if (typeof body.error === "string") return body.error;
+    if (body.error.message) return body.error.message;
+  }
+  return fallback;
+}
+
+async function command(name) {
+  if (!simId) return;
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/" + name, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    document.getElementById("error").textContent = apiError(body, res.statusText);
+  }
+}
+
+function applyStatus(snap) {
   document.getElementById("vtime").textContent = formatTime(snap.virtual_time_ns);
   document.getElementById("vraw").textContent = (snap.virtual_time_ns ?? 0) + " ns";
-  document.getElementById("error").textContent = snap.error || "";
   if (snap.state === "exited") {
     document.getElementById("error").textContent = "arbiter has exited";
   }
   renderNodes(snap.nodes || []);
-  setButtons(snap.state, !!snap.simulation_id);
-  for (const log of snap.logs || []) {
-    logs.push(log);
-    if (log.seq > lastSeq) lastSeq = log.seq;
-  }
-  renderLogs();
+  setButtons(snap.state);
 }
 
-async function command(name) {
-  const res = await fetch("/api/" + name, { method: "POST" });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) document.getElementById("error").textContent = body.error || res.statusText;
-  refresh();
+function connectStreams() {
+  if (statusSource) statusSource.close();
+  if (logSource) logSource.close();
+  statusSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/status");
+  statusSource.addEventListener("status", (ev) => {
+    try {
+      applyStatus(JSON.parse(ev.data));
+    } catch (_) {}
+  });
+  statusSource.onerror = () => {
+    document.getElementById("error").textContent = "status stream disconnected";
+  };
+  logSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/log");
+  logSource.addEventListener("log", (ev) => {
+    try {
+      logs.push(JSON.parse(ev.data));
+      renderLogs();
+    } catch (_) {}
+  });
+}
+
+function showCreate() {
+  document.getElementById("create").classList.remove("hidden");
+  document.getElementById("sim").style.display = "none";
+}
+
+function showSim(id) {
+  simId = id;
+  document.getElementById("create").classList.add("hidden");
+  document.getElementById("sim").style.display = "flex";
+  document.getElementById("sim-id").textContent = id;
+  logs.length = 0;
+  renderLogs();
+  connectStreams();
 }
 
 document.getElementById("start").onclick = () => command("start");
@@ -251,37 +313,34 @@ document.getElementById("topofile").onchange = async (ev) => {
 document.getElementById("topoform").onsubmit = async (ev) => {
   ev.preventDefault();
   const text = document.getElementById("topotext").value;
-  const file = document.getElementById("topofile").files[0];
-  const name = file ? file.name.toLowerCase() : "";
-  let payload;
-  if (name.endsWith(".json") || text.trim().startsWith("{")) {
-    try {
-      payload = { topology: JSON.parse(text) };
-    } catch (err) {
-      document.getElementById("error").textContent = "JSON を解釈できません: " + err.message;
-      return;
-    }
-  } else {
-    payload = { python: text };
+  const errEl = document.getElementById("create-error");
+  errEl.textContent = "";
+  let topology;
+  try {
+    topology = JSON.parse(text);
+  } catch (err) {
+    errEl.textContent = "JSON を解釈できません: " + err.message;
+    return;
   }
-  const res = await fetch("/api/topology", {
+  const res = await fetch("/api/simulation", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ topology }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    document.getElementById("error").textContent = body.error || res.statusText;
+    errEl.textContent = apiError(body, res.statusText);
     return;
   }
-  logs.length = 0;
-  lastSeq = 0;
-  renderLogs();
-  refresh();
+  location.href = "/" + encodeURIComponent(body.id);
 };
 
-refresh();
-setInterval(refresh, 250);
+const id = pathId();
+if (id) {
+  showSim(id);
+} else {
+  showCreate();
+}
 </script>
 </body>
 </html>
