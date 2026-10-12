@@ -7,9 +7,17 @@ use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
 
 use crate::control::{ControlToArbiter, ControlToNode};
+use crate::probe::MAX_PROBES_PER_BOARD;
 
 use super::names;
 use super::runtime::IpcError;
+
+/// n2a slots for one startup burst: every board may send
+/// [`MAX_PROBES_PER_BOARD`] advertisements plus one `Ready` before the arbiter drains.
+#[must_use]
+fn n2a_subscriber_buffer(board_count: usize) -> usize {
+    board_count.max(1) * (MAX_PROBES_PER_BOARD + 1)
+}
 
 type A2nPub = Publisher<ipc::Service, ControlToNode, ()>;
 type A2nSub = Subscriber<ipc::Service, ControlToNode, ()>;
@@ -60,7 +68,7 @@ impl ArbiterControl {
             .max_publishers(max_nodes)
             .max_subscribers(1)
             .max_nodes(max_nodes + 4)
-            .subscriber_max_buffer_size(64)
+            .subscriber_max_buffer_size(n2a_subscriber_buffer(max_nodes))
             .history_size(16)
             .enable_safe_overflow(true)
             .create()
@@ -206,7 +214,7 @@ fn open_or_create_n2a_publisher(
         .max_publishers(max_nodes)
         .max_subscribers(1)
         .max_nodes(max_nodes + 4)
-        .subscriber_max_buffer_size(64)
+        .subscriber_max_buffer_size(n2a_subscriber_buffer(max_nodes))
         .history_size(16)
         .enable_safe_overflow(true)
         .open_or_create()
@@ -222,6 +230,13 @@ mod tests {
     use crate::ipc::hash::{board_hash_table, board_id_hash};
     use crate::ipc::runtime::{create_node, isolated_config};
     use std::time::Duration;
+
+    #[test]
+    fn n2a_buffer_scales_with_board_count() {
+        assert_eq!(n2a_subscriber_buffer(0), MAX_PROBES_PER_BOARD + 1);
+        assert_eq!(n2a_subscriber_buffer(1), MAX_PROBES_PER_BOARD + 1);
+        assert_eq!(n2a_subscriber_buffer(4), 4 * (MAX_PROBES_PER_BOARD + 1));
+    }
 
     #[test]
     fn control_round_trip_ready() {
