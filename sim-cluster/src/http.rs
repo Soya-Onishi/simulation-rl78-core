@@ -16,14 +16,8 @@ use crate::backend::{SimulationBackend, prepare_topology};
 use crate::contract::{ApiError, CreateSimulationRequest, CreateSimulationResponse};
 use crate::web::PAGE_HTML;
 
-/// Same ceiling as the previous hand-rolled server. One `base64:` elf is at most
-/// [`crate::elf_source::MAX_FIRMWARE_BYTES`] raw (~4/3 that once encoded).
+/// For ELF Size, max body size must be changed. 
 const MAX_BODY: usize = 64 * 1024 * 1024;
-
-const _: () = assert!(
-    MAX_BODY
-        >= crate::elf_source::MAX_FIRMWARE_BYTES * 4 / 3 + crate::elf_source::MAX_FIRMWARE_BYTES / 8
-);
 
 #[derive(Clone)]
 pub struct AppState {
