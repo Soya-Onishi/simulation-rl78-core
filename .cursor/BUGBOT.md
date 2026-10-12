@@ -1,1 +1,1 @@
-- Use Japanese in reviews (e.g. PullRequest review comments).
+- PRやMRのレビューでは日本語を使用すること
