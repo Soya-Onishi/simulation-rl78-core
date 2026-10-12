@@ -48,6 +48,12 @@ pub fn uart_edge(cluster_key: &str, edge_id: &str) -> String {
     format!("sim-cluster/{cluster_key}/uart/{digest:016x}")
 }
 
+/// Service name for one board probe point.
+#[must_use]
+pub fn probe(cluster_key: &str, board_hash: u64, name_hash: u64) -> String {
+    format!("sim-cluster/{cluster_key}/probe/{board_hash:016x}/{name_hash:016x}")
+}
+
 /// Default edge id string (matches previous arbiter formatting).
 #[must_use]
 pub fn edge_id(from_board: &str, from_ep: &str, to_board: &str, to_ep: &str) -> String {
@@ -65,5 +71,13 @@ mod tests {
         // Sanitizing both to underscores would collide; hashes must differ.
         assert_ne!(uart_edge("k", &a), uart_edge("k", &b));
         assert_eq!(uart_edge("k", &a), uart_edge("k", &a));
+    }
+
+    #[test]
+    fn probe_service_names_are_stable() {
+        let a = probe("k", 1, 2);
+        assert_eq!(a, probe("k", 1, 2));
+        assert_ne!(probe("k", 1, 2), probe("k", 1, 3));
+        assert!(a.contains("/probe/"));
     }
 }

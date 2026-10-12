@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use sim_kernel::{
     BoardPorts, EventCtl, HasMemoryMap, InPort, Machine, MapError, MemoryBus, MemoryMapBuilder,
-    OutPort, Ram, Rom, UnmappedPolicy, Wire,
+    OutPort, ProbePoint, Ram, Rom, UnmappedPolicy, Wire,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
@@ -91,7 +91,7 @@ pub struct G23MachineConfig {
 /// Wire board-edge UART0 (`uart0_tx` / `uart0_rx`) to SAU channel TX / RX.
 ///
 /// Endpoint names match the cluster topology; this is board glue, not SoC wiring.
-fn wire_board_uart0(core: &Rl78G23Core) -> BoardPorts {
+fn wire_board_uart0(core: &Rl78G23Core) -> (BoardPorts, Vec<ProbePoint>) {
     let uart_tx = OutPort::new("uart0_tx").expect("uart0_tx");
     let mut uart_rx = InPort::new("uart0_rx").expect("uart0_rx");
     {
@@ -110,16 +110,17 @@ fn wire_board_uart0(core: &Rl78G23Core) -> BoardPorts {
     let mut ports = BoardPorts::new();
     ports.insert_out(uart_tx).expect("uart0_tx");
     ports.insert_in(uart_rx).expect("uart0_rx");
-    ports
+    (ports, Vec::new())
 }
 
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
 ///
-/// Returns the machine plus board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx`).
-pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<R7F100Gxl>, BoardPorts) {
+/// Returns the machine, board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx`), and
+/// wiring-side [`ProbePoint`]s attached while the wires were built.
+pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
     let ctl = EventCtl::new();
     let part = R7F100Gxl::new(ctl.clone());
-    let ports = wire_board_uart0(&part.core);
+    let (ports, probes) = wire_board_uart0(&part.core);
     let bus = part
         .memory_map()
         .expect("g23 memory map")
@@ -129,7 +130,7 @@ pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<R7F100Gxl>, BoardPorts) {
     let irq = Arc::clone(&part.core.irq);
     let machine = Machine::new(part, bus, ctl);
     peripherals::irq::bind_cpu_line(irq);
-    (machine, ports)
+    (machine, ports, probes)
 }
 
 #[cfg(test)]
@@ -142,7 +143,7 @@ mod tests {
 
     fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus, BoardPorts) {
         let mut part = R7F100Gxl::new(ctl);
-        let ports = wire_board_uart0(&part.core);
+        let (ports, _probes) = wire_board_uart0(&part.core);
         let mut bus = part.memory_map().unwrap().build().unwrap();
         Resettable::reset(&mut part, &mut bus);
         ports.clear_pending();

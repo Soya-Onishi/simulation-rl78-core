@@ -9,8 +9,8 @@ use std::thread;
 use std::time::Duration;
 
 use sim_kernel::{
-    BoardPorts, Command, Cpu, FirmwareError, Machine, Response, SimConfig, SimState, Simulator,
-    StopReason, Tick,
+    BoardPorts, Command, Cpu, FirmwareError, Machine, ProbePoint, Response, SimConfig, SimState,
+    Simulator, StopReason, Tick,
 };
 
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
@@ -20,6 +20,8 @@ use crate::ipc::{
     IpcError, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node, isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
+use crate::probe::{ProbeError, ProbePublishers};
+use crate::probe_hub::pack_probe_name;
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
 
 /// Idle sleep when not Running, waiting on the allowed ceiling, or guest-halted.
@@ -47,6 +49,8 @@ pub enum BoardError {
     DataPlane(#[from] DataPlaneError),
     #[error("firmware error: {0}")]
     Firmware(#[from] FirmwareError),
+    #[error("probe error: {0}")]
+    Probe(#[from] ProbeError),
     #[error("{0}")]
     ElfSource(#[from] crate::elf_source::ElfSourceError),
     #[error("{0}")]
@@ -146,11 +150,15 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 /// When the topology board entry has an `elf` source, this function loads those
 /// bytes and calls [`Machine::load_firmware`].
 ///
+/// The third return value is the wiring-side [`ProbePoint`] list. This function
+/// opens one publisher per point. Before the first [`ControlToArbiter::Ready`],
+/// those probes are advertised via [`ControlToArbiter::ProbeAdvertise`].
+///
 /// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
 /// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
 pub fn run_board<C: Cpu>(
     opts: BoardOptions,
-    build: impl FnOnce() -> (Machine<C>, BoardPorts),
+    build: impl FnOnce() -> (Machine<C>, BoardPorts, Vec<ProbePoint>),
 ) -> Result<(), BoardError> {
     let board_id = opts.board_id.as_str();
     let board_hash = board_id_hash(board_id);
@@ -166,7 +174,9 @@ pub fn run_board<C: Cpu>(
     let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
     let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
 
-    let (machine, ports) = build();
+    let (machine, ports, probe_points) = build();
+    let probe_publishers =
+        ProbePublishers::open(&iox_node, &opts.cluster_key, board_id, probe_points)?;
     let mut sim = Simulator::new(machine, SimConfig::default());
     if let Some(elf) = &board.elf {
         let image = elf_source::load(elf)?;
@@ -186,6 +196,7 @@ pub fn run_board<C: Cpu>(
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
+    let mut probe_ads = Some(probe_publishers.advertisements().to_vec());
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
@@ -202,6 +213,21 @@ pub fn run_board<C: Cpu>(
             if let Some(effect) = effect {
                 match effect {
                     NodeEffect::SendReady => {
+                        if let Some(probes) = probe_ads.take() {
+                            for adv in &probes {
+                                let (name, name_len) = pack_probe_name(&adv.name);
+                                control.publish(&ControlToArbiter::ProbeAdvertise {
+                                    from: board_hash,
+                                    name_hash: adv.name_hash,
+                                    probe_id: adv.probe_id,
+                                    kind: adv.kind as u8,
+                                    name_len,
+                                    name,
+                                })?;
+                            }
+
+                            log::info!("advertised {} probe(s)", probes.len());
+                        }
                         control.publish(&ControlToArbiter::Ready { from: board_hash })?;
                         log::trace!("Ready");
                     }
@@ -300,6 +326,7 @@ pub fn run_board<C: Cpu>(
             for plane in &mut data_planes {
                 plane.pump_tx()?;
             }
+            probe_publishers.pump();
         }
     }
 }

@@ -20,6 +20,8 @@ pub mod ipc;
 pub mod lifecycle;
 pub mod log_msg;
 pub mod node;
+pub mod probe;
+pub mod probe_hub;
 pub mod server;
 pub mod time_sync;
 pub mod topology;
@@ -40,10 +42,18 @@ pub use elf_source::ElfSourceError;
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use log_msg::{ClusterLog, LogConsole, LogLevel, LogOrigin};
 pub use node::notify_host_stop;
+pub use probe::{
+    MAX_PROBES_PER_BOARD, PROBE_NAME_CAP, ProbeAdvertisement, ProbeError, ProbePublishers,
+    ProbeWireKind,
+};
+pub use probe_hub::{
+    ArbiterProbeError, ArbiterProbeHub, ProbeCatalogEntry, ProbeSample, pack_probe_name,
+    unpack_probe_name,
+};
 pub use server::{
     ServerError, ServerOptions, execute_python_script, execute_python_source, run_server,
 };
-pub use sim_kernel::UartFrame;
+pub use sim_kernel::{ProbePoint, ProbePolicy, ProbeTap, UartFrame};
 pub use time_sync::TimeCeiling;
 pub use topology::{
     BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
