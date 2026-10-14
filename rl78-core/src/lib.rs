@@ -22,15 +22,15 @@ pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 pub use peripherals::{
-    ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz, IrqController, IrqId, IrqRequest,
-    R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
+    ClockGenerator, ClockOutputs, ClockTree, Cycles, Gpio, Hertz, IrqController, IrqId, IrqRequest,
+    R7F100Gxl, Rl78G23Core, SauUnit, TauUnit, gpio_in_name, gpio_out_name,
 };
 
 use std::sync::Arc;
 
 use sim_kernel::{
-    BoardPorts, EventCtl, HasMemoryMap, InPort, Machine, MapError, MemoryBus, MemoryMapBuilder,
-    OutPort, ProbePoint, Ram, Rom, UnmappedPolicy, Wire,
+    BoardPorts, DigitalLevel, EventCtl, HasMemoryMap, InPort, Machine, MapError, MemoryBus,
+    MemoryMapBuilder, OutPort, ProbePoint, Ram, Rom, UnmappedPolicy, Wire,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
@@ -88,7 +88,7 @@ pub struct G23MachineConfig {
     pub unmapped: UnmappedPolicy,
 }
 
-/// Wire board-edge UART0 (`uart0_tx` / `uart0_rx`) to SAU channel TX / RX.
+/// Wire board-edge UART0 (`uart0_tx` / `uart0_rx`) and GPIO pins.
 ///
 /// Endpoint names match the cluster topology; this is board glue, not SoC wiring.
 fn wire_board_uart0(core: &Rl78G23Core) -> (BoardPorts, Vec<ProbePoint>) {
@@ -110,13 +110,38 @@ fn wire_board_uart0(core: &Rl78G23Core) -> (BoardPorts, Vec<ProbePoint>) {
     let mut ports = BoardPorts::new();
     ports.insert_out(uart_tx).expect("uart0_tx");
     ports.insert_in(uart_rx).expect("uart0_rx");
+    wire_board_gpio(core, &mut ports);
     (ports, Vec::new())
+}
+
+/// Wire `gpio_out_{pin}` / `gpio_in_{pin}` (`pin` = `port * 8 + bit`) to the port block.
+fn wire_board_gpio(core: &Rl78G23Core, ports: &mut BoardPorts) {
+    for pin in 0..peripherals::gpio::PINS {
+        let out = OutPort::<DigitalLevel>::new(gpio_out_name(pin)).expect("gpio out");
+        let mut inp = InPort::<DigitalLevel>::new(gpio_in_name(pin)).expect("gpio in");
+        {
+            let mut gpio = core.gpio.lock().expect("gpio");
+            let tx = out.clone();
+            let _wire = Wire::new()
+                .source(gpio.out_source(pin))
+                .sink(move |values, changed| tx.on_input(values, changed));
+        }
+        {
+            let gpio = Arc::clone(&core.gpio);
+            let _wire = Wire::new()
+                .source(inp.port_mut())
+                .sink(move |values, changed| Gpio::on_pin(&gpio, pin, values, changed));
+        }
+        ports.insert_out(out).expect("gpio out");
+        ports.insert_in(inp).expect("gpio in");
+    }
 }
 
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
 ///
-/// Returns the machine, board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx`), and
-/// wiring-side [`ProbePoint`]s attached while the wires were built.
+/// Returns the machine, board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx` and
+/// `gpio_out_{pin}` / `gpio_in_{pin}`), and wiring-side [`ProbePoint`]s attached
+/// while the wires were built.
 pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
     let ctl = EventCtl::new();
     let part = R7F100Gxl::new(ctl.clone());
