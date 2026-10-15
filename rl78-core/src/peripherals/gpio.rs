@@ -17,6 +17,8 @@ pub const PINS_PER_PORT: usize = 8;
 pub const PINS: usize = PORTS * PINS_PER_PORT;
 
 const MODE_INPUT: u8 = 1;
+/// `PM13` has no SFR. Bit 7 stays an input; bits 0–6 are outputs.
+const PM13_MODE: u8 = 0x80;
 
 /// Board-edge output name for `pin` (`gpio_out_0` is `P0.0`).
 #[must_use]
@@ -33,7 +35,7 @@ pub fn gpio_in_name(pin: usize) -> String {
 /// One MMIO window of the port block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GpioWindow {
-    /// `PMn` at `0xFFF20`, 16 bytes. `PM13` is absent.
+    /// `PMn` at `0xFFF20`, 16 bytes. `PM13` is not a register; its direction is [`PM13_MODE`].
     Mode,
     /// `Pn` at `0xFFF00`, 16 bytes.
     Level,
@@ -127,6 +129,7 @@ impl Gpio {
 
     fn restore_reset(&mut self) {
         self.mode = [0xFF; PORTS];
+        self.mode[13] = PM13_MODE;
         self.level = [0; PORTS];
         self.pullup = [0; PORTS];
         self.pullup[4] = 0x01;
@@ -180,6 +183,7 @@ impl Gpio {
     }
 
     fn write_mode(&mut self, port: usize, data: u8) {
+        // PM13 is not a register. Direction stays [`PM13_MODE`].
         if port == 13 {
             return;
         }
@@ -206,13 +210,7 @@ impl Gpio {
         let index = offset as usize;
         let port = index & 0x0F;
         match window {
-            GpioWindow::Mode => {
-                if port == 13 {
-                    0
-                } else {
-                    self.mode[port]
-                }
-            }
+            GpioWindow::Mode => self.mode[port],
             GpioWindow::Level => self.level[port],
             GpioWindow::Redirection => self.redirection,
             GpioWindow::GlobalInputDisable => self.global_input_disable,
@@ -415,7 +413,7 @@ mod tests {
         let mut bus = mapped(&gpio);
         assert_eq!(read_at(&mut bus, MODE), 0xFF);
         assert_eq!(read_at(&mut bus, LEVEL), 0x00);
-        assert_eq!(read_at(&mut bus, MODE + 13), 0x00);
+        assert_eq!(read_at(&mut bus, MODE + 13), PM13_MODE);
         assert_eq!(read_at(&mut bus, OTHER0 + 4), 0x01);
         assert_eq!(read_at(&mut bus, OTHER0 + 0x30), 0xFF);
         bus.write(OTHER0 + 4, &[0x00]).unwrap();
@@ -469,8 +467,11 @@ mod tests {
         bus.write(MODE + 15, &[0x00]).unwrap();
         assert_eq!(read_at(&mut bus, MODE + 10), 0x80);
         assert_eq!(read_at(&mut bus, MODE + 12), 0x18);
-        assert_eq!(read_at(&mut bus, MODE + 13), 0x00);
+        assert_eq!(read_at(&mut bus, MODE + 13), PM13_MODE);
         assert_eq!(read_at(&mut bus, MODE + 15), 0x80);
+
+        bus.write(LEVEL + 13, &[0xFF]).unwrap();
+        assert_eq!(read_at(&mut bus, LEVEL + 13), 0x01);
 
         bus.write(LEVEL + 10, &[0xFF]).unwrap();
         bus.write(LEVEL + 15, &[0xFF]).unwrap();
