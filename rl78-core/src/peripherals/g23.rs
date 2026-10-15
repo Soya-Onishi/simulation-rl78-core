@@ -14,6 +14,7 @@ use crate::peripherals::SemihostingUnit;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
+use crate::peripherals::gpio::{Gpio, GpioMmio, GpioWindow};
 use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqId};
 use crate::peripherals::sau::{self, SauCtrlMmio, SauSdrMmio, SauUnit};
 use crate::peripherals::semihosting::SemihostingMmio;
@@ -34,6 +35,12 @@ const TAU_TIS: Addr = 0xF0074;
 const IRQ_IFMK0: Addr = 0xFFFE0;
 const IRQ_IFMK1: Addr = 0xFFFD0;
 const IRQ_EDGE: Addr = 0xFFF38;
+const GPIO_LEVEL: Addr = 0xFFF00;
+const GPIO_MODE: Addr = 0xFFF20;
+const GPIO_OTHER0: Addr = 0xF0030;
+const GPIO_PIOR: Addr = 0xF0077;
+const GPIO_PIDIS: Addr = 0xF007D;
+const GPIO_OTHER1: Addr = 0xF0260;
 const SEMIHOSTING: Addr = 0xE0000;
 /// Flash option byte `FRQSEL` (QEMU `rom_ptr(0x000C2)`).
 const OPTION_BYTE_ADDR: Addr = 0x000C2;
@@ -74,14 +81,15 @@ fn wiring(sau: &mut SauUnit, tau: &mut TauUnit, irq: &Arc<Mutex<IrqController>>)
     }
 }
 
-/// Generic G23 core (clock / SAU0 / TAU0 / IRQ). Flash/RAM sizes come from the part.
+/// Generic G23 core (clock / SAU0 / TAU0 / GPIO / IRQ). Flash/RAM sizes come from the part.
 ///
-/// Board-edge UART ports (`uart0_tx` / `uart0_rx`) are wired by [`crate::g23_machine`],
+/// Board-edge UART and GPIO ports are wired by [`crate::g23_machine`],
 /// not here — endpoint names belong to the board topology.
 pub struct Rl78G23Core {
     pub clock: Arc<Mutex<ClockGenerator>>,
     pub sau: Arc<Mutex<SauUnit>>,
     pub tau: Arc<Mutex<TauUnit>>,
+    pub gpio: Arc<Mutex<Gpio>>,
     pub semihosting: Arc<Mutex<SemihostingUnit>>,
     pub irq: Arc<Mutex<IrqController>>,
     /// RL78 instruction engine. Created in [`Self::new`]. tlib allows one live instance.
@@ -104,6 +112,7 @@ impl Rl78G23Core {
             clock,
             sau: Arc::new(Mutex::new(sau_unit)),
             tau: Arc::new(Mutex::new(tau_unit)),
+            gpio: Arc::new(Mutex::new(Gpio::new())),
             semihosting: Arc::new(Mutex::new(semihosting_unit)),
             irq,
             core,
@@ -116,6 +125,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.clock.lock().expect("clock"), bus);
         Resettable::reset(&mut *self.sau.lock().expect("sau"), bus);
         Resettable::reset(&mut *self.tau.lock().expect("tau"), bus);
+        Resettable::reset(&mut *self.gpio.lock().expect("gpio"), bus);
         Resettable::reset(&mut *self.irq.lock().expect("irq"), bus);
         Resettable::reset(&mut *self.semihosting.lock().expect("semihosting"), bus);
         Resettable::reset(&mut self.core, bus);
@@ -169,6 +179,36 @@ impl HasMemoryMap for Rl78G23Core {
                 Box::new(IrqBankMmio::new(Arc::clone(&self.irq), 1)),
             )?
             .map(IRQ_EDGE, Box::new(IrqEdgeMmio::new(Arc::clone(&self.irq))))?
+            .map(
+                GPIO_LEVEL,
+                Box::new(GpioMmio::new(Arc::clone(&self.gpio), GpioWindow::Level)),
+            )?
+            .map(
+                GPIO_MODE,
+                Box::new(GpioMmio::new(Arc::clone(&self.gpio), GpioWindow::Mode)),
+            )?
+            .map(
+                GPIO_PIOR,
+                Box::new(GpioMmio::new(
+                    Arc::clone(&self.gpio),
+                    GpioWindow::Redirection,
+                )),
+            )?
+            .map(
+                GPIO_PIDIS,
+                Box::new(GpioMmio::new(
+                    Arc::clone(&self.gpio),
+                    GpioWindow::GlobalInputDisable,
+                )),
+            )?
+            .map(
+                GPIO_OTHER0,
+                Box::new(GpioMmio::new(Arc::clone(&self.gpio), GpioWindow::Other0)),
+            )?
+            .map(
+                GPIO_OTHER1,
+                Box::new(GpioMmio::new(Arc::clone(&self.gpio), GpioWindow::Other1)),
+            )?
             .map(
                 SEMIHOSTING,
                 Box::new(SemihostingMmio::new(Arc::clone(&self.semihosting))),
