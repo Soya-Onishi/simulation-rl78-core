@@ -38,6 +38,30 @@ pub fn status_a2s(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/status/a2s")
 }
 
+/// Service name: nodes → arbiter action catalog and results.
+#[must_use]
+pub fn action_n2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/action/n2a")
+}
+
+/// Service name: arbiter → nodes action requests.
+#[must_use]
+pub fn action_a2n(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/action/a2n")
+}
+
+/// Service name: server → arbiter action requests.
+#[must_use]
+pub fn action_s2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/action/s2a")
+}
+
+/// Service name: arbiter → server action catalog and results.
+#[must_use]
+pub fn action_a2s(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/action/a2s")
+}
+
 /// Service name for one directed UART edge.
 ///
 /// Uses a content hash of the full logical [`edge_id`] so distinct edges cannot

@@ -4,6 +4,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -13,10 +14,12 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 
 use crate::backend::{SimulationBackend, prepare_topology};
-use crate::contract::{ApiError, CreateSimulationRequest, CreateSimulationResponse};
+use crate::contract::{
+    ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
+};
 use crate::web::PAGE_HTML;
 
-/// For ELF Size, max body size must be changed. 
+/// For ELF Size, max body size must be changed.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -40,6 +43,10 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
         .route("/api/simulation/{id}/start", post(start_simulation))
         .route("/api/simulation/{id}/stop", post(stop_simulation))
         .route("/api/simulation/{id}/reset", post(reset_simulation))
+        .route(
+            "/api/simulation/{id}/actions",
+            get(list_actions).post(invoke_action),
+        )
         .route("/api/simulation/{id}", delete(delete_simulation))
         .route("/api/simulation/{id}/status", get(status_sse))
         .route("/api/simulation/{id}/log", get(log_sse))
@@ -91,6 +98,31 @@ async fn reset_simulation(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     run_command(state, id, |b, id| b.reset(id)).await
+}
+
+async fn list_actions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ActionList>, ApiError> {
+    let backend = state.backend.clone();
+    let list = tokio::task::spawn_blocking(move || backend.actions(&id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(list))
+}
+
+async fn invoke_action(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Result<Json<InvokeActionRequest>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Json(request) =
+        body.map_err(|_| ApiError::bad_request("bad_param", "invalid action parameter"))?;
+    let backend = state.backend.clone();
+    tokio::task::spawn_blocking(move || backend.invoke_action(&id, request))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(StatusCode::OK)
 }
 
 async fn run_command<F>(state: AppState, id: String, f: F) -> Result<StatusCode, ApiError>

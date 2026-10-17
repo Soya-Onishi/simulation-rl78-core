@@ -11,11 +11,13 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::action::{ActionResult, ActionStatus, ActionUpstream};
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
-    ArbiterControl, ArbiterHostPort, ArbiterLogBus, IpcError, board_hash_table, create_node,
-    isolated_config, new_cluster_key, root_path_for_cluster,
+    ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterServerActions,
+    IpcError, board_hash_table, create_node, isolated_config, new_cluster_key,
+    root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::probe::ProbeWireKind;
@@ -99,7 +101,7 @@ fn ready_barrier_and_start(
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
     let mut probes = ArbiterProbeHub::new("test");
-    let mut peers = await_ready(topo, control, &mut probes)?;
+    let mut peers = await_ready(topo, control, &mut probes, None, None)?;
     control.publish(&ControlToNode::Start)?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
@@ -113,6 +115,8 @@ fn await_ready(
     topo: &LogicalTopology,
     control: &ArbiterControl,
     probes: &mut ArbiterProbeHub,
+    actions: Option<&ArbiterNodeActions>,
+    server: Option<&ArbiterServerActions>,
 ) -> Result<HashMap<String, PeerState>, ArbiterError> {
     let timeout = Duration::from_millis(topo.ready_timeout_ms);
     let deadline = Instant::now() + timeout;
@@ -141,6 +145,7 @@ fn await_ready(
         }
 
         let mut progressed = false;
+        forward_catalog(actions, server)?;
         while let Some(msg) = control.try_recv()? {
             match msg {
                 ControlToArbiter::ProbeAdvertise {
@@ -193,6 +198,12 @@ fn await_ready(
             thread::sleep(ARBITER_POLL_IDLE);
         }
     }
+
+    // Advertisements are send_copy'd before Ready, but they can land in the
+    // action subscriber between this iteration's drain and the control read
+    // that observes Ready. Drain once more before later advertisements are
+    // discarded.
+    forward_catalog(actions, server)?;
 
     log::info!(
         "Ready barrier complete ({} nodes, {} probes)",
@@ -271,6 +282,53 @@ enum SyncStep {
     Stopped,
 }
 
+/// Forward catalog advertisements that arrived before this iteration's control read.
+///
+/// Nodes `send_copy` every advertisement before `Ready`, so the samples are already
+/// in the action subscriber when `Ready` becomes visible. Draining here before the
+/// control receive keeps that order without a catalog-end sample.
+fn forward_catalog(
+    actions: Option<&ArbiterNodeActions>,
+    server: Option<&ArbiterServerActions>,
+) -> Result<(), ArbiterError> {
+    let Some(actions) = actions else {
+        return Ok(());
+    };
+    while let Some(msg) = actions.try_upstream()? {
+        if let ActionUpstream::Advertise(ad) = msg {
+            if let Some(server) = server {
+                server.publish_upstream(&ActionUpstream::Advertise(ad))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// After the ready barrier, advertisements are discarded. Requests are forwarded
+/// only while the session is running; otherwise the arbiter answers `Stopped`.
+fn forward_invokes(
+    actions: &ArbiterNodeActions,
+    server: &ArbiterServerActions,
+    running: bool,
+) -> Result<(), ArbiterError> {
+    while let Some(req) = server.try_request()? {
+        if running {
+            actions.publish_request(&req)?;
+        } else {
+            server.publish_upstream(&ActionUpstream::Result(ActionResult {
+                request_id: req.request_id,
+                status: ActionStatus::Stopped as u8,
+            }))?;
+        }
+    }
+    while let Some(msg) = actions.try_upstream()? {
+        if let ActionUpstream::Result(result) = msg {
+            server.publish_upstream(&ActionUpstream::Result(result))?;
+        }
+    }
+    Ok(())
+}
+
 fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(), ArbiterError> {
     let board_ids: Vec<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
     let boards = board_hash_table(board_ids).map_err(ArbiterError::Message)?;
@@ -280,6 +338,8 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     let host = ArbiterHostPort::open(&node, &opts.cluster_key)?;
     let control =
         ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards.clone())?;
+    let node_actions = ArbiterNodeActions::create(&node, &opts.cluster_key, topo.boards.len())?;
+    let server_actions = ArbiterServerActions::open(&node, &opts.cluster_key, topo.boards.len())?;
     let mut logs =
         ArbiterLogBus::create(&opts.iox_root, &opts.cluster_key, topo.boards.len(), boards)?;
     log::info!(
@@ -292,7 +352,13 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
 
     let mut children = spawn_nodes(opts, topo)?;
     let mut probe_hub = ArbiterProbeHub::new(opts.cluster_key.clone());
-    let mut peers = match await_ready(topo, &control, &mut probe_hub) {
+    let mut peers = match await_ready(
+        topo,
+        &control,
+        &mut probe_hub,
+        Some(&node_actions),
+        Some(&server_actions),
+    ) {
         Ok(peers) => peers,
         Err(err) => {
             stop_children(&mut children);
@@ -355,6 +421,8 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         if shutdown {
             break Ok(());
         }
+
+        forward_invokes(&node_actions, &server_actions, running)?;
 
         match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed)? {
             SyncStep::Continue => {}

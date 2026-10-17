@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
-use crate::contract::{ApiError, LogEvent, StatusEvent};
+use crate::contract::{ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent};
 use crate::host::HostCommand;
 use crate::server::{self, Job, JobKind, JobReply};
 use crate::topology::LogicalTopology;
@@ -27,6 +27,8 @@ pub trait SimulationBackend: Send + Sync {
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError>;
     /// Highest log seq currently stored (`0` if none).
     fn log_high_water(&self, id: &str) -> Result<u64, ApiError>;
+    fn actions(&self, id: &str) -> Result<ActionList, ApiError>;
+    fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError>;
 }
 
 /// In-process backend over the cluster-server worker queue.
@@ -42,6 +44,10 @@ impl LocalBackend {
     }
 
     fn rpc(&self, kind: JobKind) -> Result<JobReply, ApiError> {
+        self.rpc_timeout(kind, Duration::from_secs(60))
+    }
+
+    fn rpc_timeout(&self, kind: JobKind, timeout: Duration) -> Result<JobReply, ApiError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
             .send(Job {
@@ -50,7 +56,7 @@ impl LocalBackend {
             })
             .map_err(|_| ApiError::internal("cluster-server worker is not running"))?;
         reply_rx
-            .recv_timeout(Duration::from_secs(60))
+            .recv_timeout(timeout)
             .map_err(|_| ApiError::internal("cluster-server worker timed out"))
     }
 
@@ -140,6 +146,32 @@ impl SimulationBackend for LocalBackend {
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for log high water: {other:?}"
+            ))),
+        }
+    }
+
+    fn actions(&self, id: &str) -> Result<ActionList, ApiError> {
+        match self.rpc(JobKind::ListActions { id: id.to_string() })? {
+            JobReply::Actions(list) => Ok(list),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for actions: {other:?}"
+            ))),
+        }
+    }
+
+    fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError> {
+        match self.rpc_timeout(
+            JobKind::Invoke {
+                id: id.to_string(),
+                request,
+            },
+            Duration::from_secs(6),
+        )? {
+            JobReply::Applied => Ok(()),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for invoke: {other:?}"
             ))),
         }
     }

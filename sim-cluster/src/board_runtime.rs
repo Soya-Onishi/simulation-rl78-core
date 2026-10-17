@@ -9,15 +9,19 @@ use std::thread;
 use std::time::Duration;
 
 use sim_kernel::{
-    BoardPorts, Command, Cpu, FirmwareError, Machine, ProbePoint, Response, SimConfig, SimState,
-    Simulator, StopReason, Tick,
+    ActionFailure, BoardPorts, Command, Cpu, FirmwareError, Machine, ProbePoint, Response,
+    SimConfig, SimState, Simulator, StopReason, Tick,
 };
 
+use crate::action::{
+    ACTION_RECV_CAP, ActionAdvertise, ActionPackError, ActionResult, ActionStatus, ActionUpstream,
+};
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::elf_source;
 use crate::ipc::{
-    IpcError, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node, isolated_config,
+    IpcError, NodeActions, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node,
+    isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::probe::{ProbeError, ProbePublishers};
@@ -51,6 +55,8 @@ pub enum BoardError {
     Firmware(#[from] FirmwareError),
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
+    #[error("{0}")]
+    Action(#[from] ActionPackError),
     #[error("{0}")]
     ElfSource(#[from] crate::elf_source::ElfSourceError),
     #[error("{0}")]
@@ -171,6 +177,7 @@ pub fn run_board<C: Cpu>(
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;
     let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
+    let actions = NodeActions::open(&iox_node, &opts.cluster_key, topo.boards.len())?;
     let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
     let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
 
@@ -197,6 +204,7 @@ pub fn run_board<C: Cpu>(
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
     let mut probe_ads = Some(probe_publishers.advertisements().to_vec());
+    let mut actions_advertised = false;
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
@@ -213,6 +221,15 @@ pub fn run_board<C: Cpu>(
             if let Some(effect) = effect {
                 match effect {
                     NodeEffect::SendReady => {
+                        if !actions_advertised {
+                            let catalog = sim.machine().action_catalog();
+                            for entry in &catalog {
+                                let sample = ActionAdvertise::new(board_hash, entry)?;
+                                actions.publish_upstream(&ActionUpstream::Advertise(sample))?;
+                            }
+                            actions_advertised = true;
+                            log::info!("advertised {} action(s)", catalog.len());
+                        }
                         if let Some(probes) = probe_ads.take() {
                             for adv in &probes {
                                 let (name, name_len) = pack_probe_name(&adv.name);
@@ -266,14 +283,16 @@ pub fn run_board<C: Cpu>(
             }
         }
 
+        service_actions(&actions, &mut sim, state, board_hash)?;
+
         if state == NodeState::Running {
             for plane in &mut data_planes {
                 plane.pump_rx()?;
             }
 
-           if sim.waiting_on_allowed_ceiling() {
+            if sim.waiting_on_allowed_ceiling() {
                 continue;
-           }
+            }
 
             if sim.state() != SimState::Running {
                 // Do not pump_tx while the guest is not advancing: cross-board
@@ -329,6 +348,61 @@ pub fn run_board<C: Cpu>(
             probe_publishers.pump();
         }
     }
+}
+
+/// Drain the request inbox and answer every sample addressed to this board.
+///
+/// Every drained request is executed. [`ACTION_RECV_CAP`] is only how many
+/// samples the subscriber can hold; anything past that is dropped by the
+/// transport.
+fn service_actions(
+    actions: &NodeActions,
+    sim: &mut Simulator<impl Cpu>,
+    state: NodeState,
+    board_hash: u64,
+) -> Result<(), BoardError> {
+    let mut mine = Vec::new();
+    for _ in 0..ACTION_RECV_CAP {
+        match actions.try_request()? {
+            Some(req) if req.board_hash == board_hash => mine.push(req),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    if state != NodeState::Running {
+        for req in mine {
+            reply(actions, req.request_id, ActionStatus::Stopped)?;
+        }
+        return Ok(());
+    }
+    let now = sim.machine().clock().now();
+    sim.machine_mut().poll_actions(now);
+
+    for req in mine {
+        let now = sim.machine().clock().now();
+        let status = match sim.machine_mut().apply_action(
+            req.device_hash,
+            req.action_hash,
+            now,
+            &req.raw_params(),
+        ) {
+            Ok(()) => ActionStatus::Applied,
+            Err(ActionFailure::NotFoundDevice) => ActionStatus::NotFoundDevice,
+            Err(ActionFailure::NotFoundAction) => ActionStatus::NotFoundAction,
+            Err(ActionFailure::Busy) => ActionStatus::Busy,
+            Err(ActionFailure::BadParam) => ActionStatus::BadParam,
+        };
+        reply(actions, req.request_id, status)?;
+    }
+    Ok(())
+}
+
+fn reply(actions: &NodeActions, request_id: u64, status: ActionStatus) -> Result<(), BoardError> {
+    actions.publish_upstream(&ActionUpstream::Result(ActionResult {
+        request_id,
+        status: status as u8,
+    }))?;
+    Ok(())
 }
 
 fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a BoardSpec, BoardError> {
