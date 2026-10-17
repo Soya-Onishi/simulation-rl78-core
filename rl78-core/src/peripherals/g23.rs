@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
-    Addr, Cpu, Device, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, Ram,
-    Resettable, Rom, Tick, Wire,
+    Addr, Cpu, Device, DigitalLevel, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder,
+    Ram, Resettable, Rom, SourcePort, Tick, Wire,
 };
 
 use crate::cpu::Rl78Cpu;
@@ -14,7 +14,7 @@ use crate::peripherals::SemihostingUnit;
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
-use crate::peripherals::gpio::{Gpio, GpioMmio, GpioWindow};
+use crate::peripherals::gpio::{Gpio, GpioMmio, GpioWindow, PINS};
 use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqId};
 use crate::peripherals::sau::{self, SauCtrlMmio, SauSdrMmio, SauUnit};
 use crate::peripherals::semihosting::SemihostingMmio;
@@ -216,9 +216,46 @@ impl HasMemoryMap for Rl78G23Core {
     }
 }
 
-/// R7F100GxL: G23 core plus this part's ROM/RAM windows.
+/// Package pins of the port block. The [`Gpio`] peripheral stays on [`Rl78G23Core`];
+/// these [`SourcePort`]s are the terminals that leave the core.
+struct PackagePins {
+    /// External level into the pad. Wired to [`Gpio::on_pin`].
+    input: [SourcePort<DigitalLevel>; PINS],
+    /// Pad level driven by the port block.
+    output: [SourcePort<DigitalLevel>; PINS],
+}
+
+/// Connect each package pin to the core port block.
+fn wire_package_pins(core: &Rl78G23Core) -> PackagePins {
+    let mut input = std::array::from_fn(|_| SourcePort::new());
+    let mut output = std::array::from_fn(|_| SourcePort::new());
+    for pin in 0..PINS {
+        let gpio = Arc::clone(&core.gpio);
+        let _input = Wire::new()
+            .source(&mut input[pin])
+            .sink(move |values, changed| Gpio::on_pin(&gpio, pin, values, changed));
+        // Bind the package output before the core sink clones it. A clone taken
+        // earlier would not see this wire.
+        let _bound = Wire::new().source(&mut output[pin]);
+        let pkg_out = output[pin].clone();
+        {
+            let mut gpio = core.gpio.lock().expect("gpio");
+            let _output = Wire::new()
+                .source(gpio.out_source(pin))
+                .sink(move |values, changed| {
+                    if let Some(&level) = values.get(changed) {
+                        pkg_out.drive(level);
+                    }
+                });
+        }
+    }
+    PackagePins { input, output }
+}
+
+/// R7F100GxL: G23 core, this part's ROM/RAM windows, and the package pins.
 pub struct R7F100Gxl {
     pub core: Rl78G23Core,
+    pins: PackagePins,
 }
 
 impl R7F100Gxl {
@@ -234,9 +271,21 @@ impl R7F100Gxl {
 
     #[must_use]
     pub fn new(ctl: EventCtl) -> Self {
-        Self {
-            core: Rl78G23Core::new(ctl),
-        }
+        let core = Rl78G23Core::new(ctl);
+        let pins = wire_package_pins(&core);
+        Self { core, pins }
+    }
+
+    /// Package input for `pin` (`0` is P0.0). Already wired into the core port block.
+    #[must_use]
+    pub fn gpio_input(&self, pin: usize) -> SourcePort<DigitalLevel> {
+        self.pins.input[pin].clone()
+    }
+
+    /// Package output for `pin` (`0` is P0.0). The core port block drives this port.
+    #[must_use]
+    pub fn gpio_output(&self, pin: usize) -> SourcePort<DigitalLevel> {
+        self.pins.output[pin].clone()
     }
 }
 

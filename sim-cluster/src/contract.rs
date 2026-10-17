@@ -39,6 +39,48 @@ pub struct LogEvent {
     pub text: String,
 }
 
+/// One parameter in an action catalog row. Hashes are not part of the JSON contract.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdvertisedActionParam {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<f64>,
+}
+
+/// One action a client can invoke. Identity fields are strings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdvertisedAction {
+    pub board_id: String,
+    pub device: String,
+    pub action: String,
+    pub description: String,
+    pub params: Vec<AdvertisedActionParam>,
+}
+
+/// `GET /api/simulation/{id}/actions` body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionList {
+    pub actions: Vec<AdvertisedAction>,
+}
+
+/// `POST /api/simulation/{id}/actions` body.
+#[derive(Clone, Debug, Deserialize)]
+pub struct InvokeActionRequest {
+    pub board_id: String,
+    pub device: String,
+    pub action: String,
+    #[serde(default)]
+    pub params: std::collections::BTreeMap<String, f64>,
+}
+
 /// Uniform API error envelope: `{"error":{"code","message"}}`.
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {

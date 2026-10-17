@@ -6,6 +6,7 @@
 //! unchanged. Board binaries use [`board_runtime::run_board`] for the shared
 //! cluster participation loop (see `rl78-minimal-board`).
 
+pub mod action;
 pub mod arbiter;
 pub mod backend;
 pub mod board_runtime;
@@ -35,7 +36,8 @@ pub use board_runtime::{
 };
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
-    ApiError, CreateSimulationRequest, CreateSimulationResponse, LogEvent, StatusEvent,
+    AdvertisedAction, ActionList, AdvertisedActionParam, ApiError, CreateSimulationRequest,
+    CreateSimulationResponse, InvokeActionRequest, LogEvent, StatusEvent,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;

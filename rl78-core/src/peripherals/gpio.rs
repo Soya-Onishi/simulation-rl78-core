@@ -20,18 +20,6 @@ const MODE_INPUT: u8 = 1;
 /// `PM13` has no SFR. Bit 7 stays an input; bits 0–6 are outputs.
 const PM13_MODE: u8 = 0x80;
 
-/// Board-edge output name for `pin` (`gpio_out_0` is `P0.0`).
-#[must_use]
-pub fn gpio_out_name(pin: usize) -> String {
-    format!("gpio_out_{pin}")
-}
-
-/// Board-edge input name for `pin` (`gpio_in_0` is `P0.0`).
-#[must_use]
-pub fn gpio_in_name(pin: usize) -> String {
-    format!("gpio_in_{pin}")
-}
-
 /// One MMIO window of the port block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GpioWindow {

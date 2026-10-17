@@ -10,8 +10,3 @@ pub trait Resettable {
     fn reset(&mut self, bus: &mut MemoryBus);
 }
 
-/// Logical device owned by [`crate::Machine`] (SoC part, board peripheral, …).
-///
-/// Reset is driven through this handle — not by walking [`crate::MemoryMapped`]
-/// regions on the bus.
-pub trait Device: Send + Resettable {}

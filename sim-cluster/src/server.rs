@@ -9,19 +9,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use iceoryx2::prelude::{Node, ipc};
 
+use crate::action::{ActionRequest, ActionStatus, ActionUpstream};
 use crate::backend::{LocalBackend, SimulationBackend};
-use crate::contract::{ApiError, LogEvent, StatusEvent};
+use crate::contract::{
+    AdvertisedAction, ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent,
+};
 use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
 use crate::ipc::{
-    IpcError, ServerHostPort, ServerLogInbox, board_hash_table, create_node, isolated_config,
-    new_cluster_key, root_path_for_cluster,
+    IpcError, ServerActions, ServerHostPort, ServerLogInbox, board_hash_table, create_node,
+    isolated_config, new_cluster_key, root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::topology::{LogicalTopology, TopologyError};
@@ -29,6 +32,9 @@ use crate::topology::{LogicalTopology, TopologyError};
 /// Live SSE readers start at the high-water mark, so this only covers logs
 /// that arrive between polls.
 const LOG_CAP: usize = 100;
+
+/// Wall-clock wait for a node to apply an action. This is not the hold duration.
+const ACTION_WAIT: Duration = Duration::from_secs(5);
 
 /// Options for [`run_server`].
 #[derive(Clone, Debug)]
@@ -108,12 +114,33 @@ pub struct Job {
 #[derive(Debug)]
 pub enum JobKind {
     Create(LogicalTopology),
-    Command { id: String, cmd: HostCommand },
-    Delete { id: String },
-    Exists { id: String },
-    GetStatus { id: String },
-    GetLogs { id: String, after: u64 },
-    LogHighWater { id: String },
+    Command {
+        id: String,
+        cmd: HostCommand,
+    },
+    Delete {
+        id: String,
+    },
+    Exists {
+        id: String,
+    },
+    GetStatus {
+        id: String,
+    },
+    GetLogs {
+        id: String,
+        after: u64,
+    },
+    LogHighWater {
+        id: String,
+    },
+    ListActions {
+        id: String,
+    },
+    Invoke {
+        id: String,
+        request: InvokeActionRequest,
+    },
 }
 
 /// Worker → backend replies.
@@ -126,6 +153,8 @@ pub enum JobReply {
     Status(StatusEvent),
     Logs(Vec<LogEvent>),
     HighWater(u64),
+    Actions(ActionList),
+    Applied,
     Err(ApiError),
 }
 
@@ -147,7 +176,16 @@ struct Simulation {
     next_seq: u64,
     boards: HashMap<u64, String>,
     inbox: ServerLogInbox,
+    actions: ServerActions,
+    catalog: Vec<crate::contract::AdvertisedAction>,
+    pending: HashMap<u64, PendingAction>,
+    next_request_id: u64,
     _iox: IoxNode,
+}
+
+struct PendingAction {
+    reply: Sender<JobReply>,
+    deadline: Instant,
 }
 
 /// Accept control requests until the process is killed.
@@ -328,6 +366,28 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             Some(sim) => JobReply::HighWater(sim.next_seq.saturating_sub(1)),
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
+        JobKind::ListActions { id } => match world.sims.get(&id) {
+            Some(sim) => JobReply::Actions(ActionList {
+                actions: sim.catalog.clone(),
+            }),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::Invoke { id, request } => match world.sims.get_mut(&id) {
+            Some(sim) => match queue_invoke(sim, &request) {
+                Ok(request_id) => {
+                    sim.pending.insert(
+                        request_id,
+                        PendingAction {
+                            reply: job.reply,
+                            deadline: Instant::now() + ACTION_WAIT,
+                        },
+                    );
+                    return;
+                }
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
     };
     let _ = job.reply.send(reply);
 }
@@ -363,6 +423,7 @@ fn create_simulation(
     let iox = create_node(&config, &format!("server-{id}"))?;
     let inbox = ServerLogInbox::create(&iox, &id)?;
     let host = ServerHostPort::create(&iox, &id)?;
+    let actions = ServerActions::create(&iox, &id, topo.boards.len())?;
     let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
         .map_err(ServerError::Message)?;
     let topo_path = write_temp_topology(&topo)?;
@@ -398,6 +459,10 @@ fn create_simulation(
         next_seq: 1,
         boards,
         inbox,
+        actions,
+        catalog: Vec::new(),
+        pending: HashMap::new(),
+        next_request_id: 1,
         _iox: iox,
     })
 }
@@ -419,6 +484,112 @@ fn status_event(sim: &Simulation) -> StatusEvent {
         state: sim.state.clone(),
         virtual_time_ns: sim.virtual_time_ns,
         nodes: sim.nodes.clone(),
+    }
+}
+
+fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<u64, ApiError> {
+    if sim.state == "exited" {
+        return Err(ApiError::conflict("arbiter has exited"));
+    }
+    if sim.state != "running" {
+        return Err(ApiError::new(409, "stopped", "simulation is stopped"));
+    }
+    let board_hash = sim_kernel::id_hash(&request.board_id);
+    if !sim.boards.contains_key(&board_hash) {
+        return Err(ApiError::not_found("unknown board"));
+    }
+    let raw: Vec<(u64, f64)> = request
+        .params
+        .iter()
+        .map(|(name, value)| (sim_kernel::id_hash(name), *value))
+        .collect();
+    let request_id = sim.next_request_id;
+    sim.next_request_id = sim.next_request_id.saturating_add(1);
+    let sample = ActionRequest::new(
+        request_id,
+        board_hash,
+        sim_kernel::id_hash(&request.device),
+        sim_kernel::id_hash(&request.action),
+        &raw,
+    )
+    .map_err(|_| ApiError::bad_request("bad_param", "invalid action parameter"))?;
+    sim.actions
+        .publish_request(&sample)
+        .map_err(|err| ApiError::internal(err.to_string()))?;
+    Ok(request_id)
+}
+
+fn poll_actions(sim: &mut Simulation) {
+    let now = Instant::now();
+    let expired: Vec<u64> = sim
+        .pending
+        .iter()
+        .filter(|(_, pending)| now >= pending.deadline)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in expired {
+        if let Some(pending) = sim.pending.remove(&id) {
+            let _ = pending.reply.send(JobReply::Err(ApiError::new(
+                504,
+                "timeout",
+                "action was not applied before the deadline",
+            )));
+        }
+    }
+    loop {
+        match sim.actions.try_upstream() {
+            Ok(Some(ActionUpstream::Advertise(sample))) => {
+                let Some(board_id) = sim.boards.get(&sample.from).cloned() else {
+                    continue;
+                };
+                match AdvertisedAction::new(&board_id, &sample) {
+                    Ok(body) => upsert_catalog(sim, body),
+                    Err(err) => {
+                        eprintln!("cluster-server {}: action advertise: {err}", sim.id);
+                    }
+                }
+            }
+            Ok(Some(ActionUpstream::Result(result))) => {
+                let Some(pending) = sim.pending.remove(&result.request_id) else {
+                    continue;
+                };
+                let reply = match ActionStatus::from_u8(result.status) {
+                    Some(ActionStatus::Applied) => JobReply::Applied,
+                    Some(status) => JobReply::Err(action_status_error(status)),
+                    None => JobReply::Err(ApiError::internal(format!(
+                        "unknown action status {}",
+                        result.status
+                    ))),
+                };
+                let _ = pending.reply.send(reply);
+            }
+            Ok(None) => break,
+            Err(err) => {
+                eprintln!("cluster-server {}: action inbox: {err}", sim.id);
+                break;
+            }
+        }
+    }
+}
+
+fn upsert_catalog(sim: &mut Simulation, body: crate::contract::AdvertisedAction) {
+    if let Some(existing) = sim.catalog.iter_mut().find(|row| {
+        row.board_id == body.board_id && row.device == body.device && row.action == body.action
+    }) {
+        *existing = body;
+    } else {
+        sim.catalog.push(body);
+    }
+}
+
+fn action_status_error(status: ActionStatus) -> ApiError {
+    match status {
+        ActionStatus::Applied => ApiError::internal("applied is not an error"),
+        ActionStatus::Stopped => ApiError::new(409, "stopped", "simulation is stopped"),
+        ActionStatus::Busy => ApiError::new(409, "busy", "device has an action in progress"),
+        ActionStatus::NotFoundDevice => ApiError::not_found("unknown device"),
+        ActionStatus::NotFoundAction => ApiError::not_found("unknown action"),
+        ActionStatus::BadParam => ApiError::bad_request("bad_param", "invalid action parameter"),
     }
 }
 
@@ -447,6 +618,7 @@ fn poll_simulation(sim: &mut Simulation) {
             }
         }
     }
+    poll_actions(sim);
     if let Some(child) = sim.child.as_mut() {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -460,10 +632,17 @@ fn poll_simulation(sim: &mut Simulation) {
                     &format!("arbiter exited ({code})"),
                 );
                 sim.child = None;
+                fail_pending(sim, ApiError::conflict("arbiter has exited"));
             }
             Ok(None) => {}
             Err(err) => eprintln!("cluster-server {}: wait arbiter: {err}", sim.id),
         }
+    }
+}
+
+fn fail_pending(sim: &mut Simulation, err: ApiError) {
+    for (_, pending) in sim.pending.drain() {
+        let _ = pending.reply.send(JobReply::Err(err.clone()));
     }
 }
 
@@ -525,6 +704,11 @@ fn temp_path(prefix: &str, ext: &str) -> PathBuf {
 
 impl Drop for Simulation {
     fn drop(&mut self) {
+        for (_, pending) in self.pending.drain() {
+            let _ = pending
+                .reply
+                .send(JobReply::Err(ApiError::not_found("unknown simulation")));
+        }
         let _ = send_cmd(self, HostCommand::Shutdown);
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
