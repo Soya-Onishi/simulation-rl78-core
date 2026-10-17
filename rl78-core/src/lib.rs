@@ -29,8 +29,8 @@ pub use peripherals::{
 use std::sync::Arc;
 
 use sim_kernel::{
-    BoardPorts, EventCtl, HasMemoryMap, HoldSwitch, InPort, Machine, MapError,
-    MemoryBus, MemoryMapBuilder, OutPort, ProbePoint, Ram, Rom, UnmappedPolicy, Wire,
+    BoardPorts, EventCtl, HasMemoryMap, HoldSwitch, InPort, Machine, MapError, MemoryBus,
+    MemoryMapBuilder, OutPort, ProbePoint, Ram, Rom, UnmappedPolicy, Wire,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.

@@ -36,7 +36,7 @@ pub use board_runtime::{
 };
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
-    AdvertisedAction, ActionList, AdvertisedActionParam, ApiError, CreateSimulationRequest,
+    ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, CreateSimulationRequest,
     CreateSimulationResponse, InvokeActionRequest, LogEvent, StatusEvent,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};

@@ -31,8 +31,6 @@ pub struct ParamSpec {
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub default: Option<f64>,
-    /// When set, the value must be an integral number of the unit.
-    pub integer: bool,
 }
 
 impl ParamSpec {
@@ -48,7 +46,6 @@ impl ParamSpec {
             min: None,
             max: None,
             default: None,
-            integer: false,
         }
     }
 }
@@ -218,19 +215,12 @@ pub fn prepare_parameters(
         {
             return Err(ActionFailure::BadParam);
         }
-        if param.integer && !is_integral(value) {
-            return Err(ActionFailure::BadParam);
-        }
         values.push((param.name_hash, value));
     }
     if !seen.is_empty() {
         return Err(ActionFailure::BadParam);
     }
     Ok(Parameters { values })
-}
-
-fn is_integral(value: f64) -> bool {
-    value.fract() == 0.0
 }
 
 #[cfg(test)]

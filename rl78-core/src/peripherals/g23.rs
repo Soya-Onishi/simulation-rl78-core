@@ -221,30 +221,29 @@ impl HasMemoryMap for Rl78G23Core {
 struct PackagePins {
     /// External level into the pad. Wired to [`Gpio::on_pin`].
     input: [SourcePort<DigitalLevel>; PINS],
-    /// Pad level driven by the port block.
-    output: [SourcePort<DigitalLevel>; PINS],
+    /// Pad level driven by the port block. Shared so a later [`Wire::source`]
+    /// on [`R7F100Gxl::gpio_output`] is the port the core drives.
+    output: [Arc<Mutex<SourcePort<DigitalLevel>>>; PINS],
 }
 
 /// Connect each package pin to the core port block.
 fn wire_package_pins(core: &Rl78G23Core) -> PackagePins {
     let mut input = std::array::from_fn(|_| SourcePort::new());
-    let mut output = std::array::from_fn(|_| SourcePort::new());
+    let output = std::array::from_fn(|_| Arc::new(Mutex::new(SourcePort::new())));
     for pin in 0..PINS {
         let gpio = Arc::clone(&core.gpio);
         let _input = Wire::new()
             .source(&mut input[pin])
             .sink(move |values, changed| Gpio::on_pin(&gpio, pin, values, changed));
-        // Bind the package output before the core sink clones it. A clone taken
-        // earlier would not see this wire.
-        let _bound = Wire::new().source(&mut output[pin]);
-        let pkg_out = output[pin].clone();
+        let pkg_out = Arc::clone(&output[pin]);
         {
             let mut gpio = core.gpio.lock().expect("gpio");
             let _output = Wire::new()
                 .source(gpio.out_source(pin))
                 .sink(move |values, changed| {
                     if let Some(&level) = values.get(changed) {
-                        pkg_out.drive(level);
+                        let port = pkg_out.lock().expect("package output").clone();
+                        port.drive(level);
                     }
                 });
         }
@@ -282,10 +281,13 @@ impl R7F100Gxl {
         self.pins.input[pin].clone()
     }
 
-    /// Package output for `pin` (`0` is P0.0). The core port block drives this port.
+    /// Package output for `pin` (`0` is P0.0).
+    ///
+    /// Lock this and pass it to [`Wire::source`]. The core drives that same port,
+    /// so the sink sees later pad levels. A second `source` replaces the wire.
     #[must_use]
-    pub fn gpio_output(&self, pin: usize) -> SourcePort<DigitalLevel> {
-        self.pins.output[pin].clone()
+    pub fn gpio_output(&self, pin: usize) -> Arc<Mutex<SourcePort<DigitalLevel>>> {
+        Arc::clone(&self.pins.output[pin])
     }
 }
 
@@ -330,5 +332,42 @@ impl HasMemoryMap for R7F100Gxl {
                 .map(layout.ram_base, Box::new(Ram::new(layout.ram_size)))?
                 .alias(0xF3000, 0x3000, 3840)?,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serial_test::serial;
+    use sim_kernel::{DigitalLevel, EventCtl, Wire};
+
+    use super::*;
+
+    #[test]
+    #[serial]
+    fn package_output_sink_sees_core_drive() {
+        let part = R7F100Gxl::new(EventCtl::new());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let port = part.gpio_output(0);
+        let _wire = {
+            let mut port = port.lock().expect("package output");
+            Wire::new().source(&mut port).sink(move |values, changed| {
+                if let Some(&level) = values.get(changed) {
+                    recorded.lock().expect("levels").push(level);
+                }
+            })
+        };
+        part.core
+            .gpio
+            .lock()
+            .expect("gpio")
+            .out_source(0)
+            .drive(DigitalLevel::High);
+        assert_eq!(
+            seen.lock().expect("levels").as_slice(),
+            &[DigitalLevel::High]
+        );
     }
 }

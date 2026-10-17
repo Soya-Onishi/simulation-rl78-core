@@ -377,7 +377,7 @@ fn service_actions(
     }
     let now = sim.machine().clock().now();
     sim.machine_mut().poll_actions(now);
-    
+
     for req in mine {
         let now = sim.machine().clock().now();
         let status = match sim.machine_mut().apply_action(

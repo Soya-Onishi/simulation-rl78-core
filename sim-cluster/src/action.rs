@@ -22,7 +22,6 @@ pub const PARAM_DESC_CAP: usize = 64;
 const FLAG_MIN: u8 = 1;
 const FLAG_MAX: u8 = 2;
 const FLAG_DEFAULT: u8 = 4;
-const FLAG_INTEGER: u8 = 8;
 
 /// Result status on the action result sample.
 #[repr(u8)]
@@ -326,9 +325,6 @@ impl ActionParam {
             packed.flags |= FLAG_DEFAULT;
             packed.default_value = default_value;
         }
-        if param.integer {
-            packed.flags |= FLAG_INTEGER;
-        }
         Ok(packed)
     }
 }
@@ -391,7 +387,6 @@ mod tests {
         milliseconds.unit = Some("ms".into());
         milliseconds.description = Some("押下を維持する仮想時間".into());
         milliseconds.min = Some(1.0);
-        milliseconds.integer = true;
         let mut spec = ActionSpec::new("hold", "指定した仮想時間だけスイッチを押す");
         spec.params.push(milliseconds);
         let entry = ActionCatalogEntry {

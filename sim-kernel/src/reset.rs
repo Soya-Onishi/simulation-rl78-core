@@ -9,4 +9,3 @@ use crate::bus::MemoryBus;
 pub trait Resettable {
     fn reset(&mut self, bus: &mut MemoryBus);
 }
-

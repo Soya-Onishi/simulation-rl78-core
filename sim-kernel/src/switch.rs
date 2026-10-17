@@ -101,9 +101,8 @@ impl Hold {
     fn new(source: SourcePort<DigitalLevel>) -> Self {
         let mut milliseconds = ParamSpec::new(MILLISECONDS);
         milliseconds.unit = Some("ms".to_string());
-        milliseconds.description = Some("押下を維持する仮想時間".to_string());
+        milliseconds.description = Some("押下を維持する仮想時間。整数のミリ秒".to_string());
         milliseconds.min = Some(1.0);
-        milliseconds.integer = true;
         let mut spec = ActionSpec::new(HOLD_ID, "指定した仮想時間だけスイッチを押す");
         spec.params.push(milliseconds);
         Self {

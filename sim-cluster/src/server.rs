@@ -18,7 +18,7 @@ use iceoryx2::prelude::{Node, ipc};
 use crate::action::{ActionRequest, ActionStatus, ActionUpstream};
 use crate::backend::{LocalBackend, SimulationBackend};
 use crate::contract::{
-    AdvertisedAction, ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent,
+    ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, StatusEvent,
 };
 use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
