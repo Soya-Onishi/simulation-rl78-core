@@ -8,6 +8,7 @@
 //! [`Command`] / [`Response`] on the simulation thread. The optional GDB
 //! stub lives in this crate and uses the same control plane.
 
+mod action;
 mod breakpoint;
 mod bus;
 mod clock;
@@ -21,12 +22,17 @@ mod probe;
 mod reset;
 mod sim;
 mod stop;
+mod switch;
 mod virtual_time;
 mod wiring;
 
 #[cfg(test)]
 mod testing;
 
+pub use action::{
+    Action, ActionCatalogEntry, ActionFailure, ActionSpec, Device, DeviceError, MAX_ACTION_PARAMS,
+    ParamSpec, Parameters, id_hash, prepare_parameters,
+};
 pub use breakpoint::{Breakpoint, BreakpointId, BreakpointStore};
 pub use bus::{
     Addr, BusError, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, MemoryMapped, Ram, Rom,
@@ -43,12 +49,13 @@ pub use gdb::{GdbBindError, listen_gdb, parse_gdb_dev};
 pub use machine::Machine;
 pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
 pub use probe::{ProbePoint, ProbePolicy, ProbeSample, ProbeTap};
-pub use reset::{Device, Resettable};
+pub use reset::Resettable;
 pub use sim::{
     BeforeQuantum, DEFAULT_MAX_QUANTUM, SimConfig, SimControl, SimEvents, SimState, Simulator,
     spawn,
 };
 pub use stop::StopReason;
+pub use switch::{HoldSwitch, MAX_HOLD_MS};
 pub use virtual_time::{set_global_virtual_time_ns, virtual_time_ns};
 pub use wiring::{
     AnalogVoltage, DigitalLevel, SolidWire, SourcePort, U0, U1, UartFrame, UartParity,

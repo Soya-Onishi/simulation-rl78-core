@@ -1,5 +1,6 @@
 //! iceoryx2-backed cluster IPC (control, log, UART, and probe pub/sub).
 
+mod action_bus;
 mod control_bus;
 mod hash;
 mod host_bus;
@@ -9,6 +10,7 @@ mod probe_bus;
 mod runtime;
 mod uart_bus;
 
+pub use action_bus::{ArbiterNodeActions, ArbiterServerActions, NodeActions, ServerActions};
 pub use control_bus::{ArbiterControl, NodeControl};
 pub use hash::{board_hash_table, board_id_hash, probe_id_hash, probe_name_hash};
 pub use host_bus::{ArbiterHostPort, ServerHostPort};

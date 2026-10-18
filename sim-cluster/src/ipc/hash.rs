@@ -7,13 +7,13 @@ use xxhash_rust::xxh3::xxh3_64;
 /// Stable 64-bit hash of a board id (UTF-8 bytes). Same input → same hash across processes.
 #[must_use]
 pub fn board_id_hash(board_id: &str) -> u64 {
-    xxh3_64(board_id.as_bytes())
+    sim_kernel::id_hash(board_id)
 }
 
 /// Stable 64-bit hash of a probe name (UTF-8 bytes).
 #[must_use]
 pub fn probe_name_hash(name: &str) -> u64 {
-    xxh3_64(name.as_bytes())
+    sim_kernel::id_hash(name)
 }
 
 /// Cluster-wide probe id: `xxh3(board_id || 0x00 || name)`.
