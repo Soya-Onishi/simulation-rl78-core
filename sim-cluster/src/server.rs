@@ -23,10 +23,14 @@ use crate::contract::{
 use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
 use crate::ipc::{
-    IpcError, ServerActions, ServerHostPort, ServerLogInbox, board_hash_table, create_node,
-    isolated_config, new_cluster_key, root_path_for_cluster,
+    IpcError, MSG_CATALOG, MSG_SAMPLE, ServerActions, ServerHostPort, ServerLogInbox,
+    ServerProbeInbox, board_hash_table, create_node, isolated_config, new_cluster_key,
+    root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
+use crate::probe_log::{
+    CoarseBatch, ProbeExport, ProbeKind, ProbeLog, ProbePointName, ProbeRecord,
+};
 use crate::topology::{LogicalTopology, TopologyError};
 
 /// Live SSE readers start at the high-water mark, so this only covers logs
@@ -141,6 +145,16 @@ pub enum JobKind {
         id: String,
         request: InvokeActionRequest,
     },
+    ProbeCoarse {
+        id: String,
+        after: u64,
+    },
+    ProbeGen {
+        id: String,
+    },
+    ProbeExport {
+        id: String,
+    },
 }
 
 /// Worker → backend replies.
@@ -155,6 +169,9 @@ pub enum JobReply {
     HighWater(u64),
     Actions(ActionList),
     Applied,
+    ProbeCoarse(Vec<CoarseBatch>),
+    ProbeGen(u64),
+    ProbeExport(ProbeExport),
     Err(ApiError),
 }
 
@@ -177,6 +194,8 @@ struct Simulation {
     boards: HashMap<u64, String>,
     inbox: ServerLogInbox,
     actions: ServerActions,
+    probe_inbox: ServerProbeInbox,
+    probes: ProbeLog,
     catalog: Vec<crate::contract::AdvertisedAction>,
     pending: HashMap<u64, PendingAction>,
     next_request_id: u64,
@@ -388,6 +407,26 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             },
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
+        JobKind::ProbeCoarse { id, after } => match world.sims.get(&id) {
+            Some(sim) => JobReply::ProbeCoarse(sim.probes.coarse_after(after)),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeGen { id } => match world.sims.get(&id) {
+            Some(sim) => JobReply::ProbeGen(sim.probes.generation()),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeExport { id } => match world.sims.get_mut(&id) {
+            Some(sim) if sim.state == "stopped" => match sim.probes.export() {
+                Ok(export) => JobReply::ProbeExport(export),
+                Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+            },
+            Some(_) => JobReply::Err(ApiError::new(
+                409,
+                "not_stopped",
+                "simulation must be stopped",
+            )),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
     };
     let _ = job.reply.send(reply);
 }
@@ -424,6 +463,7 @@ fn create_simulation(
     let inbox = ServerLogInbox::create(&iox, &id)?;
     let host = ServerHostPort::create(&iox, &id)?;
     let actions = ServerActions::create(&iox, &id, topo.boards.len())?;
+    let probe_inbox = ServerProbeInbox::create(&iox, &id)?;
     let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
         .map_err(ServerError::Message)?;
     let topo_path = write_temp_topology(&topo)?;
@@ -447,6 +487,7 @@ fn create_simulation(
             state: "starting".into(),
         })
         .collect();
+    let probes = ProbeLog::open(&id);
     Ok(Simulation {
         id,
         topo_path,
@@ -460,6 +501,8 @@ fn create_simulation(
         boards,
         inbox,
         actions,
+        probe_inbox,
+        probes,
         catalog: Vec::new(),
         pending: HashMap::new(),
         next_request_id: 1,
@@ -470,6 +513,9 @@ fn create_simulation(
 fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiError> {
     if sim.state == "exited" {
         return Err(ApiError::conflict("arbiter has exited"));
+    }
+    if matches!(cmd, HostCommand::Start | HostCommand::Reset) {
+        sim.probes.bump_gen();
     }
     send_cmd(sim, cmd).map_err(ApiError::internal)
 }
@@ -593,6 +639,58 @@ fn action_status_error(status: ActionStatus) -> ApiError {
     }
 }
 
+fn poll_probes(sim: &mut Simulation) {
+    // Drain before the running flag changes. Samples that arrived while
+    // stopped stay out of the coarse window. Samples that arrive as running
+    // ends are included in the final coarse batch.
+    drain_probes(sim);
+    sim.probes.set_running(sim.state == "running");
+    sim.probes.poll_coarse(Instant::now());
+}
+
+fn drain_probes(sim: &mut Simulation) {
+    for _ in 0..1024 {
+        match sim.probe_inbox.try_recv() {
+            Ok(Some(sample)) => ingest_probe(sim, &sample),
+            Ok(None) => break,
+            Err(err) => {
+                eprintln!("cluster-server {}: probe inbox: {err}", sim.id);
+                break;
+            }
+        }
+    }
+}
+
+fn ingest_probe(sim: &mut Simulation, sample: &crate::ipc::ProbeToServer) {
+    let Some(kind) = ProbeKind::from_wire(sample.wire_kind) else {
+        return;
+    };
+    match sample.msg {
+        MSG_CATALOG => {
+            let name_len = usize::from(sample.name_len).min(sample.name.len());
+            let name = String::from_utf8_lossy(&sample.name[..name_len]).into_owned();
+            let board_id = sim
+                .boards
+                .get(&sample.board_hash)
+                .cloned()
+                .unwrap_or_default();
+            sim.probes.note_catalog(ProbePointName {
+                probe_id: sample.probe_id,
+                board_id,
+                name,
+                kind,
+            });
+        }
+        MSG_SAMPLE => sim.probes.push(ProbeRecord {
+            probe_id: sample.probe_id,
+            virtual_time_ns: sample.virtual_time_ns,
+            kind,
+            value: sample.value,
+        }),
+        _ => {}
+    }
+}
+
 fn poll_simulation(sim: &mut Simulation) {
     loop {
         match sim.host.try_status() {
@@ -619,6 +717,7 @@ fn poll_simulation(sim: &mut Simulation) {
         }
     }
     poll_actions(sim);
+    poll_probes(sim);
     if let Some(child) = sim.child.as_mut() {
         match child.try_wait() {
             Ok(Some(status)) => {

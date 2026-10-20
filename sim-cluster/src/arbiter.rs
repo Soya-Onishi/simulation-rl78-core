@@ -15,13 +15,13 @@ use crate::action::{ActionResult, ActionStatus, ActionUpstream};
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
-    ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterServerActions,
-    IpcError, board_hash_table, create_node, isolated_config, new_cluster_key,
-    root_path_for_cluster,
+    ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterProbeForward,
+    ArbiterServerActions, IpcError, board_hash_table, create_node, isolated_config,
+    new_cluster_key, root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::probe::ProbeWireKind;
-use crate::probe_hub::ArbiterProbeHub;
+use crate::probe_hub::{ArbiterProbeHub, ProbeSample};
 use crate::time_sync::TimeCeiling;
 use crate::topology::{LogicalTopology, TopologyError};
 
@@ -366,9 +366,29 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             return Err(err);
         }
     };
-    // Keep the hub alive for the session so subscribe/drain APIs can be used later
-    // (e.g. by server integration). Suppress unused warning until then.
-    let _probe_hub = probe_hub;
+    if let Err(err) = probe_hub.subscribe_catalog(&node) {
+        stop_children(&mut children);
+        logs.shutdown();
+        return Err(ArbiterError::Message(err.to_string()));
+    }
+    let probe_tx = match ArbiterProbeForward::open(&node, &opts.cluster_key) {
+        Ok(tx) => tx,
+        Err(err) => {
+            stop_children(&mut children);
+            logs.shutdown();
+            return Err(ArbiterError::Ipc(err));
+        }
+    };
+    for entry in probe_hub.catalog().values() {
+        if let Err(err) = probe_tx.publish_catalog(
+            entry.board_hash,
+            entry.probe_id,
+            entry.kind as u8,
+            &entry.name,
+        ) {
+            log::warn!("probe catalog forward failed: {err}");
+        }
+    }
     let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
     let mut allowed = ceiling.allowed_ns();
     let mut running = false;
@@ -423,6 +443,9 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         }
 
         forward_invokes(&node_actions, &server_actions, running)?;
+        if let Err(err) = forward_probes(&probe_hub, &probe_tx) {
+            log::warn!("probe forward: {err}");
+        }
 
         match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed)? {
             SyncStep::Continue => {}
@@ -446,6 +469,27 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     logs.shutdown();
     stop_children(&mut children);
     result
+}
+
+fn forward_probes(hub: &ArbiterProbeHub, tx: &ArbiterProbeForward) -> Result<(), ArbiterError> {
+    for sample in hub.drain(256)? {
+        let result = match sample {
+            ProbeSample::Digital(sample) => tx.publish_sample(
+                sample.probe_id,
+                sample.virtual_time_ns,
+                ProbeWireKind::Digital as u8,
+                u16::from(sample.value),
+            ),
+            ProbeSample::Uart(sample) => tx.publish_sample(
+                sample.probe_id,
+                sample.virtual_time_ns,
+                ProbeWireKind::Uart as u8,
+                sample.value.data,
+            ),
+        };
+        result?;
+    }
+    Ok(())
 }
 
 fn begin_running(

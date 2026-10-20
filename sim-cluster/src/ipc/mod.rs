@@ -7,6 +7,7 @@ mod host_bus;
 mod log_bus;
 mod names;
 mod probe_bus;
+mod probe_forward;
 mod runtime;
 mod uart_bus;
 
@@ -23,6 +24,9 @@ pub use probe_bus::{
     ProbeDigitalPub, ProbeDigitalSample, ProbeDigitalSub, ProbeUartPub, ProbeUartSample,
     ProbeUartSub, open_digital_publisher, open_digital_subscriber, open_uart_publisher,
     open_uart_subscriber, send_digital, send_uart,
+};
+pub use probe_forward::{
+    ArbiterProbeForward, MSG_CATALOG, MSG_SAMPLE, ProbeToServer, ServerProbeInbox,
 };
 pub use runtime::{IpcError, create_node, isolated_config, new_cluster_key, root_path_for_cluster};
 pub use uart_bus::NodeUartPorts;

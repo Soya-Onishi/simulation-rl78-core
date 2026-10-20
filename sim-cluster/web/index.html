@@ -95,6 +95,33 @@
     color: #ddd;
   }
   #logbar label { display: flex; gap: 8px; align-items: center; }
+  #probes {
+    height: 18vh;
+    min-height: 96px;
+    display: flex;
+    flex-direction: column;
+    background: #111;
+    color: #e7e7e7;
+    border-top: 1px solid #000;
+  }
+  #probebar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 12px;
+    background: #1c1e22;
+    color: #ddd;
+  }
+  #probeview {
+    flex: 1;
+    overflow: auto;
+    margin: 0;
+    padding: 8px 12px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
   #logview {
     flex: 1;
     overflow: auto;
@@ -159,6 +186,13 @@
   </div>
   <pre id="logview"></pre>
 </section>
+<section id="probes">
+  <div id="probebar">
+    <span>プローブ</span>
+    <button id="probes-csv" type="button" disabled>CSV</button>
+  </div>
+  <pre id="probeview"></pre>
+</section>
 </section>
 <script>
 const rank = { error: 1, warn: 2, info: 3, debug: 4, trace: 5 };
@@ -167,6 +201,8 @@ let stick = true;
 let simId = null;
 let statusSource = null;
 let logSource = null;
+let probeSource = null;
+const probeLive = new Map();
 
 function pathId() {
   const path = location.pathname.replace(/\/+$/, "") || "/";
@@ -226,11 +262,20 @@ function escapeText(text) {
   return text.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
 }
 
+function renderProbes() {
+  const lines = [];
+  for (const sample of probeLive.values()) {
+    lines.push(sample.board + "/" + sample.probe + " " + sample.kind + " " + sample.value);
+  }
+  document.getElementById("probeview").textContent = lines.join("\n");
+}
+
 function setButtons(state) {
   const dead = state === "exited";
   document.getElementById("start").disabled = dead || state === "running";
   document.getElementById("stop").disabled = dead || state !== "running";
   document.getElementById("reset").disabled = dead;
+  document.getElementById("probes-csv").disabled = state !== "stopped";
 }
 
 function apiError(body, fallback) {
@@ -275,6 +320,9 @@ function applyStatus(snap) {
 function connectStreams() {
   if (statusSource) statusSource.close();
   if (logSource) logSource.close();
+  if (probeSource) probeSource.close();
+  probeLive.clear();
+  renderProbes();
   statusSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/status");
   statusSource.addEventListener("status", (ev) => {
     try {
@@ -289,6 +337,16 @@ function connectStreams() {
     try {
       logs.push(JSON.parse(ev.data));
       renderLogs();
+    } catch (_) {}
+  });
+  probeSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/probes");
+  probeSource.addEventListener("probe", (ev) => {
+    try {
+      const batch = JSON.parse(ev.data);
+      for (const sample of batch.samples || []) {
+        probeLive.set(sample.board + "/" + sample.probe, sample);
+      }
+      renderProbes();
     } catch (_) {}
   });
 }
@@ -311,6 +369,13 @@ function showSim(id) {
 document.getElementById("start").onclick = () => command("start");
 document.getElementById("stop").onclick = () => command("stop");
 document.getElementById("reset").onclick = () => command("reset");
+document.getElementById("probes-csv").onclick = () => {
+  if (!simId || document.getElementById("probes-csv").disabled) return;
+  const link = document.createElement("a");
+  link.href = "/api/simulation/" + encodeURIComponent(simId) + "/probes.csv";
+  link.download = "probes.csv";
+  link.click();
+};
 document.getElementById("level").onchange = () => renderLogs();
 document.getElementById("logview").onscroll = (ev) => {
   const el = ev.target;
