@@ -130,7 +130,6 @@ fn parse_ns(text: Option<&str>) -> Result<Option<u64>, &'static str> {
 /// Snapshot the worker can hand to the HTTP thread without holding the log.
 #[derive(Clone, Debug)]
 pub struct ProbeExport {
-    pub generation: u64,
     pub truncated: bool,
     pub path: PathBuf,
     pub file_len: u64,
@@ -151,7 +150,6 @@ pub struct ProbeLog {
     uart_window: Vec<ProbeRecord>,
     coarse: VecDeque<CoarseBatch>,
     next_seq: u64,
-    generation: u64,
 }
 
 impl ProbeLog {
@@ -176,22 +174,11 @@ impl ProbeLog {
             uart_window: Vec::new(),
             coarse: VecDeque::new(),
             next_seq: 1,
-            generation: 1,
         }
     }
 
     pub fn note_catalog(&mut self, point: ProbePointName) {
         self.catalog.insert(point.probe_id, point);
-    }
-
-    /// `start` and `reset` call this so an in-flight CSV stops.
-    pub fn bump_gen(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-    }
-
-    #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
 
     /// While `running` is false, samples are stored but not placed in the coarse window.
@@ -265,7 +252,6 @@ impl ProbeLog {
             memory.extend(queue.iter().copied());
         }
         Ok(ProbeExport {
-            generation: self.generation,
             truncated: self.truncated,
             path: self.spill_path.clone(),
             file_len,

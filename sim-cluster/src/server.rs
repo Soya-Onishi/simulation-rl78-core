@@ -149,9 +149,6 @@ pub enum JobKind {
         id: String,
         after: u64,
     },
-    ProbeGen {
-        id: String,
-    },
     ProbeExport {
         id: String,
     },
@@ -170,7 +167,6 @@ pub enum JobReply {
     Actions(ActionList),
     Applied,
     ProbeCoarse(Vec<CoarseBatch>),
-    ProbeGen(u64),
     ProbeExport(ProbeExport),
     Err(ApiError),
 }
@@ -411,10 +407,6 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             Some(sim) => JobReply::ProbeCoarse(sim.probes.coarse_after(after)),
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::ProbeGen { id } => match world.sims.get(&id) {
-            Some(sim) => JobReply::ProbeGen(sim.probes.generation()),
-            None => JobReply::Err(ApiError::not_found("unknown simulation")),
-        },
         JobKind::ProbeExport { id } => match world.sims.get_mut(&id) {
             Some(sim) if sim.state == "stopped" => match sim.probes.export() {
                 Ok(export) => JobReply::ProbeExport(export),
@@ -513,9 +505,6 @@ fn create_simulation(
 fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiError> {
     if sim.state == "exited" {
         return Err(ApiError::conflict("arbiter has exited"));
-    }
-    if matches!(cmd, HostCommand::Start | HostCommand::Reset) {
-        sim.probes.bump_gen();
     }
     send_cmd(sim, cmd).map_err(ApiError::internal)
 }

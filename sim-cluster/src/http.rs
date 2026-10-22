@@ -325,7 +325,6 @@ async fn probes_csv(
     let export = tokio::task::spawn_blocking(move || backend.probe_export(&id_export))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
-    let generation = export.generation;
     let truncated = export.truncated;
     let csv = tokio::task::spawn_blocking(move || -> Result<String, ApiError> {
         let records =
@@ -334,7 +333,7 @@ async fn probes_csv(
     })
     .await
     .map_err(|err| ApiError::internal(err.to_string()))??;
-    let body = Body::from_stream(csv_chunks(state.backend.clone(), id, csv, generation));
+    let body = Body::from(csv);
     let mut response = Response::new(body);
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -350,33 +349,6 @@ async fn probes_csv(
             .insert("x-probe-truncated", HeaderValue::from_static("1"));
     }
     Ok(response)
-}
-
-fn csv_chunks(
-    backend: Arc<dyn SimulationBackend>,
-    id: String,
-    csv: String,
-    generation: u64,
-) -> impl Stream<Item = Result<axum::body::Bytes, Infallible>> {
-    stream::unfold(
-        (backend, id, csv.into_bytes(), 0usize, generation),
-        |(backend, id, bytes, offset, generation)| async move {
-            if offset >= bytes.len() {
-                return None;
-            }
-            let backend_poll = backend.clone();
-            let id_poll = id.clone();
-            let current =
-                tokio::task::spawn_blocking(move || backend_poll.probe_gen(&id_poll)).await;
-            match current {
-                Ok(Ok(now)) if now == generation => {}
-                _ => return None,
-            }
-            let end = (offset + 8192).min(bytes.len());
-            let chunk = axum::body::Bytes::copy_from_slice(&bytes[offset..end]);
-            Some((Ok(chunk), (backend, id, bytes, end, generation)))
-        },
-    )
 }
 
 async fn ensure_exists(state: &AppState, id: &str) -> Result<(), ApiError> {
