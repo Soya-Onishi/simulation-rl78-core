@@ -170,6 +170,18 @@ impl ArbiterProbeHub {
         Ok(probe_id)
     }
 
+    /// Subscribe every catalog entry. Call after the ready barrier.
+    pub fn subscribe_catalog(
+        &mut self,
+        node: &Node<iceoryx2::prelude::ipc::Service>,
+    ) -> Result<(), ArbiterProbeError> {
+        let ids: Vec<u64> = self.catalog.keys().copied().collect();
+        for id in ids {
+            self.subscribe_probe(node, id)?;
+        }
+        Ok(())
+    }
+
     pub fn unsubscribe_probe(&mut self, probe_id: u64) -> bool {
         self.subs.remove(&probe_id).is_some()
     }

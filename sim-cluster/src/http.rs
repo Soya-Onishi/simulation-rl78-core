@@ -4,9 +4,11 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post};
@@ -17,6 +19,7 @@ use crate::backend::{SimulationBackend, prepare_topology};
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
 };
+use crate::probe_log::{self, ProbeRange};
 use crate::web::PAGE_HTML;
 
 /// For ELF Size, max body size must be changed.
@@ -50,6 +53,8 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
         .route("/api/simulation/{id}", delete(delete_simulation))
         .route("/api/simulation/{id}/status", get(status_sse))
         .route("/api/simulation/{id}/log", get(log_sse))
+        .route("/api/simulation/{id}/probes", get(probe_sse))
+        .route("/api/simulation/{id}/probes.csv", get(probes_csv))
         .route("/{id}", get(simulation_page))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
@@ -243,6 +248,108 @@ fn log_event_stream(
             }
         },
     )
+}
+
+#[derive(serde::Deserialize)]
+struct ProbeCsvQuery {
+    format: Option<String>,
+    from_ns: Option<String>,
+    to_ns: Option<String>,
+}
+
+async fn probe_sse(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    ensure_exists(&state, &id).await?;
+    let stream = probe_event_stream(state.backend.clone(), id);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn probe_event_stream(
+    backend: Arc<dyn SimulationBackend>,
+    id: String,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    stream::unfold(
+        (backend, id, 0u64, Vec::<Event>::new(), true),
+        |(backend, id, mut after, mut pending, snapshot)| async move {
+            loop {
+                if let Some(event) = pending.pop() {
+                    return Some((Ok(event), (backend, id, after, pending, false)));
+                }
+                let backend_poll = backend.clone();
+                let id_poll = id.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    backend_poll.probes_after(&id_poll, after, snapshot)
+                })
+                .await;
+                match result {
+                    Ok(Ok(batches)) if !batches.is_empty() => {
+                        let mut events = Vec::with_capacity(batches.len());
+                        for batch in batches {
+                            after = after.max(batch.seq);
+                            let data =
+                                serde_json::to_string(&batch).unwrap_or_else(|_| "{}".into());
+                            events.push(Event::default().event("probe").data(data));
+                        }
+                        events.reverse();
+                        pending = events;
+                    }
+                    Ok(Ok(_)) => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Ok(Err(err)) if err.status == 404 => return None,
+                    Ok(Err(_)) | Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        },
+    )
+}
+
+async fn probes_csv(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ProbeCsvQuery>,
+) -> Result<Response, ApiError> {
+    if let Some(format) = query.format.as_deref()
+        && format != "csv"
+    {
+        return Err(ApiError::bad_request("bad_param", "invalid probe format"));
+    }
+    let range = ProbeRange::parse(query.from_ns.as_deref(), query.to_ns.as_deref())
+        .map_err(|message| ApiError::bad_request("bad_param", message))?;
+    ensure_exists(&state, &id).await?;
+    let backend = state.backend.clone();
+    let id_export = id.clone();
+    let export = tokio::task::spawn_blocking(move || backend.probe_export(&id_export))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    let truncated = export.truncated;
+    let csv = tokio::task::spawn_blocking(move || -> Result<String, ApiError> {
+        let records =
+            probe_log::load_export(&export).map_err(|err| ApiError::internal(err.to_string()))?;
+        Ok(probe_log::render_csv(&export.catalog, &records, range))
+    })
+    .await
+    .map_err(|err| ApiError::internal(err.to_string()))??;
+    let body = Body::from(csv);
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"probes.csv\""),
+    );
+    if truncated {
+        response
+            .headers_mut()
+            .insert("x-probe-truncated", HeaderValue::from_static("1"));
+    }
+    Ok(response)
 }
 
 async fn ensure_exists(state: &AppState, id: &str) -> Result<(), ApiError> {

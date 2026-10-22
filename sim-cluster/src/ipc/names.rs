@@ -78,6 +78,12 @@ pub fn probe(cluster_key: &str, board_hash: u64, name_hash: u64) -> String {
     format!("sim-cluster/{cluster_key}/probe/{board_hash:016x}/{name_hash:016x}")
 }
 
+/// Service name: arbiter → server probe samples and catalog rows.
+#[must_use]
+pub fn probe_a2s(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/a2s")
+}
+
 /// Default edge id string (matches previous arbiter formatting).
 #[must_use]
 pub fn edge_id(from_board: &str, from_ep: &str, to_board: &str, to_ep: &str) -> String {

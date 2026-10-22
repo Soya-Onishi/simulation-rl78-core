@@ -23,6 +23,7 @@ pub mod log_msg;
 pub mod node;
 pub mod probe;
 pub mod probe_hub;
+mod probe_log;
 pub mod server;
 pub mod time_sync;
 pub mod topology;
