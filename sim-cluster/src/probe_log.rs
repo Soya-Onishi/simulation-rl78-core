@@ -20,6 +20,8 @@ pub const PROBE_MEM_CAP: usize = 4096;
 pub const COARSE_INTERVAL: Duration = Duration::from_millis(100);
 
 const COARSE_KEEP: usize = 64;
+/// Seq of an on-demand latest-value batch. Coarse batches start at 1.
+const SNAPSHOT_SEQ: u64 = 0;
 const SPILL_REC: usize = 8 + 8 + 1 + 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +150,7 @@ pub struct ProbeLog {
     coarse_since: Instant,
     digital_last: HashMap<u64, ProbeRecord>,
     uart_window: Vec<ProbeRecord>,
+    latest: HashMap<u64, ProbeRecord>,
     coarse: VecDeque<CoarseBatch>,
     next_seq: u64,
 }
@@ -172,6 +175,7 @@ impl ProbeLog {
             coarse_since: Instant::now(),
             digital_last: HashMap::new(),
             uart_window: Vec::new(),
+            latest: HashMap::new(),
             coarse: VecDeque::new(),
             next_seq: 1,
         }
@@ -207,6 +211,7 @@ impl ProbeLog {
             .entry(record.probe_id)
             .or_default()
             .push_back(record);
+        self.latest.insert(record.probe_id, record);
         if self.running {
             match record.kind {
                 ProbeKind::Digital => {
@@ -235,6 +240,36 @@ impl ProbeLog {
             .filter(|batch| batch.seq > after)
             .cloned()
             .collect()
+    }
+
+    /// Latest stored value of every probe. Used on the first SSE fetch so a
+    /// late subscriber sees levels that have not changed recently.
+    #[must_use]
+    pub fn emit_all(&self) -> CoarseBatch {
+        let mut records: Vec<ProbeRecord> = self.latest.values().copied().collect();
+        records.sort_by_key(|rec| (rec.virtual_time_ns, rec.probe_id));
+        CoarseBatch {
+            seq: SNAPSHOT_SEQ,
+            samples: records.iter().map(|rec| self.view(rec)).collect(),
+        }
+    }
+
+    /// First SSE fetch: [`emit_all`] only. Later fetches: coarse batches newer than `after`.
+    ///
+    /// The snapshot uses the last coarse seq so the subscriber skips the ring and
+    /// only sees windows that arrive after this fetch.
+    #[must_use]
+    pub fn live_after(&self, after: u64, snapshot: bool) -> Vec<CoarseBatch> {
+        if snapshot {
+            let mut all = self.emit_all();
+            if all.samples.is_empty() {
+                return Vec::new();
+            }
+            all.seq = self.next_seq.saturating_sub(1);
+            vec![all]
+        } else {
+            self.coarse_after(after)
+        }
     }
 
     /// Memory samples plus the spill length at this instant.
@@ -512,6 +547,33 @@ mod tests {
             .unwrap_or_else(Instant::now);
         log.poll_coarse(Instant::now());
         assert_eq!(log.coarse_after(batches[0].seq).len(), 0);
+        let snapshot = log.emit_all();
+        assert_eq!(snapshot.seq, 0);
+        let latest: Vec<_> = snapshot
+            .samples
+            .iter()
+            .map(|sample| (sample.probe.as_str(), sample.value.as_str()))
+            .collect();
+        assert_eq!(latest, vec![("p2", "511"), ("p1", "High")]);
+        assert_eq!(log.emit_all().samples.len(), 2);
+    }
+
+    #[test]
+    fn live_after_sends_emit_all_only_on_snapshot() {
+        let mut log = ProbeLog::with_cap("live-after", 8);
+        log.note_catalog(point(1, ProbeKind::Digital));
+        log.set_running(true);
+        log.push(rec(1, 10, ProbeKind::Digital, 2));
+        log.coarse_since = Instant::now()
+            .checked_sub(COARSE_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        log.poll_coarse(Instant::now());
+        let first = log.live_after(0, true);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].seq, 1);
+        assert_eq!(first[0].samples[0].value, "Low");
+        let later = log.live_after(first[0].seq, false);
+        assert!(later.is_empty());
     }
 
     #[test]

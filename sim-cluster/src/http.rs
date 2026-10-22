@@ -271,17 +271,18 @@ fn probe_event_stream(
     id: String,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     stream::unfold(
-        (backend, id, 0u64, Vec::<Event>::new()),
-        |(backend, id, mut after, mut pending)| async move {
+        (backend, id, 0u64, Vec::<Event>::new(), true),
+        |(backend, id, mut after, mut pending, snapshot)| async move {
             loop {
                 if let Some(event) = pending.pop() {
-                    return Some((Ok(event), (backend, id, after, pending)));
+                    return Some((Ok(event), (backend, id, after, pending, false)));
                 }
                 let backend_poll = backend.clone();
                 let id_poll = id.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || backend_poll.probes_after(&id_poll, after))
-                        .await;
+                let result = tokio::task::spawn_blocking(move || {
+                    backend_poll.probes_after(&id_poll, after, snapshot)
+                })
+                .await;
                 match result {
                     Ok(Ok(batches)) if !batches.is_empty() => {
                         let mut events = Vec::with_capacity(batches.len());

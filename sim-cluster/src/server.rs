@@ -148,6 +148,7 @@ pub enum JobKind {
     ProbeCoarse {
         id: String,
         after: u64,
+        snapshot: bool,
     },
     ProbeExport {
         id: String,
@@ -403,8 +404,12 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             },
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::ProbeCoarse { id, after } => match world.sims.get(&id) {
-            Some(sim) => JobReply::ProbeCoarse(sim.probes.coarse_after(after)),
+        JobKind::ProbeCoarse {
+            id,
+            after,
+            snapshot,
+        } => match world.sims.get(&id) {
+            Some(sim) => JobReply::ProbeCoarse(sim.probes.live_after(after, snapshot)),
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
         JobKind::ProbeExport { id } => match world.sims.get_mut(&id) {

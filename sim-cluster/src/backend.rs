@@ -30,10 +30,12 @@ pub trait SimulationBackend: Send + Sync {
     fn actions(&self, id: &str) -> Result<ActionList, ApiError>;
     fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError>;
     /// Coarse probe batches with `seq > after`.
+    /// `snapshot` prepends the latest value of every probe (first SSE fetch).
     fn probes_after(
         &self,
         id: &str,
         after: u64,
+        snapshot: bool,
     ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError>;
     /// Detail snapshot. Only while the simulation is stopped.
     fn probe_export(&self, id: &str) -> Result<crate::probe_log::ProbeExport, ApiError>;
@@ -188,10 +190,12 @@ impl SimulationBackend for LocalBackend {
         &self,
         id: &str,
         after: u64,
+        snapshot: bool,
     ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
         match self.rpc(JobKind::ProbeCoarse {
             id: id.to_string(),
             after,
+            snapshot,
         })? {
             JobReply::ProbeCoarse(batches) => Ok(batches),
             JobReply::Err(err) => Err(err),
