@@ -15,9 +15,9 @@ use crate::action::{ActionResult, ActionStatus, ActionUpstream};
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
-    ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterProbeForward,
-    ArbiterServerActions, IpcError, board_hash_table, create_node, isolated_config,
-    new_cluster_key, root_path_for_cluster,
+    ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterProbeCtrl,
+    ArbiterProbeForward, ArbiterServerActions, IpcError, board_hash_table, create_node,
+    isolated_config, new_cluster_key, root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::probe::ProbeWireKind;
@@ -340,6 +340,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards.clone())?;
     let node_actions = ArbiterNodeActions::create(&node, &opts.cluster_key, topo.boards.len())?;
     let server_actions = ArbiterServerActions::open(&node, &opts.cluster_key, topo.boards.len())?;
+    let probe_ctrl = ArbiterProbeCtrl::open(&node, &opts.cluster_key, topo.boards.len())?;
     let mut logs =
         ArbiterLogBus::create(&opts.iox_root, &opts.cluster_key, topo.boards.len(), boards)?;
     log::info!(
@@ -388,6 +389,9 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         ) {
             log::warn!("probe catalog forward failed: {err}");
         }
+    }
+    if let Err(err) = probe_tx.publish_catalog_done() {
+        log::warn!("probe catalog end failed: {err}");
     }
     let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
     let mut allowed = ceiling.allowed_ns();
@@ -443,6 +447,9 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         }
 
         forward_invokes(&node_actions, &server_actions, running)?;
+        if let Err(err) = forward_probe_ctrl(&control, &probe_ctrl) {
+            log::warn!("probe control forward: {err}");
+        }
         if let Err(err) = forward_probes(&probe_hub, &probe_tx) {
             log::warn!("probe forward: {err}");
         }
@@ -469,6 +476,32 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     logs.shutdown();
     stop_children(&mut children);
     result
+}
+
+fn forward_probe_ctrl(
+    control: &ArbiterControl,
+    ctrl: &ArbiterProbeCtrl,
+) -> Result<(), ArbiterError> {
+    while let Some(watch) = ctrl.try_watch()? {
+        control.publish(&ControlToNode::ProbeWatch {
+            board_hash: watch.board_hash,
+            count: watch.count,
+            probe_ids: watch.probe_ids,
+        })?;
+    }
+    while let Some(query) = ctrl.try_query()? {
+        ctrl.publish_query_to_nodes(query)?;
+    }
+    while let Some(reply) = ctrl.try_node_reply()? {
+        ctrl.publish_reply_to_server(reply)?;
+    }
+    while let Some(csv) = ctrl.try_csv()? {
+        ctrl.publish_csv_to_nodes(csv)?;
+    }
+    while let Some(chunk) = ctrl.try_node_csv()? {
+        ctrl.publish_csv_to_server(chunk)?;
+    }
+    Ok(())
 }
 
 fn forward_probes(hub: &ArbiterProbeHub, tx: &ArbiterProbeForward) -> Result<(), ArbiterError> {

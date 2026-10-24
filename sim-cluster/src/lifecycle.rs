@@ -32,6 +32,11 @@ pub enum NodeEffect {
     SetAllowed { allowed_ns: u64 },
     /// Hold-reset devices and the CPU via [`sim_kernel::Machine::reset`].
     Reset,
+    /// Replace the probe emit set for `board_hash` (ignore if it is not this node).
+    ProbeWatch {
+        board_hash: u64,
+        probe_ids: Vec<u64>,
+    },
     /// Log-only; state is unchanged aside from the warning.
     Warn(String),
 }
@@ -69,6 +74,24 @@ impl NodeState {
                 NodeState::AwaitingStartup | NodeState::Stopped,
                 ControlToNode::ClusterStop { .. },
             ) => (NodeState::Stopped, None),
+            (
+                state,
+                ControlToNode::ProbeWatch {
+                    board_hash,
+                    count,
+                    probe_ids,
+                },
+            ) => (
+                state,
+                Some(NodeEffect::ProbeWatch {
+                    board_hash,
+                    probe_ids: probe_ids
+                        .iter()
+                        .copied()
+                        .take(usize::from(count))
+                        .collect(),
+                }),
+            ),
             // Duplicate / late / early messages: warn and stay.
             (state, msg) => (
                 state,
@@ -264,5 +287,19 @@ mod tests {
         });
         assert_eq!(n, NodeState::Stopped);
         assert!(matches!(eff, Some(NodeEffect::Warn(_))));
+    }
+
+    #[test]
+    fn node_probe_watch_does_not_change_state() {
+        let (n, eff) = NodeState::Running.on_message(ControlToNode::ProbeWatch {
+            board_hash: 1,
+            count: 0,
+            probe_ids: [0; crate::probe::MAX_PROBES_PER_BOARD],
+        });
+        assert_eq!(n, NodeState::Running);
+        assert!(matches!(
+            eff,
+            Some(NodeEffect::ProbeWatch { probe_ids, .. }) if probe_ids.is_empty()
+        ));
     }
 }

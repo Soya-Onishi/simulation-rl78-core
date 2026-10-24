@@ -53,6 +53,7 @@ impl fmt::Display for HostStopReason {
 /// Arbiter → node control messages (a2n iceoryx2 sample type).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
+#[allow(clippy::large_enum_variant)]
 pub enum ControlToNode {
     /// Shared startup parameters (always broadcast; see issue #43).
     StartupRecord {
@@ -72,6 +73,12 @@ pub enum ControlToNode {
     /// The arbiter sends this only after [`Self::ClusterStop`], then republishes
     /// [`Self::Allowed`] and [`Self::Start`].
     Reset,
+    /// Replace the emit set for one board (always broadcast; nodes ignore others).
+    ProbeWatch {
+        board_hash: u64,
+        count: u8,
+        probe_ids: [u64; crate::probe::MAX_PROBES_PER_BOARD],
+    },
     // TODO: add Shutdown to end the node process (ClusterStop only halts to Stopped).
 }
 
