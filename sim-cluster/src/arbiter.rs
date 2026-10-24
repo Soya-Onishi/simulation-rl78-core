@@ -433,7 +433,8 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     )?;
 
                     control.publish(&ControlToNode::Reset)?;
-                    broadcast_start(&control, &mut peers)?;
+                    allowed = allowed_after_reset(&mut ceiling, allowed);
+                    begin_running(&control, &mut peers, allowed)?;
                     running = true;
                     log::info!("host Reset: Start");
                 }
@@ -535,6 +536,14 @@ fn begin_running(
         allowed_ns: allowed,
     })?;
     Ok(())
+}
+
+/// Guest clocks may already equal the last Allowed. Treat that as `now` so the
+/// republished ceiling is `now + margin` and boards can leave the old ceiling.
+fn allowed_after_reset(ceiling: &mut TimeCeiling, last_allowed: u64) -> u64 {
+    let now = last_allowed.max(ceiling.virtual_time_ns());
+    ceiling.advance_to(now);
+    ceiling.allowed_ns()
 }
 
 fn broadcast_start(
@@ -719,6 +728,18 @@ mod tests {
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[test]
+    fn reset_raises_allowed_to_now_plus_margin() {
+        let mut ceiling = TimeCeiling::new(["a".into(), "b".into()], 1000);
+        ceiling.report("a", 400);
+        ceiling.report("b", 500);
+        // Last published ceiling; guests may already sit here.
+        let last_allowed = 1500;
+        assert_eq!(allowed_after_reset(&mut ceiling, last_allowed), 2500);
+        assert_eq!(ceiling.virtual_time_ns(), 1500);
+        assert_eq!(ceiling.allowed_ns(), 2500);
+    }
 
     fn two_board_topo(ready_timeout_ms: u64) -> LogicalTopology {
         LogicalTopology {

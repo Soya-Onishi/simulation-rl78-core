@@ -26,6 +26,18 @@ impl TimeCeiling {
         }
     }
 
+    /// Raise every board's report to at least `now_ns`.
+    ///
+    /// Host Reset uses this so the next [`Self::allowed_ns`] is `now + margin`
+    /// even when guests had already reached the previous ceiling.
+    pub fn advance_to(&mut self, now_ns: u64) {
+        for slot in self.reports.values_mut() {
+            if *slot < now_ns {
+                *slot = now_ns;
+            }
+        }
+    }
+
     /// `allowed = min(reports) + margin`.
     #[must_use]
     pub fn allowed_ns(&self) -> u64 {
@@ -57,5 +69,27 @@ mod tests {
         // Stopped/halted board keeps last report and pins the min.
         ceil.report("b", 5000);
         assert_eq!(ceil.allowed_ns(), 1050);
+    }
+
+    #[test]
+    fn advance_to_raises_allowed_to_now_plus_margin() {
+        let mut ceil = TimeCeiling::new(["a".into(), "b".into()], 1000);
+        ceil.report("a", 500);
+        ceil.report("b", 800);
+        // Boards sat at the previous ceiling (min report + margin).
+        ceil.advance_to(1500);
+        assert_eq!(ceil.virtual_time_ns(), 1500);
+        assert_eq!(ceil.allowed_ns(), 2500);
+    }
+
+    #[test]
+    fn advance_to_does_not_rewind_ahead_reports() {
+        let mut ceil = TimeCeiling::new(["a".into(), "b".into()], 1000);
+        ceil.report("a", 5000);
+        ceil.report("b", 100);
+        ceil.advance_to(1000);
+        ceil.report("b", 4000);
+        assert_eq!(ceil.virtual_time_ns(), 4000);
+        assert_eq!(ceil.allowed_ns(), 5000);
     }
 }
