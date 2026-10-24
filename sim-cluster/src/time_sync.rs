@@ -20,8 +20,13 @@ impl TimeCeiling {
     }
 
     /// Update one board's last reported virtual time (kept even while stopped).
+    ///
+    /// Virtual time is monotonic: an older sample (late or leftover after Reset)
+    /// is ignored so it cannot rewind [`Self::allowed_ns`].
     pub fn report(&mut self, board_id: &str, virtual_time_ns: u64) {
-        if let Some(slot) = self.reports.get_mut(board_id) {
+        if let Some(slot) = self.reports.get_mut(board_id)
+            && virtual_time_ns > *slot
+        {
             *slot = virtual_time_ns;
         }
     }
@@ -91,5 +96,17 @@ mod tests {
         ceil.report("b", 4000);
         assert_eq!(ceil.virtual_time_ns(), 4000);
         assert_eq!(ceil.allowed_ns(), 5000);
+    }
+
+    #[test]
+    fn leftover_report_does_not_rewind_after_advance() {
+        let mut ceil = TimeCeiling::new(["a".into(), "b".into()], 1000);
+        ceil.report("a", 400);
+        ceil.report("b", 500);
+        ceil.advance_to(1500);
+        ceil.report("a", 400);
+        ceil.report("b", 500);
+        assert_eq!(ceil.virtual_time_ns(), 1500);
+        assert_eq!(ceil.allowed_ns(), 2500);
     }
 }

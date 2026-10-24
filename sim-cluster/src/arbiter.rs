@@ -435,6 +435,9 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     control.publish(&ControlToNode::Reset)?;
                     allowed = allowed_after_reset(&mut ceiling, allowed);
                     begin_running(&control, &mut peers, allowed)?;
+                    // TimeReport / HostStop queued before this Reset must not
+                    // rewind the new ceiling or ClusterStop the just-started run.
+                    discard_pending_n2a(&control)?;
                     running = true;
                     log::info!("host Reset: Start");
                 }
@@ -544,6 +547,11 @@ fn allowed_after_reset(ceiling: &mut TimeCeiling, last_allowed: u64) -> u64 {
     let now = last_allowed.max(ceiling.virtual_time_ns());
     ceiling.advance_to(now);
     ceiling.allowed_ns()
+}
+
+fn discard_pending_n2a(control: &ArbiterControl) -> Result<(), ArbiterError> {
+    while control.try_recv()?.is_some() {}
+    Ok(())
 }
 
 fn broadcast_start(

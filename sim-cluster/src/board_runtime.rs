@@ -306,6 +306,18 @@ pub fn run_board<C: Cpu>(
             }
 
             if sim.waiting_on_allowed_ceiling() {
+                // Still report: otherwise a stall at the ceiling never asks
+                // for a new Allowed (Reset / Stop→Start leave last_time_report
+                // empty or stale, and the arbiter never raises the ceiling).
+                maybe_time_report(
+                    &control,
+                    board_hash,
+                    sim.machine().clock().now().0,
+                    allowed_ns,
+                    headroom_threshold_ns,
+                    &mut last_time_report,
+                )?;
+                thread::yield_now();
                 continue;
             }
 
