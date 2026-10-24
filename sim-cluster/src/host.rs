@@ -11,7 +11,8 @@ pub enum HostCommand {
     Start,
     /// Broadcast cluster stop and stay in Stopped (process keeps running).
     Stop,
-    /// Stop, [`sim_kernel::Resettable`] reset, republish the time ceiling, then start.
+    /// Stop, [`sim_kernel::Resettable`] reset, raise the ceiling to
+    /// `now + margin`, then start.
     Reset,
     /// Leave the session and exit the arbiter process.
     Shutdown,
