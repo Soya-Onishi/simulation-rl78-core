@@ -1,4 +1,4 @@
-//! Server-side probe history and the 100ms coarse window.
+//! Node-side probe history and the 100ms coarse window.
 //!
 //! Detail stays until the simulation is deleted. Each probe keeps at most
 //! [`PROBE_MEM_CAP`] samples in memory; older ones are appended to a file
@@ -11,7 +11,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Samples kept in memory for one probe before the oldest is spilled.
 pub const PROBE_MEM_CAP: usize = 4096;
@@ -19,9 +19,6 @@ pub const PROBE_MEM_CAP: usize = 4096;
 /// Wall-clock period of the coarse stream. Not virtual time.
 pub const COARSE_INTERVAL: Duration = Duration::from_millis(100);
 
-const COARSE_KEEP: usize = 64;
-/// Seq of an on-demand latest-value batch. Coarse batches start at 1.
-const SNAPSHOT_SEQ: u64 = 0;
 const SPILL_REC: usize = 8 + 8 + 1 + 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +76,33 @@ pub struct ProbeView {
 pub struct CoarseBatch {
     pub seq: u64,
     pub samples: Vec<ProbeView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeRef {
+    pub board: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProbeCatalogItem {
+    pub board: String,
+    pub probe: String,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProbeWatchView {
+    pub probes: Vec<ProbeRef>,
+}
+
+/// One time-sliced CSV drain from the worker.
+#[derive(Clone, Debug)]
+pub struct CsvPoll {
+    pub records: Vec<ProbeRecord>,
+    pub done: bool,
+    pub failed: bool,
+    pub truncated: bool,
 }
 
 /// Virtual-time window for a detail export.
@@ -151,19 +175,20 @@ pub struct ProbeLog {
     digital_last: HashMap<u64, ProbeRecord>,
     uart_window: Vec<ProbeRecord>,
     latest: HashMap<u64, ProbeRecord>,
-    coarse: VecDeque<CoarseBatch>,
-    next_seq: u64,
 }
 
 impl ProbeLog {
     #[must_use]
-    pub fn open(sim_id: &str) -> Self {
-        Self::with_cap(sim_id, PROBE_MEM_CAP)
+    pub fn open(sim_id: &str, board_id: &str) -> Self {
+        Self::with_cap(sim_id, board_id, PROBE_MEM_CAP)
     }
 
     #[must_use]
-    pub fn with_cap(sim_id: &str, cap: usize) -> Self {
-        let spill_path = std::env::temp_dir().join(format!("sim-cluster-probes-{sim_id}.bin"));
+    pub fn with_cap(sim_id: &str, board_id: &str, cap: usize) -> Self {
+        let board_hash = crate::ipc::board_id_hash(board_id);
+        let spill_path = std::env::temp_dir().join(format!(
+            "sim-cluster-probes-{sim_id}-{board_hash:016x}.bin"
+        ));
         Self {
             cap: cap.max(1),
             catalog: HashMap::new(),
@@ -176,8 +201,6 @@ impl ProbeLog {
             digital_last: HashMap::new(),
             uart_window: Vec::new(),
             latest: HashMap::new(),
-            coarse: VecDeque::new(),
-            next_seq: 1,
         }
     }
 
@@ -186,17 +209,20 @@ impl ProbeLog {
     }
 
     /// While `running` is false, samples are stored but not placed in the coarse window.
-    /// Leaving `running` publishes whatever the open window still holds.
-    pub fn set_running(&mut self, running: bool) {
-        if self.running && !running {
-            self.emit_coarse();
-        }
+    /// Leaving `running` returns whatever the open window still holds.
+    pub fn set_running(&mut self, running: bool) -> Vec<ProbeRecord> {
+        let flushed = if self.running && !running {
+            self.emit_coarse()
+        } else {
+            Vec::new()
+        };
         if !self.running && running {
             self.coarse_since = Instant::now();
             self.digital_last.clear();
             self.uart_window.clear();
         }
         self.running = running;
+        flushed
     }
 
     pub fn push(&mut self, record: ProbeRecord) {
@@ -222,54 +248,38 @@ impl ProbeLog {
         }
     }
 
-    pub fn poll_coarse(&mut self, now: Instant) {
+    pub fn poll_coarse(&mut self, now: Instant) -> Vec<ProbeRecord> {
         if !self.running {
-            return;
+            return Vec::new();
         }
         if now.duration_since(self.coarse_since) < COARSE_INTERVAL {
-            return;
+            return Vec::new();
         }
-        self.emit_coarse();
+        let records = self.emit_coarse();
         self.coarse_since = now;
+        records
     }
 
     #[must_use]
-    pub fn coarse_after(&self, after: u64) -> Vec<CoarseBatch> {
-        self.coarse
+    pub fn latest_of(&self, ids: &[u64]) -> Vec<ProbeRecord> {
+        let mut records: Vec<ProbeRecord> = ids
             .iter()
-            .filter(|batch| batch.seq > after)
-            .cloned()
-            .collect()
+            .filter_map(|id| self.latest.get(id).copied())
+            .collect();
+        records.sort_by_key(|rec| (rec.virtual_time_ns, rec.probe_id));
+        records
     }
 
-    /// Latest stored value of every probe. Used on the first SSE fetch so a
-    /// late subscriber sees levels that have not changed recently.
     #[must_use]
-    pub fn emit_all(&self) -> CoarseBatch {
+    pub fn latest_all(&self) -> Vec<ProbeRecord> {
         let mut records: Vec<ProbeRecord> = self.latest.values().copied().collect();
         records.sort_by_key(|rec| (rec.virtual_time_ns, rec.probe_id));
-        CoarseBatch {
-            seq: SNAPSHOT_SEQ,
-            samples: records.iter().map(|rec| self.view(rec)).collect(),
-        }
+        records
     }
 
-    /// First SSE fetch: [`emit_all`] only. Later fetches: coarse batches newer than `after`.
-    ///
-    /// The snapshot uses the last coarse seq so the subscriber skips the ring and
-    /// only sees windows that arrive after this fetch.
     #[must_use]
-    pub fn live_after(&self, after: u64, snapshot: bool) -> Vec<CoarseBatch> {
-        if snapshot {
-            let mut all = self.emit_all();
-            if all.samples.is_empty() {
-                return Vec::new();
-            }
-            all.seq = self.next_seq.saturating_sub(1);
-            vec![all]
-        } else {
-            self.coarse_after(after)
-        }
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Memory samples plus the spill length at this instant.
@@ -348,37 +358,29 @@ impl ProbeLog {
         file.write_all(&buf).is_ok()
     }
 
-    fn emit_coarse(&mut self) {
+    fn emit_coarse(&mut self) -> Vec<ProbeRecord> {
         let mut records: Vec<ProbeRecord> = self.digital_last.drain().map(|(_, rec)| rec).collect();
         records.append(&mut self.uart_window);
         if records.is_empty() {
-            return;
+            return Vec::new();
         }
         records.sort_by_key(|rec| (rec.virtual_time_ns, rec.probe_id));
-        let samples = records.iter().map(|rec| self.view(rec)).collect();
-        self.coarse.push_back(CoarseBatch {
-            seq: self.next_seq,
-            samples,
-        });
-        self.next_seq = self.next_seq.saturating_add(1);
-        while self.coarse.len() > COARSE_KEEP {
-            self.coarse.pop_front();
-        }
+        records
     }
+}
 
-    fn view(&self, record: &ProbeRecord) -> ProbeView {
-        let (board, probe) = self
-            .catalog
-            .get(&record.probe_id)
-            .map(|point| (point.board_id.clone(), point.name.clone()))
-            .unwrap_or_else(|| (String::new(), format!("{:016x}", record.probe_id)));
-        ProbeView {
-            virtual_time_ns: record.virtual_time_ns,
-            board,
-            probe,
-            kind: record.kind.as_str().to_string(),
-            value: display_value(record.kind, record.value),
-        }
+#[must_use]
+pub fn record_view(catalog: &HashMap<u64, ProbePointName>, record: &ProbeRecord) -> ProbeView {
+    let (board, probe) = catalog
+        .get(&record.probe_id)
+        .map(|point| (point.board_id.clone(), point.name.clone()))
+        .unwrap_or_else(|| (String::new(), format!("{:016x}", record.probe_id)));
+    ProbeView {
+        virtual_time_ns: record.virtual_time_ns,
+        board,
+        probe,
+        kind: record.kind.as_str().to_string(),
+        value: display_value(record.kind, record.value),
     }
 }
 
@@ -442,39 +444,42 @@ fn read_spill(path: &Path, file_len: u64) -> io::Result<Vec<ProbeRecord>> {
 }
 
 #[must_use]
+pub fn csv_header() -> String {
+    "virtual_time_ns,board,probe,kind,value\n".into()
+}
+
+#[must_use]
+pub fn csv_record_line(catalog: &[ProbePointName], rec: &ProbeRecord) -> String {
+    let point = catalog.iter().find(|point| point.probe_id == rec.probe_id);
+    let board = point.map(|p| p.board_id.as_str()).unwrap_or("");
+    let probe = point.map(|p| p.name.as_str()).unwrap_or("");
+    let probe = if probe.is_empty() {
+        format!("{:016x}", rec.probe_id)
+    } else {
+        probe.to_string()
+    };
+    format!(
+        "{},{},{},{},{}\n",
+        rec.virtual_time_ns,
+        csv_field(board),
+        csv_field(&probe),
+        rec.kind.as_str(),
+        csv_field(&display_value(rec.kind, rec.value)),
+    )
+}
+
+#[must_use]
+#[allow(dead_code)]
 pub fn render_csv(
     catalog: &[ProbePointName],
     records: &[ProbeRecord],
     range: ProbeRange,
 ) -> String {
-    let names: HashMap<u64, &ProbePointName> = catalog
-        .iter()
-        .map(|point| (point.probe_id, point))
-        .collect();
-    let mut rows: Vec<&ProbeRecord> = records
-        .iter()
-        .filter(|rec| range.contains(rec.virtual_time_ns))
-        .collect();
-    rows.sort_by_key(|rec| (rec.virtual_time_ns, rec.probe_id));
-    let mut out = String::from("virtual_time_ns,board,probe,kind,value\n");
-    for rec in rows {
-        let (board, probe) = names
-            .get(&rec.probe_id)
-            .map(|point| (point.board_id.as_str(), point.name.as_str()))
-            .unwrap_or(("", ""));
-        let probe = if probe.is_empty() {
-            format!("{:016x}", rec.probe_id)
-        } else {
-            probe.to_string()
-        };
-        out.push_str(&format!(
-            "{},{},{},{},{}\n",
-            rec.virtual_time_ns,
-            csv_field(board),
-            csv_field(&probe),
-            rec.kind.as_str(),
-            csv_field(&display_value(rec.kind, rec.value)),
-        ));
+    let mut out = csv_header();
+    for rec in records {
+        if range.contains(rec.virtual_time_ns) {
+            out.push_str(&csv_record_line(catalog, rec));
+        }
     }
     out
 }
@@ -522,7 +527,7 @@ mod tests {
 
     #[test]
     fn coarse_keeps_last_digital_and_every_uart_word() {
-        let mut log = ProbeLog::with_cap("coarse-test", 8);
+        let mut log = ProbeLog::with_cap("coarse-test", "board", 8);
         log.note_catalog(point(1, ProbeKind::Digital));
         log.note_catalog(point(2, ProbeKind::Uart));
         log.set_running(true);
@@ -533,52 +538,25 @@ mod tests {
         log.coarse_since = Instant::now()
             .checked_sub(COARSE_INTERVAL)
             .unwrap_or_else(Instant::now);
-        log.poll_coarse(Instant::now());
-        let batches = log.coarse_after(0);
-        assert_eq!(batches.len(), 1);
-        let values: Vec<_> = batches[0]
-            .samples
+        let records = log.poll_coarse(Instant::now());
+        let values: Vec<_> = records
             .iter()
-            .map(|sample| (sample.probe.as_str(), sample.value.as_str()))
+            .map(|rec| (rec.probe_id, rec.value))
             .collect();
-        assert_eq!(values, vec![("p2", "65"), ("p2", "511"), ("p1", "High")]);
+        assert_eq!(values, vec![(2, 0x41), (2, 0x1FF), (1, 1)]);
         log.coarse_since = Instant::now()
             .checked_sub(COARSE_INTERVAL)
             .unwrap_or_else(Instant::now);
-        log.poll_coarse(Instant::now());
-        assert_eq!(log.coarse_after(batches[0].seq).len(), 0);
-        let snapshot = log.emit_all();
-        assert_eq!(snapshot.seq, 0);
-        let latest: Vec<_> = snapshot
-            .samples
-            .iter()
-            .map(|sample| (sample.probe.as_str(), sample.value.as_str()))
-            .collect();
-        assert_eq!(latest, vec![("p2", "511"), ("p1", "High")]);
-        assert_eq!(log.emit_all().samples.len(), 2);
-    }
-
-    #[test]
-    fn live_after_sends_emit_all_only_on_snapshot() {
-        let mut log = ProbeLog::with_cap("live-after", 8);
-        log.note_catalog(point(1, ProbeKind::Digital));
-        log.set_running(true);
-        log.push(rec(1, 10, ProbeKind::Digital, 2));
-        log.coarse_since = Instant::now()
-            .checked_sub(COARSE_INTERVAL)
-            .unwrap_or_else(Instant::now);
-        log.poll_coarse(Instant::now());
-        let first = log.live_after(0, true);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].seq, 1);
-        assert_eq!(first[0].samples[0].value, "Low");
-        let later = log.live_after(first[0].seq, false);
-        assert!(later.is_empty());
+        assert!(log.poll_coarse(Instant::now()).is_empty());
+        let latest = log.latest_all();
+        let latest_ids: Vec<_> = latest.iter().map(|rec| (rec.probe_id, rec.value)).collect();
+        assert_eq!(latest_ids, vec![(2, 0x1FF), (1, 1)]);
+        assert_eq!(log.latest_of(&[1]).len(), 1);
     }
 
     #[test]
     fn spill_keeps_oldest_on_disk_and_csv_is_ordered() {
-        let mut log = ProbeLog::with_cap("spill-test", 2);
+        let mut log = ProbeLog::with_cap("spill-test", "board", 2);
         log.note_catalog(point(1, ProbeKind::Digital));
         log.push(rec(1, 1, ProbeKind::Digital, 0));
         log.push(rec(1, 2, ProbeKind::Digital, 1));
@@ -600,7 +578,7 @@ mod tests {
 
     #[test]
     fn disk_failure_drops_later_samples() {
-        let mut log = ProbeLog::with_cap("fail-test", 1);
+        let mut log = ProbeLog::with_cap("fail-test", "board", 1);
         log.spill_path = PathBuf::from("/dev/null/sim-cluster-probes-fail.bin");
         log.push(rec(1, 1, ProbeKind::Digital, 1));
         log.push(rec(1, 2, ProbeKind::Digital, 2));

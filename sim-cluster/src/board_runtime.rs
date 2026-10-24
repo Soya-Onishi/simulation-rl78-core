@@ -24,7 +24,7 @@ use crate::ipc::{
     isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
-use crate::probe::{ProbeError, ProbePublishers};
+use crate::probe::{NodeProbeRuntime, ProbeError};
 use crate::probe_hub::pack_probe_name;
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
 
@@ -182,8 +182,13 @@ pub fn run_board<C: Cpu>(
     let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
 
     let (machine, ports, probe_points) = build();
-    let probe_publishers =
-        ProbePublishers::open(&iox_node, &opts.cluster_key, board_id, probe_points)?;
+    let mut probes = NodeProbeRuntime::open(
+        &iox_node,
+        &opts.cluster_key,
+        board_id,
+        topo.boards.len(),
+        probe_points,
+    )?;
     let mut sim = Simulator::new(machine, SimConfig::default());
     if let Some(elf) = &board.elf {
         let image = elf_source::load(elf)?;
@@ -203,7 +208,7 @@ pub fn run_board<C: Cpu>(
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
-    let mut probe_ads = Some(probe_publishers.advertisements().to_vec());
+    let mut probe_ads = Some(probes.advertisements().to_vec());
     let mut actions_advertised = false;
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
@@ -265,6 +270,12 @@ pub fn run_board<C: Cpu>(
                         }
                         log::info!("discarded queued uart rx");
                     }
+                    NodeEffect::ProbeWatch {
+                        board_hash,
+                        probe_ids,
+                    } => {
+                        probes.set_watch(board_hash, &probe_ids);
+                    }
                     NodeEffect::Warn(msg) => {
                         log::warn!("{msg}");
                     }
@@ -276,14 +287,18 @@ pub fn run_board<C: Cpu>(
             state = next;
             if prev != NodeState::Running && state == NodeState::Running {
                 let _ = sim.command(Command::Start);
+                probes.set_running(true);
                 log::info!("simulator Start");
             } else if prev == NodeState::Running && state != NodeState::Running {
                 let _ = sim.command(Command::Stop);
+                probes.set_running(false);
                 log::info!("simulator Stop");
             }
         }
 
         service_actions(&actions, &mut sim, state, board_hash)?;
+        probes.service_queries()?;
+        probes.service_csv()?;
 
         if state == NodeState::Running {
             for plane in &mut data_planes {
@@ -345,7 +360,7 @@ pub fn run_board<C: Cpu>(
             for plane in &mut data_planes {
                 plane.pump_tx()?;
             }
-            probe_publishers.pump();
+            probes.ingest_and_emit();
         }
     }
 }

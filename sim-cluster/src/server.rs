@@ -3,7 +3,7 @@
 //! HTTP is served by [`crate::http`]; this module owns arbiter processes and
 //! the control-plane job queue used by [`crate::backend::LocalBackend`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -23,13 +23,15 @@ use crate::contract::{
 use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
 use crate::ipc::{
-    IpcError, MSG_CATALOG, MSG_SAMPLE, ServerActions, ServerHostPort, ServerLogInbox,
-    ServerProbeInbox, board_hash_table, create_node, isolated_config, new_cluster_key,
-    root_path_for_cluster,
+    IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
+    ServerActions,
+    ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox, board_hash_table,
+    create_node, isolated_config, new_cluster_key, root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
-    CoarseBatch, ProbeExport, ProbeKind, ProbeLog, ProbePointName, ProbeRecord,
+    CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange,
+    ProbeRecord, ProbeRef, ProbeView, ProbeWatchView, record_view,
 };
 use crate::topology::{LogicalTopology, TopologyError};
 
@@ -145,13 +147,45 @@ pub enum JobKind {
         id: String,
         request: InvokeActionRequest,
     },
-    ProbeCoarse {
+    ProbeCatalog {
+        id: String,
+    },
+    ProbeWatchGet {
+        id: String,
+    },
+    ProbeWatchPut {
+        id: String,
+        probes: Vec<ProbeRef>,
+    },
+    ProbeWatchClear {
+        id: String,
+    },
+    ProbeWatchLive {
         id: String,
         after: u64,
-        snapshot: bool,
     },
-    ProbeExport {
+    ProbeCsvStart {
         id: String,
+        range: ProbeRange,
+    },
+    ProbeCsvPoll {
+        id: String,
+        request_id: u64,
+    },
+    ProbeCsvStatus {
+        id: String,
+        request_id: u64,
+    },
+    ViewerAttach {
+        id: String,
+    },
+    ViewerCheck {
+        id: String,
+        token: String,
+    },
+    ViewerDetach {
+        id: String,
+        token: String,
     },
 }
 
@@ -167,8 +201,15 @@ pub enum JobReply {
     HighWater(u64),
     Actions(ActionList),
     Applied,
+    ProbeCatalog(Vec<ProbeCatalogItem>),
+    ProbeWatch(ProbeWatchView),
     ProbeCoarse(Vec<CoarseBatch>),
-    ProbeExport(ProbeExport),
+    ProbeCsvStart {
+        request_id: u64,
+        catalog: Vec<ProbePointName>,
+    },
+    ProbeCsvPoll(crate::probe_log::CsvPoll),
+    ViewerToken(String),
     Err(ApiError),
 }
 
@@ -192,16 +233,46 @@ struct Simulation {
     inbox: ServerLogInbox,
     actions: ServerActions,
     probe_inbox: ServerProbeInbox,
-    probes: ProbeLog,
+    probe_ctrl: ServerProbeCtrl,
+    probe_catalog: HashMap<u64, ProbePointName>,
+    catalog_ready: bool,
+    watch: ProbeWatch,
     catalog: Vec<crate::contract::AdvertisedAction>,
     pending: HashMap<u64, PendingAction>,
     next_request_id: u64,
+    viewer: Option<String>,
+    csv_job: Option<CsvJob>,
     _iox: IoxNode,
+}
+
+struct CsvJob {
+    request_id: u64,
+    expected: HashSet<u64>,
+    pending: Vec<ProbeRecord>,
+    truncated: bool,
+    failed: bool,
+    done: bool,
+    deadline: Instant,
 }
 
 struct PendingAction {
     reply: Sender<JobReply>,
     deadline: Instant,
+}
+
+struct ProbeWatch {
+    probes: Vec<ProbeRef>,
+    probe_ids: Vec<u64>,
+    next_seq: u64,
+    pending: VecDeque<CoarseBatch>,
+}
+
+impl ProbeWatch {
+    fn view(&self) -> ProbeWatchView {
+        ProbeWatchView {
+            probes: self.probes.clone(),
+        }
+    }
 }
 
 /// Accept control requests until the process is killed.
@@ -404,25 +475,89 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             },
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::ProbeCoarse {
-            id,
-            after,
-            snapshot,
-        } => match world.sims.get(&id) {
-            Some(sim) => JobReply::ProbeCoarse(sim.probes.live_after(after, snapshot)),
+        JobKind::ProbeCatalog { id } => match world.sims.get(&id) {
+            Some(sim) => match probe_catalog_items(sim) {
+                Ok(items) => JobReply::ProbeCatalog(items),
+                Err(err) => JobReply::Err(err),
+            },
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::ProbeExport { id } => match world.sims.get_mut(&id) {
-            Some(sim) if sim.state == "stopped" => match sim.probes.export() {
-                Ok(export) => JobReply::ProbeExport(export),
-                Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
-            },
-            Some(_) => JobReply::Err(ApiError::new(
-                409,
-                "not_stopped",
-                "simulation must be stopped",
-            )),
+        JobKind::ProbeWatchGet { id } => match world.sims.get(&id) {
+            Some(sim) => JobReply::ProbeWatch(sim.watch.view()),
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeWatchPut { id, probes } => match world.sims.get_mut(&id) {
+            Some(sim) => match put_watch(sim, probes) {
+                Ok(view) => JobReply::ProbeWatch(view),
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeWatchClear { id } => match world.sims.get_mut(&id) {
+            Some(sim) => match clear_watch(sim) {
+                Ok(()) => JobReply::Accepted,
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeWatchLive { id, after } => match world.sims.get_mut(&id) {
+            Some(sim) => JobReply::ProbeCoarse(live_watch(sim, after)),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeCsvStart { id, range } => match world.sims.get_mut(&id) {
+            Some(sim) => match start_csv(sim, range) {
+                Ok((request_id, catalog)) => JobReply::ProbeCsvStart {
+                    request_id,
+                    catalog,
+                },
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeCsvPoll { id, request_id } => match world.sims.get_mut(&id) {
+            Some(sim) => match poll_csv_job(sim, request_id) {
+                Ok(poll) => JobReply::ProbeCsvPoll(poll),
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeCsvStatus { id, request_id } => match world.sims.get(&id) {
+            Some(sim) => match csv_status(sim, request_id) {
+                Ok(poll) => JobReply::ProbeCsvPoll(poll),
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ViewerAttach { id } => match world.sims.get_mut(&id) {
+            Some(sim) => {
+                if sim.viewer.is_some() {
+                    JobReply::Err(ApiError::conflict("simulation is busy"))
+                } else {
+                    let token = format!("{:016x}", next_probe_request(sim));
+                    sim.viewer = Some(token.clone());
+                    JobReply::ViewerToken(token)
+                }
+            }
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ViewerCheck { id, token } => match world.sims.get(&id) {
+            Some(sim) => {
+                if sim.viewer.as_deref() == Some(token.as_str()) {
+                    JobReply::Accepted
+                } else {
+                    JobReply::Err(ApiError::conflict("simulation is busy"))
+                }
+            }
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ViewerDetach { id, token } => match world.sims.get_mut(&id) {
+            Some(sim) => {
+                if sim.viewer.as_deref() == Some(token.as_str()) {
+                    sim.viewer = None;
+                }
+                JobReply::Accepted
+            }
+            None => JobReply::Accepted,
         },
     };
     let _ = job.reply.send(reply);
@@ -461,6 +596,7 @@ fn create_simulation(
     let host = ServerHostPort::create(&iox, &id)?;
     let actions = ServerActions::create(&iox, &id, topo.boards.len())?;
     let probe_inbox = ServerProbeInbox::create(&iox, &id)?;
+    let probe_ctrl = ServerProbeCtrl::create(&iox, &id, topo.boards.len())?;
     let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
         .map_err(ServerError::Message)?;
     let topo_path = write_temp_topology(&topo)?;
@@ -484,7 +620,6 @@ fn create_simulation(
             state: "starting".into(),
         })
         .collect();
-    let probes = ProbeLog::open(&id);
     Ok(Simulation {
         id,
         topo_path,
@@ -499,10 +634,20 @@ fn create_simulation(
         inbox,
         actions,
         probe_inbox,
-        probes,
+        probe_ctrl,
+        probe_catalog: HashMap::new(),
+        catalog_ready: false,
+        watch: ProbeWatch {
+            probes: Vec::new(),
+            probe_ids: Vec::new(),
+            next_seq: 1,
+            pending: VecDeque::new(),
+        },
         catalog: Vec::new(),
         pending: HashMap::new(),
         next_request_id: 1,
+        viewer: None,
+        csv_job: None,
         _iox: iox,
     })
 }
@@ -634,18 +779,26 @@ fn action_status_error(status: ActionStatus) -> ApiError {
 }
 
 fn poll_probes(sim: &mut Simulation) {
-    // Drain before the running flag changes. Samples that arrived while
-    // stopped stay out of the coarse window. Samples that arrive as running
-    // ends are included in the final coarse batch.
-    drain_probes(sim);
-    sim.probes.set_running(sim.state == "running");
-    sim.probes.poll_coarse(Instant::now());
-}
-
-fn drain_probes(sim: &mut Simulation) {
+    let mut live = Vec::new();
     for _ in 0..1024 {
-        match sim.probe_inbox.try_recv() {
-            Ok(Some(sample)) => ingest_probe(sim, &sample),
+        match sim.probe_inbox.try_recv_catalog() {
+            Ok(Some(sample)) => {
+                let _ = ingest_probe(sim, &sample);
+            }
+            Ok(None) => break,
+            Err(err) => {
+                eprintln!("cluster-server {}: probe catalog: {err}", sim.id);
+                break;
+            }
+        }
+    }
+    for _ in 0..1024 {
+        match sim.probe_inbox.try_recv_sample() {
+            Ok(Some(sample)) => {
+                if let Some(record) = ingest_probe(sim, &sample) {
+                    live.push(record);
+                }
+            }
             Ok(None) => break,
             Err(err) => {
                 eprintln!("cluster-server {}: probe inbox: {err}", sim.id);
@@ -653,12 +806,17 @@ fn drain_probes(sim: &mut Simulation) {
             }
         }
     }
+    if !live.is_empty() {
+        fanout_live(sim, &live);
+    }
 }
 
-fn ingest_probe(sim: &mut Simulation, sample: &crate::ipc::ProbeToServer) {
-    let Some(kind) = ProbeKind::from_wire(sample.wire_kind) else {
-        return;
-    };
+fn ingest_probe(sim: &mut Simulation, sample: &crate::ipc::ProbeToServer) -> Option<ProbeRecord> {
+    if sample.msg == MSG_CATALOG_END {
+        sim.catalog_ready = true;
+        return None;
+    }
+    let kind = ProbeKind::from_wire(sample.wire_kind)?;
     match sample.msg {
         MSG_CATALOG => {
             let name_len = usize::from(sample.name_len).min(sample.name.len());
@@ -668,21 +826,325 @@ fn ingest_probe(sim: &mut Simulation, sample: &crate::ipc::ProbeToServer) {
                 .get(&sample.board_hash)
                 .cloned()
                 .unwrap_or_default();
-            sim.probes.note_catalog(ProbePointName {
-                probe_id: sample.probe_id,
-                board_id,
-                name,
-                kind,
-            });
+            sim.probe_catalog.insert(
+                sample.probe_id,
+                ProbePointName {
+                    probe_id: sample.probe_id,
+                    board_id,
+                    name,
+                    kind,
+                },
+            );
+            None
         }
-        MSG_SAMPLE => sim.probes.push(ProbeRecord {
+        MSG_SAMPLE => Some(ProbeRecord {
             probe_id: sample.probe_id,
             virtual_time_ns: sample.virtual_time_ns,
             kind,
             value: sample.value,
         }),
-        _ => {}
+        _ => None,
     }
+}
+
+fn require_catalog(sim: &Simulation) -> Result<(), ApiError> {
+    if sim.catalog_ready {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            503,
+            "not_ready",
+            "probe catalog is not ready",
+        ))
+    }
+}
+
+fn probe_catalog_items(sim: &Simulation) -> Result<Vec<ProbeCatalogItem>, ApiError> {
+    require_catalog(sim)?;
+    let mut items: Vec<ProbeCatalogItem> = sim
+        .probe_catalog
+        .values()
+        .map(|point| ProbeCatalogItem {
+            board: point.board_id.clone(),
+            probe: point.name.clone(),
+            kind: point.kind.as_str().to_string(),
+        })
+        .collect();
+    items.sort_by(|a, b| (&a.board, &a.probe).cmp(&(&b.board, &b.probe)));
+    Ok(items)
+}
+
+fn resolve_probes(sim: &Simulation, probes: &[ProbeRef]) -> Result<Vec<u64>, ApiError> {
+    require_catalog(sim)?;
+    let mut ids = Vec::with_capacity(probes.len());
+    for probe in probes {
+        let Some((id, _)) = sim
+            .probe_catalog
+            .iter()
+            .find(|(_, point)| point.board_id == probe.board && point.name == probe.name)
+        else {
+            return Err(ApiError::not_found(format!(
+                "unknown probe {}/{}",
+                probe.board, probe.name
+            )));
+        };
+        ids.push(*id);
+    }
+    Ok(ids)
+}
+
+fn put_watch(sim: &mut Simulation, probes: Vec<ProbeRef>) -> Result<ProbeWatchView, ApiError> {
+    let ids = resolve_probes(sim, &probes)?;
+    sim.watch.probes = probes;
+    sim.watch.probe_ids = ids;
+    let view = sim.watch.view();
+    refresh_watch(sim)?;
+    let snapshot = snapshot_watch(sim)?;
+    if !snapshot.samples.is_empty() {
+        sim.watch.pending.push_back(snapshot);
+    }
+    Ok(view)
+}
+
+fn clear_watch(sim: &mut Simulation) -> Result<(), ApiError> {
+    sim.watch.probes.clear();
+    sim.watch.probe_ids.clear();
+    sim.watch.pending.clear();
+    refresh_watch(sim)
+}
+
+fn live_watch(sim: &mut Simulation, after: u64) -> Vec<CoarseBatch> {
+    sim.watch.pending.retain(|batch| batch.seq > after);
+    sim.watch.pending.drain(..).collect()
+}
+
+fn fanout_live(sim: &mut Simulation, records: &[ProbeRecord]) {
+    let samples: Vec<ProbeView> = records
+        .iter()
+        .filter(|record| sim.watch.probe_ids.contains(&record.probe_id))
+        .map(|record| record_view(&sim.probe_catalog, record))
+        .collect();
+    if samples.is_empty() {
+        return;
+    }
+    let seq = sim.watch.next_seq;
+    sim.watch.next_seq = sim.watch.next_seq.saturating_add(1);
+    sim.watch.pending.push_back(CoarseBatch { seq, samples });
+}
+
+fn snapshot_watch(sim: &mut Simulation) -> Result<CoarseBatch, ApiError> {
+    let probe_ids = sim.watch.probe_ids.clone();
+    let seq = sim.watch.next_seq;
+    sim.watch.next_seq = sim.watch.next_seq.saturating_add(1);
+    if probe_ids.is_empty() {
+        return Ok(CoarseBatch {
+            seq,
+            samples: Vec::new(),
+        });
+    }
+    let records = query_latest(sim, &probe_ids)?;
+    Ok(CoarseBatch {
+        seq,
+        samples: records
+            .iter()
+            .map(|rec| record_view(&sim.probe_catalog, rec))
+            .collect(),
+    })
+}
+
+fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
+    let mut by_board: HashMap<u64, HashSet<u64>> = sim
+        .boards
+        .keys()
+        .copied()
+        .map(|hash| (hash, HashSet::new()))
+        .collect();
+    for id in &sim.watch.probe_ids {
+        if let Some(point) = sim.probe_catalog.get(id) {
+            let board_hash = crate::ipc::board_id_hash(&point.board_id);
+            by_board.entry(board_hash).or_default().insert(*id);
+        }
+    }
+    for (board_hash, ids) in by_board {
+        let ids: Vec<u64> = ids.into_iter().collect();
+        sim.probe_ctrl
+            .publish_watch(ProbeWatchWire::new(board_hash, &ids))
+            .map_err(|err| ApiError::internal(err.to_string()))?;
+    }
+    Ok(())
+}
+
+fn query_latest(sim: &mut Simulation, probe_ids: &[u64]) -> Result<Vec<ProbeRecord>, ApiError> {
+    let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
+    for id in probe_ids {
+        if let Some(point) = sim.probe_catalog.get(id) {
+            by_board
+                .entry(crate::ipc::board_id_hash(&point.board_id))
+                .or_default()
+                .push(*id);
+        }
+    }
+    let expected: HashSet<u64> = by_board.keys().copied().collect();
+    if expected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let request_id = next_probe_request(sim);
+    for (board_hash, ids) in by_board {
+        sim.probe_ctrl
+            .publish_query(ProbeQueryWire::latest(request_id, board_hash, &ids))
+            .map_err(|err| ApiError::internal(err.to_string()))?;
+    }
+    Ok(collect_query(sim, request_id, expected, Duration::from_secs(5))?.0)
+}
+
+fn start_csv(
+    sim: &mut Simulation,
+    range: ProbeRange,
+) -> Result<(u64, Vec<ProbePointName>), ApiError> {
+    require_catalog(sim)?;
+    if sim
+        .csv_job
+        .as_ref()
+        .is_some_and(|job| !job.done && Instant::now() < job.deadline)
+    {
+        return Err(ApiError::conflict("csv export is busy"));
+    }
+    let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
+    for point in sim.probe_catalog.values() {
+        by_board
+            .entry(crate::ipc::board_id_hash(&point.board_id))
+            .or_default()
+            .push(point.probe_id);
+    }
+    let expected: HashSet<u64> = by_board.keys().copied().collect();
+    let done = expected.is_empty();
+    let request_id = next_probe_request(sim);
+    for (board_hash, ids) in by_board {
+        sim.probe_ctrl
+            .publish_csv(ProbeQueryWire::csv(
+                request_id,
+                board_hash,
+                &ids,
+                range.from_ns,
+                range.to_ns,
+            ))
+            .map_err(|err| ApiError::internal(err.to_string()))?;
+    }
+    sim.csv_job = Some(CsvJob {
+        request_id,
+        expected,
+        pending: Vec::new(),
+        truncated: false,
+        failed: false,
+        done,
+        deadline: Instant::now() + Duration::from_secs(60),
+    });
+    let catalog = sim.probe_catalog.values().cloned().collect();
+    Ok((request_id, catalog))
+}
+
+fn ingest_csv_replies(sim: &mut Simulation) {
+    let Some(job) = sim.csv_job.as_mut() else {
+        return;
+    };
+    if job.done {
+        return;
+    }
+    loop {
+        match sim.probe_ctrl.try_csv_reply() {
+            Ok(Some(reply)) if reply.request_id == job.request_id => {
+                job.pending.extend(reply.records());
+                job.truncated |= reply.is_truncated();
+                if reply.is_last() {
+                    job.expected.remove(&reply.from);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(err) => {
+                eprintln!("cluster-server {}: csv reply: {err}", sim.id);
+                job.failed = true;
+                job.done = true;
+                return;
+            }
+        }
+    }
+    if job.expected.is_empty() {
+        job.done = true;
+    } else if Instant::now() >= job.deadline {
+        job.failed = true;
+        job.done = true;
+    }
+}
+
+fn poll_csv_job(sim: &mut Simulation, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+    let Some(job) = sim.csv_job.as_mut() else {
+        return Err(ApiError::not_found("unknown csv export"));
+    };
+    if job.request_id != request_id {
+        return Err(ApiError::not_found("unknown csv export"));
+    }
+    Ok(crate::probe_log::CsvPoll {
+        records: std::mem::take(&mut job.pending),
+        done: job.done,
+        failed: job.failed,
+        truncated: job.truncated,
+    })
+}
+
+fn csv_status(sim: &Simulation, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+    let Some(job) = sim.csv_job.as_ref() else {
+        return Err(ApiError::not_found("unknown csv export"));
+    };
+    if job.request_id != request_id {
+        return Err(ApiError::not_found("unknown csv export"));
+    }
+    Ok(crate::probe_log::CsvPoll {
+        records: Vec::new(),
+        done: job.done,
+        failed: job.failed,
+        truncated: job.truncated,
+    })
+}
+
+fn next_probe_request(sim: &mut Simulation) -> u64 {
+    let id = sim.next_request_id;
+    sim.next_request_id = sim.next_request_id.saturating_add(1);
+    id
+}
+
+fn collect_query(
+    sim: &mut Simulation,
+    request_id: u64,
+    mut expected: HashSet<u64>,
+    timeout: Duration,
+) -> Result<(Vec<ProbeRecord>, bool), ApiError> {
+    let deadline = Instant::now() + timeout;
+    let mut records = Vec::new();
+    let mut truncated = false;
+    while !expected.is_empty() && Instant::now() < deadline {
+        match sim.probe_ctrl.try_reply() {
+            Ok(Some(reply)) if reply.request_id == request_id => {
+                records.extend(reply.records());
+                truncated |= reply.is_truncated();
+                if reply.is_last() {
+                    expected.remove(&reply.from);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => thread::sleep(Duration::from_millis(1)),
+            Err(err) => return Err(ApiError::internal(err.to_string())),
+        }
+    }
+    if !expected.is_empty() {
+        return Err(ApiError::new(
+            504,
+            "timeout",
+            "probe query was not answered before the deadline",
+        ));
+    }
+    records.sort_by_key(|rec| (rec.virtual_time_ns, rec.probe_id));
+    Ok((records, truncated))
 }
 
 fn poll_simulation(sim: &mut Simulation) {
@@ -712,6 +1174,7 @@ fn poll_simulation(sim: &mut Simulation) {
     }
     poll_actions(sim);
     poll_probes(sim);
+    ingest_csv_replies(sim);
     if let Some(child) = sim.child.as_mut() {
         match child.try_wait() {
             Ok(Some(status)) => {

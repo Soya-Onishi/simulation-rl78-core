@@ -41,7 +41,7 @@
   .time strong { font-size: 20px; font-variant-numeric: tabular-nums; }
   .time span, .meta { color: #5c6570; font-size: 12px; }
   #command-error, #status-error { width: 100%; color: #9b2c2c; font-size: 13px; }
-  #create {
+  #create, #busy {
     max-width: 720px;
     margin: 24px auto;
     padding: 0 16px;
@@ -112,6 +112,14 @@
     background: #1c1e22;
     color: #ddd;
   }
+  #probelist {
+    max-height: 28%;
+    overflow: auto;
+    padding: 4px 12px;
+    border-bottom: 1px solid #000;
+    font-size: 13px;
+  }
+  #probelist label { display: flex; gap: 8px; align-items: center; }
   #probeview {
     flex: 1;
     overflow: auto;
@@ -152,6 +160,12 @@
   <div id="create-error" class="meta" style="color:#9b2c2c"></div>
 </section>
 
+<section id="busy" class="hidden">
+  <h1>使用中です</h1>
+  <p class="meta">このシミュレーションは別のブラウザで表示されています。</p>
+  <p><a href="/">戻る</a></p>
+</section>
+
 <section id="sim">
 <header>
   <h1>シミュレーション</h1>
@@ -189,8 +203,9 @@
 <section id="probes">
   <div id="probebar">
     <span>プローブ</span>
-    <button id="probes-csv" type="button" disabled>CSV</button>
+    <button id="probes-csv" type="button">CSV</button>
   </div>
+  <div id="probelist"></div>
   <pre id="probeview"></pre>
 </section>
 </section>
@@ -202,7 +217,10 @@ let simId = null;
 let statusSource = null;
 let logSource = null;
 let probeSource = null;
+let viewerSource = null;
+let viewerToken = null;
 const probeLive = new Map();
+const probeCatalog = [];
 
 function pathId() {
   const path = location.pathname.replace(/\/+$/, "") || "/";
@@ -262,6 +280,28 @@ function escapeText(text) {
   return text.replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
 }
 
+function renderProbeList() {
+  const root = document.getElementById("probelist");
+  root.replaceChildren();
+  if (probeCatalog.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "meta";
+    empty.textContent = "カタログはまだありません。";
+    root.appendChild(empty);
+    return;
+  }
+  for (const item of probeCatalog) {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.board = item.board;
+    box.dataset.name = item.probe;
+    box.onchange = putProbeWatch;
+    label.append(box, document.createTextNode(item.board + "/" + item.probe + " (" + item.kind + ")"));
+    root.appendChild(label);
+  }
+}
+
 function renderProbes() {
   const lines = [];
   for (const sample of probeLive.values()) {
@@ -270,12 +310,30 @@ function renderProbes() {
   document.getElementById("probeview").textContent = lines.join("\n");
 }
 
+async function putProbeWatch() {
+  if (!simId) return;
+  const probes = [];
+  for (const box of document.querySelectorAll("#probelist input[type=checkbox]")) {
+    if (box.checked) probes.push({ board: box.dataset.board, name: box.dataset.name });
+  }
+  const selected = new Set(probes.map((p) => p.board + "/" + p.name));
+  for (const key of [...probeLive.keys()]) {
+    if (!selected.has(key)) probeLive.delete(key);
+  }
+  renderProbes();
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/probes/watch", {
+    method: "PUT",
+    headers: viewerHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ probes }),
+  });
+  if (res.status === 409) showBusy();
+}
+
 function setButtons(state) {
   const dead = state === "exited";
   document.getElementById("start").disabled = dead || state === "running";
   document.getElementById("stop").disabled = dead || state !== "running";
   document.getElementById("reset").disabled = dead;
-  document.getElementById("probes-csv").disabled = state !== "stopped";
 }
 
 function apiError(body, fallback) {
@@ -296,11 +354,27 @@ function setStatusError(text) {
   document.getElementById("status-error").textContent = text || "";
 }
 
+function viewerHeaders(extra) {
+  const headers = extra || {};
+  if (viewerToken) headers["x-viewer-token"] = viewerToken;
+  return headers;
+}
+
+function withViewer(url) {
+  if (!viewerToken) return url;
+  return url + (url.includes("?") ? "&" : "?") + "viewer=" + encodeURIComponent(viewerToken);
+}
+
 async function command(name) {
   if (!simId) return;
   const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/" + name, {
     method: "POST",
+    headers: viewerHeaders(),
   });
+  if (res.status === 409) {
+    showBusy();
+    return;
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     setCommandError(apiError(body, res.statusText));
@@ -317,29 +391,45 @@ function applyStatus(snap) {
   setButtons(snap.state);
 }
 
-function connectStreams() {
-  if (statusSource) statusSource.close();
-  if (logSource) logSource.close();
-  if (probeSource) probeSource.close();
+async function connectProbes() {
+  if (probeSource) {
+    probeSource.close();
+    probeSource = null;
+  }
+  if (simId) {
+    await fetch("/api/simulation/" + encodeURIComponent(simId) + "/probes/watch", {
+      method: "DELETE",
+      headers: viewerHeaders(),
+    }).catch(() => {});
+  }
   probeLive.clear();
+  probeCatalog.length = 0;
   renderProbes();
-  statusSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/status");
-  statusSource.addEventListener("status", (ev) => {
-    try {
-      applyStatus(JSON.parse(ev.data));
-    } catch (_) {}
-  });
-  statusSource.onerror = () => {
-    setStatusError(STREAM_DISCONNECTED);
-  };
-  logSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/log");
-  logSource.addEventListener("log", (ev) => {
-    try {
-      logs.push(JSON.parse(ev.data));
-      renderLogs();
-    } catch (_) {}
-  });
-  probeSource = new EventSource("/api/simulation/" + encodeURIComponent(simId) + "/probes");
+  renderProbeList();
+  if (!simId) return;
+  let catalogRes = null;
+  for (let i = 0; i < 50; i++) {
+    catalogRes = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/probes/catalog", {
+      headers: viewerHeaders(),
+    });
+    if (catalogRes.status === 409) {
+      showBusy();
+      return;
+    }
+    if (catalogRes.status !== 503) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  if (!catalogRes || !catalogRes.ok) {
+    const body = catalogRes ? await catalogRes.json().catch(() => ({})) : {};
+    setCommandError(apiError(body, "probe catalog is not ready"));
+    return;
+  }
+  const items = await catalogRes.json();
+  probeCatalog.push(...(items || []));
+  renderProbeList();
+  probeSource = new EventSource(
+    withViewer("/api/simulation/" + encodeURIComponent(simId) + "/probes/stream")
+  );
   probeSource.addEventListener("probe", (ev) => {
     try {
       const batch = JSON.parse(ev.data);
@@ -351,30 +441,121 @@ function connectStreams() {
   });
 }
 
+function connectStreams() {
+  if (statusSource) statusSource.close();
+  if (logSource) logSource.close();
+  statusSource = new EventSource(withViewer("/api/simulation/" + encodeURIComponent(simId) + "/status"));
+  statusSource.addEventListener("status", (ev) => {
+    try {
+      applyStatus(JSON.parse(ev.data));
+    } catch (_) {}
+  });
+  statusSource.onerror = () => {
+    setStatusError(STREAM_DISCONNECTED);
+  };
+  logSource = new EventSource(withViewer("/api/simulation/" + encodeURIComponent(simId) + "/log"));
+  logSource.addEventListener("log", (ev) => {
+    try {
+      logs.push(JSON.parse(ev.data));
+      renderLogs();
+    } catch (_) {}
+  });
+  connectProbes();
+}
+
+window.addEventListener("pagehide", () => {
+  if (viewerSource) viewerSource.close();
+  if (probeSource) probeSource.close();
+  if (simId) {
+    navigator.sendBeacon?.(withViewer("/api/simulation/" + encodeURIComponent(simId) + "/probes/watch"));
+  }
+});
+
 function showCreate() {
   document.getElementById("create").classList.remove("hidden");
+  document.getElementById("busy").classList.add("hidden");
+  document.getElementById("sim").style.display = "none";
+}
+
+function showBusy() {
+  document.getElementById("create").classList.add("hidden");
+  document.getElementById("busy").classList.remove("hidden");
   document.getElementById("sim").style.display = "none";
 }
 
 function showSim(id) {
   simId = id;
   document.getElementById("create").classList.add("hidden");
-  document.getElementById("sim").style.display = "flex";
-  document.getElementById("sim-id").textContent = id;
-  logs.length = 0;
-  renderLogs();
-  connectStreams();
+  document.getElementById("busy").classList.add("hidden");
+  if (viewerSource) {
+    viewerSource.close();
+    viewerSource = null;
+  }
+  let opened = false;
+  viewerSource = new EventSource("/api/simulation/" + encodeURIComponent(id) + "/viewer");
+  viewerSource.addEventListener("viewer", (ev) => {
+    if (opened) return;
+    opened = true;
+    viewerToken = ev.data;
+    document.getElementById("sim").style.display = "flex";
+    document.getElementById("sim-id").textContent = id;
+    logs.length = 0;
+    renderLogs();
+    connectStreams();
+  });
+  viewerSource.onerror = () => {
+    if (!opened) {
+      viewerSource.close();
+      viewerSource = null;
+      showBusy();
+    }
+  };
 }
 
 document.getElementById("start").onclick = () => command("start");
 document.getElementById("stop").onclick = () => command("stop");
 document.getElementById("reset").onclick = () => command("reset");
-document.getElementById("probes-csv").onclick = () => {
-  if (!simId || document.getElementById("probes-csv").disabled) return;
+document.getElementById("probes-csv").onclick = async () => {
+  if (!simId) return;
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/probes.csv", {
+    headers: viewerHeaders(),
+  });
+  if (res.status === 409) {
+    showBusy();
+    return;
+  }
+  if (res.status === 504) {
+    setCommandError("CSV の取得がタイムアウトしました");
+    return;
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setCommandError(apiError(body, res.statusText));
+    return;
+  }
+  const requestId = res.headers.get("x-probe-csv-id");
+  const blob = await res.blob();
+  if (requestId) {
+    const st = await fetch(
+      withViewer(
+        "/api/simulation/" + encodeURIComponent(simId) + "/probes/csv-status?request_id=" + encodeURIComponent(requestId)
+      ),
+      { headers: viewerHeaders() }
+    );
+    if (st.ok) {
+      const body = await st.json();
+      if (body.failed) {
+        setCommandError("CSV の取得が完了しませんでした");
+        return;
+      }
+    }
+  }
   const link = document.createElement("a");
-  link.href = "/api/simulation/" + encodeURIComponent(simId) + "/probes.csv";
+  link.href = URL.createObjectURL(blob);
   link.download = "probes.csv";
   link.click();
+  URL.revokeObjectURL(link.href);
+  setCommandError("");
 };
 document.getElementById("level").onchange = () => renderLogs();
 document.getElementById("logview").onscroll = (ev) => {

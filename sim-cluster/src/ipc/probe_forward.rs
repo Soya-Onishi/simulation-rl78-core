@@ -1,8 +1,8 @@
-//! Arbiter → server probe channel.
+//! Arbiter → server probe channels.
 //!
-//! One ordered stream carries catalog rows and samples. The server creates the
-//! service before the arbiter opens it. Safe overflow drops samples that do
-//! not fit; those samples are absent from the server log.
+//! Catalog rows and live samples use separate services so a sample burst cannot
+//! overflow-drop the one-shot catalog dump. The server creates both services
+//! before the arbiter opens them.
 
 use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
@@ -15,9 +15,11 @@ use super::runtime::IpcError;
 
 pub const MSG_CATALOG: u8 = 1;
 pub const MSG_SAMPLE: u8 = 2;
+pub const MSG_CATALOG_END: u8 = 3;
 
 /// Subscriber slots. Bursts beyond this are dropped by the transport.
 pub const PROBE_A2S_BUFFER: usize = 8192;
+pub const PROBE_CATALOG_A2S_BUFFER: usize = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, ZeroCopySend)]
@@ -45,6 +47,7 @@ fn factory(
     node: &Node<ipc::Service>,
     name: &str,
     create: bool,
+    buffer: usize,
 ) -> Result<
     iceoryx2::service::port_factory::publish_subscribe::PortFactory<
         ipc::Service,
@@ -59,7 +62,7 @@ fn factory(
         .max_publishers(1)
         .max_subscribers(1)
         .max_nodes(4)
-        .subscriber_max_buffer_size(PROBE_A2S_BUFFER)
+        .subscriber_max_buffer_size(buffer)
         .history_size(0)
         .enable_safe_overflow(true);
     if create {
@@ -74,45 +77,76 @@ fn factory(
 }
 
 pub struct ServerProbeInbox {
-    sub: ProbeSub,
+    catalog: ProbeSub,
+    samples: ProbeSub,
+}
+
+fn open_sub(
+    node: &Node<ipc::Service>,
+    name: &str,
+    create: bool,
+    buffer: usize,
+) -> Result<ProbeSub, IpcError> {
+    factory(node, name, create, buffer)?
+        .subscriber_builder()
+        .create()
+        .map_err(|e| IpcError::Message(format!("probe subscriber {name}: {e:?}")))
+}
+
+fn open_pub(
+    node: &Node<ipc::Service>,
+    name: &str,
+    create: bool,
+    buffer: usize,
+) -> Result<ProbePub, IpcError> {
+    factory(node, name, create, buffer)?
+        .publisher_builder()
+        .create()
+        .map_err(|e| IpcError::Message(format!("probe publisher {name}: {e:?}")))
+}
+
+fn recv_one(sub: &ProbeSub, name: &str) -> Result<Option<ProbeToServer>, IpcError> {
+    match sub
+        .receive()
+        .map_err(|e| IpcError::Message(format!("{name} receive: {e:?}")))?
+    {
+        Some(sample) => Ok(Some(*sample)),
+        None => Ok(None),
+    }
 }
 
 impl ServerProbeInbox {
     pub fn create(node: &Node<ipc::Service>, cluster_key: &str) -> Result<Self, IpcError> {
-        let name = names::probe_a2s(cluster_key);
-        let factory = factory(node, &name, true)?;
-        let sub = factory
-            .subscriber_builder()
-            .create()
-            .map_err(|e| IpcError::Message(format!("probe subscriber {name}: {e:?}")))?;
-        Ok(Self { sub })
+        let catalog_name = names::probe_catalog_a2s(cluster_key);
+        let sample_name = names::probe_a2s(cluster_key);
+        Ok(Self {
+            catalog: open_sub(node, &catalog_name, true, PROBE_CATALOG_A2S_BUFFER)?,
+            samples: open_sub(node, &sample_name, true, PROBE_A2S_BUFFER)?,
+        })
     }
 
-    pub fn try_recv(&self) -> Result<Option<ProbeToServer>, IpcError> {
-        match self
-            .sub
-            .receive()
-            .map_err(|e| IpcError::Message(format!("probe a2s receive: {e:?}")))?
-        {
-            Some(sample) => Ok(Some(*sample)),
-            None => Ok(None),
-        }
+    pub fn try_recv_catalog(&self) -> Result<Option<ProbeToServer>, IpcError> {
+        recv_one(&self.catalog, "probe catalog a2s")
+    }
+
+    pub fn try_recv_sample(&self) -> Result<Option<ProbeToServer>, IpcError> {
+        recv_one(&self.samples, "probe a2s")
     }
 }
 
 pub struct ArbiterProbeForward {
-    pub_port: ProbePub,
+    catalog: ProbePub,
+    samples: ProbePub,
 }
 
 impl ArbiterProbeForward {
     pub fn open(node: &Node<ipc::Service>, cluster_key: &str) -> Result<Self, IpcError> {
-        let name = names::probe_a2s(cluster_key);
-        let factory = factory(node, &name, false)?;
-        let pub_port = factory
-            .publisher_builder()
-            .create()
-            .map_err(|e| IpcError::Message(format!("probe publisher {name}: {e:?}")))?;
-        Ok(Self { pub_port })
+        let catalog_name = names::probe_catalog_a2s(cluster_key);
+        let sample_name = names::probe_a2s(cluster_key);
+        Ok(Self {
+            catalog: open_pub(node, &catalog_name, false, PROBE_CATALOG_A2S_BUFFER)?,
+            samples: open_pub(node, &sample_name, false, PROBE_A2S_BUFFER)?,
+        })
     }
 
     pub fn publish_catalog(
@@ -136,7 +170,24 @@ impl ArbiterProbeForward {
         let n = name.len().min(PROBE_NAME_CAP);
         sample.name[..n].copy_from_slice(&name.as_bytes()[..n]);
         sample.name_len = u8::try_from(n).unwrap_or(u8::MAX);
-        self.send(sample)
+        self.send(&self.catalog, sample)
+    }
+
+    pub fn publish_catalog_done(&self) -> Result<(), IpcError> {
+        self.send(
+            &self.catalog,
+            ProbeToServer {
+                probe_id: 0,
+                board_hash: 0,
+                virtual_time_ns: 0,
+                value: 0,
+                msg: MSG_CATALOG_END,
+                wire_kind: 0,
+                name_len: 0,
+                _pad: [0; 3],
+                name: [0; PROBE_NAME_CAP],
+            },
+        )
     }
 
     pub fn publish_sample(
@@ -146,22 +197,24 @@ impl ArbiterProbeForward {
         wire_kind: u8,
         value: u16,
     ) -> Result<(), IpcError> {
-        self.send(ProbeToServer {
-            probe_id,
-            board_hash: 0,
-            virtual_time_ns,
-            value,
-            msg: MSG_SAMPLE,
-            wire_kind,
-            name_len: 0,
-            _pad: [0; 3],
-            name: [0; PROBE_NAME_CAP],
-        })
+        self.send(
+            &self.samples,
+            ProbeToServer {
+                probe_id,
+                board_hash: 0,
+                virtual_time_ns,
+                value,
+                msg: MSG_SAMPLE,
+                wire_kind,
+                name_len: 0,
+                _pad: [0; 3],
+                name: [0; PROBE_NAME_CAP],
+            },
+        )
     }
 
-    fn send(&self, sample: ProbeToServer) -> Result<(), IpcError> {
-        self.pub_port
-            .send_copy(sample)
+    fn send(&self, port: &ProbePub, sample: ProbeToServer) -> Result<(), IpcError> {
+        port.send_copy(sample)
             .map_err(|e| IpcError::Message(format!("probe a2s send: {e:?}")))?;
         Ok(())
     }
