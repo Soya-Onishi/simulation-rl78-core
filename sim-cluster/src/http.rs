@@ -426,17 +426,6 @@ async fn probe_watch_clear(
     Ok(StatusCode::OK)
 }
 
-struct WatchStreamGuard {
-    backend: Arc<dyn SimulationBackend>,
-    id: String,
-}
-
-impl Drop for WatchStreamGuard {
-    fn drop(&mut self) {
-        let _ = self.backend.probe_watch_clear(&self.id);
-    }
-}
-
 async fn probe_watch_sse(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -449,12 +438,8 @@ async fn probe_watch_sse(
     let first = tokio::task::spawn_blocking(move || backend.probe_watch_live(&id_live, 0))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
-    let guard = WatchStreamGuard {
-        backend: state.backend.clone(),
-        id: id.clone(),
-    };
     let after = first.iter().map(|batch| batch.seq).max().unwrap_or(0);
-    let stream = probe_event_stream(state.backend.clone(), id, first, after, guard);
+    let stream = probe_event_stream(state.backend.clone(), id, first, after);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -463,7 +448,6 @@ fn probe_event_stream(
     id: String,
     first: Vec<crate::probe_log::CoarseBatch>,
     after: u64,
-    guard: WatchStreamGuard,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let mut pending = Vec::with_capacity(first.len());
     for batch in first.into_iter().rev() {
@@ -471,11 +455,11 @@ fn probe_event_stream(
         pending.push(Event::default().event("probe").data(data));
     }
     stream::unfold(
-        (backend, id, after, pending, guard),
-        |(backend, id, mut after, mut pending, guard)| async move {
+        (backend, id, after, pending),
+        |(backend, id, mut after, mut pending)| async move {
             loop {
                 if let Some(event) = pending.pop() {
-                    return Some((Ok(event), (backend, id, after, pending, guard)));
+                    return Some((Ok(event), (backend, id, after, pending)));
                 }
                 let backend_poll = backend.clone();
                 let id_poll = id.clone();

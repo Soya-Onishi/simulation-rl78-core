@@ -767,11 +767,19 @@ function showSim(id) {
     viewerSource = null;
   }
   let opened = false;
+  const giveUp = setTimeout(() => {
+    if (!opened && viewerSource) {
+      viewerSource.close();
+      viewerSource = null;
+      showBusy();
+    }
+  }, 8000);
   viewerSource = new EventSource("/api/simulation/" + encodeURIComponent(id) + "/viewer");
   viewerSource.addEventListener("viewer", (ev) => {
+    viewerToken = ev.data;
     if (opened) return;
     opened = true;
-    viewerToken = ev.data;
+    clearTimeout(giveUp);
     document.getElementById("sim").style.display = "flex";
     document.getElementById("sim-id").textContent = id;
     logs.length = 0;
@@ -783,13 +791,6 @@ function showSim(id) {
     connectStreams();
     startActionPoll();
   });
-  viewerSource.onerror = () => {
-    if (!opened) {
-      viewerSource.close();
-      viewerSource = null;
-      showBusy();
-    }
-  };
 }
 
 document.getElementById("start").onclick = () => command("start");
