@@ -297,7 +297,7 @@ pub fn run_board<C: Cpu>(
             if sim.state() != SimState::Running {
                 // Do not pump_tx while the guest is not advancing: cross-board
                 // UART must not race ahead of virtual-time sync (ceiling / stop).
-                thread::sleep(BOARD_IDLE_POLL);
+                thread::yield_now();
                 continue;
             }
 
