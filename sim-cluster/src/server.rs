@@ -24,14 +24,13 @@ use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
-    ServerActions,
-    ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox, board_hash_table,
-    create_node, isolated_config, new_cluster_key, root_path_for_cluster,
+    ServerActions, ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox,
+    board_hash_table, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
-    CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange,
-    ProbeRecord, ProbeRef, ProbeView, ProbeWatchView, record_view,
+    CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
+    ProbeView, ProbeWatchView, record_view,
 };
 use crate::topology::{LogicalTopology, TopologyError};
 
@@ -41,6 +40,9 @@ const LOG_CAP: usize = 100;
 
 /// Wall-clock wait for a node to apply an action. This is not the hold duration.
 const ACTION_WAIT: Duration = Duration::from_secs(5);
+
+/// Live batches kept while `/probes/stream` is between reconnects.
+const WATCH_PENDING_KEEP: usize = 64;
 
 /// Options for [`run_server`].
 #[derive(Clone, Debug)]
@@ -192,7 +194,9 @@ pub enum JobKind {
 /// Worker → backend replies.
 #[derive(Debug)]
 pub enum JobReply {
-    Created { id: String },
+    Created {
+        id: String,
+    },
     Accepted,
     Deleted,
     Exists(bool),
@@ -271,6 +275,13 @@ impl ProbeWatch {
     fn view(&self) -> ProbeWatchView {
         ProbeWatchView {
             probes: self.probes.clone(),
+        }
+    }
+
+    fn push_batch(&mut self, batch: CoarseBatch) {
+        self.pending.push_back(batch);
+        while self.pending.len() > WATCH_PENDING_KEEP {
+            self.pending.pop_front();
         }
     }
 }
@@ -531,7 +542,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         JobKind::ViewerAttach { id } => match world.sims.get_mut(&id) {
             Some(sim) => {
                 if sim.viewer.is_some() {
-                    JobReply::Err(ApiError::conflict("simulation is busy"))
+                    JobReply::Err(ApiError::viewer_busy())
                 } else {
                     let token = format!("{:016x}", next_probe_request(sim));
                     sim.viewer = Some(token.clone());
@@ -545,7 +556,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
                 if sim.viewer.as_deref() == Some(token.as_str()) {
                     JobReply::Accepted
                 } else {
-                    JobReply::Err(ApiError::conflict("simulation is busy"))
+                    JobReply::Err(ApiError::viewer_busy())
                 }
             }
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
@@ -901,7 +912,7 @@ fn put_watch(sim: &mut Simulation, probes: Vec<ProbeRef>) -> Result<ProbeWatchVi
     refresh_watch(sim)?;
     let snapshot = snapshot_watch(sim)?;
     if !snapshot.samples.is_empty() {
-        sim.watch.pending.push_back(snapshot);
+        sim.watch.push_batch(snapshot);
     }
     Ok(view)
 }
@@ -929,7 +940,7 @@ fn fanout_live(sim: &mut Simulation, records: &[ProbeRecord]) {
     }
     let seq = sim.watch.next_seq;
     sim.watch.next_seq = sim.watch.next_seq.saturating_add(1);
-    sim.watch.pending.push_back(CoarseBatch { seq, samples });
+    sim.watch.push_batch(CoarseBatch { seq, samples });
 }
 
 fn snapshot_watch(sim: &mut Simulation) -> Result<CoarseBatch, ApiError> {
@@ -1077,7 +1088,10 @@ fn ingest_csv_replies(sim: &mut Simulation) {
     }
 }
 
-fn poll_csv_job(sim: &mut Simulation, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+fn poll_csv_job(
+    sim: &mut Simulation,
+    request_id: u64,
+) -> Result<crate::probe_log::CsvPoll, ApiError> {
     let Some(job) = sim.csv_job.as_mut() else {
         return Err(ApiError::not_found("unknown csv export"));
     };
@@ -1362,5 +1376,27 @@ emit(t)
         .unwrap_err();
         assert_eq!(err.status, 400);
         assert_eq!(err.code, "invalid_topology");
+    }
+
+    #[test]
+    fn watch_pending_drops_oldest_when_full() {
+        let mut watch = ProbeWatch {
+            probes: Vec::new(),
+            probe_ids: Vec::new(),
+            next_seq: 0,
+            pending: VecDeque::new(),
+        };
+        for seq in 0..(WATCH_PENDING_KEEP as u64 + 3) {
+            watch.push_batch(CoarseBatch {
+                seq,
+                samples: Vec::new(),
+            });
+        }
+        assert_eq!(watch.pending.len(), WATCH_PENDING_KEEP);
+        assert_eq!(watch.pending.front().map(|batch| batch.seq), Some(3));
+        assert_eq!(
+            watch.pending.back().map(|batch| batch.seq),
+            Some(WATCH_PENDING_KEEP as u64 + 2)
+        );
     }
 }

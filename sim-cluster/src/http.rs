@@ -61,12 +61,12 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
                 .put(probe_watch_put)
                 .delete(probe_watch_clear),
         )
-        .route(
-            "/api/simulation/{id}/probes/stream",
-            get(probe_watch_sse),
-        )
+        .route("/api/simulation/{id}/probes/stream", get(probe_watch_sse))
         .route("/api/simulation/{id}/probes.csv", get(probes_csv))
-        .route("/api/simulation/{id}/probes/csv-status", get(probes_csv_status))
+        .route(
+            "/api/simulation/{id}/probes/csv-status",
+            get(probes_csv_status),
+        )
         .route("/{id}", get(simulation_page))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
@@ -119,7 +119,7 @@ async fn require_viewer(
     query: &ViewerParam,
 ) -> Result<(), ApiError> {
     let Some(token) = token_from(headers, query) else {
-        return Err(ApiError::conflict("simulation is busy"));
+        return Err(ApiError::viewer_busy());
     };
     let backend = state.backend.clone();
     let id = id.to_string();
@@ -562,7 +562,15 @@ fn csv_event_stream(
         }
     }
     stream::unfold(
-        (backend, id, request_id, catalog, range, Some(first_chunk), first.done),
+        (
+            backend,
+            id,
+            request_id,
+            catalog,
+            range,
+            Some(first_chunk),
+            first.done,
+        ),
         |(backend, id, request_id, catalog, range, first_chunk, done)| async move {
             if let Some(chunk) = first_chunk {
                 return Some((

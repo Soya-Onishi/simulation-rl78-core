@@ -127,6 +127,11 @@ impl ApiError {
     }
 
     #[must_use]
+    pub fn viewer_busy() -> Self {
+        Self::new(409, "viewer_busy", "simulation is busy")
+    }
+
+    #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(500, "internal", message)
     }
