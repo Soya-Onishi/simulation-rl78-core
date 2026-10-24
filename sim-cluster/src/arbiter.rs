@@ -562,7 +562,7 @@ fn step_time_sync(
             })?;
         }
     }
-    thread::sleep(ARBITER_POLL_IDLE);
+
     Ok(SyncStep::Continue)
 }
 
