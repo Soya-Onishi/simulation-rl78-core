@@ -104,6 +104,14 @@ impl EventQueue {
         }
     }
 
+    /// Drop every scheduled event. Host Reset uses this after device hold-reset
+    /// so leftover deadlines cannot pin the next quantum to a past instant.
+    pub fn clear(&mut self) {
+        self.heap.clear();
+        self.events.clear();
+        self.cancelled.clear();
+    }
+
     /// Next non-cancelled deadline, if any.
     ///
     /// The pending set is a min-heap: after dropping cancelled entries, the

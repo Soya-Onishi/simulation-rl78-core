@@ -24,10 +24,10 @@ impl TimeCeiling {
     /// Virtual time is monotonic: an older sample (late or leftover after Reset)
     /// is ignored so it cannot rewind [`Self::allowed_ns`].
     pub fn report(&mut self, board_id: &str, virtual_time_ns: u64) {
-        if let Some(slot) = self.reports.get_mut(board_id)
-            && virtual_time_ns > *slot
-        {
-            *slot = virtual_time_ns;
+        if let Some(slot) = self.reports.get_mut(board_id) {
+            if virtual_time_ns > *slot {
+                *slot = virtual_time_ns;
+            }
         }
     }
 

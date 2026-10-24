@@ -15,9 +15,9 @@ use crate::action::{ActionResult, ActionStatus, ActionUpstream};
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
+    board_hash_table, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
     ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterProbeCtrl,
-    ArbiterProbeForward, ArbiterServerActions, IpcError, board_hash_table, create_node,
-    isolated_config, new_cluster_key, root_path_for_cluster,
+    ArbiterProbeForward, ArbiterServerActions, IpcError,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::probe::ProbeWireKind;
@@ -730,7 +730,7 @@ pub fn run_arbiter_from_path(topology_path: &Path) -> Result<(), ArbiterError> {
 mod tests {
     use super::*;
     use crate::ipc::{
-        ArbiterControl, NodeControl, board_hash_table, board_id_hash, create_node, isolated_config,
+        board_hash_table, board_id_hash, create_node, isolated_config, ArbiterControl, NodeControl,
     };
     use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
     use serial_test::serial;

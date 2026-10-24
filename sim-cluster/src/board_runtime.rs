@@ -14,14 +14,14 @@ use sim_kernel::{
 };
 
 use crate::action::{
-    ACTION_RECV_CAP, ActionAdvertise, ActionPackError, ActionResult, ActionStatus, ActionUpstream,
+    ActionAdvertise, ActionPackError, ActionResult, ActionStatus, ActionUpstream, ACTION_RECV_CAP,
 };
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
-use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
+use crate::data_plane::{bind_data_planes, open_data_planes, DataPlaneError};
 use crate::elf_source;
 use crate::ipc::{
-    IpcError, NodeActions, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node,
-    isolated_config,
+    board_hash_table, board_id_hash, create_node, isolated_config, IpcError, NodeActions,
+    NodeControl, NodeLog,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::probe::{NodeProbeRuntime, ProbeError};
@@ -205,6 +205,7 @@ pub fn run_board<C: Cpu>(
     let mut data_planes = bind_data_planes(plane_maps, &ports)?;
 
     let mut state = NodeState::AwaitingStartup;
+    let mut margin_ns = 0_u64;
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
@@ -215,10 +216,11 @@ pub fn run_board<C: Cpu>(
     loop {
         while let Some(msg) = control.try_recv()? {
             if let ControlToNode::StartupRecord {
+                margin_ns: margin,
                 headroom_threshold_ns: thr,
-                ..
             } = msg
             {
+                margin_ns = margin;
                 headroom_threshold_ns = thr;
             }
             let prev = state;
@@ -256,15 +258,25 @@ pub fn run_board<C: Cpu>(
                     NodeEffect::SetAllowed {
                         allowed_ns: next_allowed,
                     } => {
-                        allowed_ns = next_allowed;
-                        let _ = sim.command(Command::SetAllowed {
-                            tick: Tick(next_allowed),
-                        });
+                        let now = sim.machine().clock().now().0;
+                        // A stale Allowed at or behind guest now re-pins the
+                        // ceiling; ignore it so Reset / TimeReport can unstick.
+                        if next_allowed > now {
+                            allowed_ns = next_allowed;
+                            let _ = sim.command(Command::SetAllowed {
+                                tick: Tick(next_allowed),
+                            });
+                        }
                     }
                     NodeEffect::Reset => {
                         last_time_report = None;
                         sim.machine_mut().reset();
-                        log::info!("simulator Reset");
+                        allowed_ns =
+                            raise_allowed_past_now(sim.machine().clock().now().0, margin_ns);
+                        let _ = sim.command(Command::SetAllowed {
+                            tick: Tick(allowed_ns),
+                        });
+                        log::info!("simulator Reset allowed={allowed_ns}");
                         for plane in &mut data_planes {
                             plane.discard_rx()?;
                         }
@@ -437,6 +449,10 @@ fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a Board
         .iter()
         .find(|b| b.id == board_id)
         .ok_or_else(|| BoardError::Message(format!("board id `{board_id}` not in topology")))
+}
+
+fn raise_allowed_past_now(now_ns: u64, margin_ns: u64) -> u64 {
+    now_ns.saturating_add(margin_ns.max(1))
 }
 
 fn maybe_time_report(
@@ -656,6 +672,41 @@ mod tests {
         }
         assert!(sim.machine().clock().now().0 > 0);
         assert!(sim.machine().clock().now().0 <= 50);
+    }
+
+    #[test]
+    fn reset_at_ceiling_raises_allowed_without_rewinding_time() {
+        let mut sim = Simulator::new(
+            fake_machine(vec![FakeOp::Nop; 10_000]),
+            SimConfig::default(),
+        );
+        let _ = sim.command(Command::SetAllowed { tick: Tick(50) });
+        let _ = sim.command(Command::Start);
+        for _ in 0..200 {
+            let _ = sim.poll();
+            if sim.waiting_on_allowed_ceiling() {
+                break;
+            }
+        }
+        assert!(sim.waiting_on_allowed_ceiling());
+        let now = sim.machine().clock().now().0;
+        let _ = sim.command(Command::Stop);
+        sim.machine_mut().reset();
+        assert_eq!(sim.machine().clock().now().0, now);
+        let allowed = raise_allowed_past_now(now, 1000);
+        let _ = sim.command(Command::SetAllowed {
+            tick: Tick(allowed),
+        });
+        let _ = sim.command(Command::Start);
+        assert!(!sim.waiting_on_allowed_ceiling());
+        let _ = sim.poll();
+        assert!(sim.machine().clock().now().0 > now);
+    }
+
+    #[test]
+    fn raise_allowed_past_now_uses_margin() {
+        assert_eq!(raise_allowed_past_now(1500, 1000), 2500);
+        assert_eq!(raise_allowed_past_now(1500, 0), 1501);
     }
 
     #[test]

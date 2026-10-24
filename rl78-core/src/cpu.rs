@@ -17,12 +17,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once};
 
 use sim_kernel::{
-    Addr, Breakpoint, BreakpointId, Core, Cpu, FirmwareError, HasMemoryMap, MapError, MemoryBus,
-    MemoryMapBuilder, PendingStop, Quantum, RegId, Resettable, SimError, Tick,
-    resolve_after_tlib_execute,
+    resolve_after_tlib_execute, Addr, Breakpoint, BreakpointId, Core, Cpu, FirmwareError,
+    HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder, PendingStop, Quantum, RegId, Resettable,
+    SimError, Tick,
 };
 
-use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
+use crate::callbacks::{self, clear_io_bus, set_io_bus, take_callback_stop, TLIB_PAGE_SIZE};
 use crate::ffi::{self, Rl78Reg};
 
 static SEAT: Mutex<bool> = Mutex::new(false);
@@ -99,6 +99,8 @@ pub struct Rl78Cpu {
 
 impl Resettable for Rl78Cpu {
     fn reset(&mut self, _bus: &mut MemoryBus) {
+        let _ = take_callback_stop();
+        let _ = self.pending.take();
         unsafe {
             ffi::tlib_reset();
         }
@@ -539,7 +541,7 @@ mod tests {
 #[cfg(test)]
 mod map_probe {
     use super::*;
-    use crate::{MAGIC_PROBE_BASE, MinimalMachineConfig, ProbeSink, minimal_machine_with_probe};
+    use crate::{minimal_machine_with_probe, MinimalMachineConfig, ProbeSink, MAGIC_PROBE_BASE};
     use serial_test::serial;
     use sim_kernel::{Core, MemoryMapBuilder, Ram, Rom, StopReason, UnmappedPolicy};
     use std::sync::{Arc, Mutex};

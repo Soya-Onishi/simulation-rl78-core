@@ -123,11 +123,15 @@ impl<C: Cpu> Machine<C> {
     }
 
     /// Hold-reset all devices, then the CPU. Call after firmware is in ROM.
+    ///
+    /// Virtual time is not rewound. Scheduled events are dropped so leftover
+    /// deadlines cannot pin the next quantum after the hold-reset.
     pub fn reset(&mut self) {
         for device in self.devices.values_mut() {
             device.reset(&mut self.bus);
         }
         self.cpu.reset(&mut self.bus);
+        self.ctl.events().clear();
     }
 
     #[must_use]
