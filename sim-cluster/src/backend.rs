@@ -29,16 +29,29 @@ pub trait SimulationBackend: Send + Sync {
     fn log_high_water(&self, id: &str) -> Result<u64, ApiError>;
     fn actions(&self, id: &str) -> Result<ActionList, ApiError>;
     fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError>;
-    /// Coarse probe batches with `seq > after`.
-    /// `snapshot` prepends the latest value of every probe (first SSE fetch).
-    fn probes_after(
+    fn probe_catalog(&self, id: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError>;
+    fn probe_watch_get(&self, id: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError>;
+    fn probe_watch_put(
+        &self,
+        id: &str,
+        probes: Vec<crate::probe_log::ProbeRef>,
+    ) -> Result<crate::probe_log::ProbeWatchView, ApiError>;
+    fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError>;
+    fn probe_watch_live(
         &self,
         id: &str,
         after: u64,
-        snapshot: bool,
     ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError>;
-    /// Detail snapshot. Only while the simulation is stopped.
-    fn probe_export(&self, id: &str) -> Result<crate::probe_log::ProbeExport, ApiError>;
+    fn csv_start(
+        &self,
+        id: &str,
+        range: crate::probe_log::ProbeRange,
+    ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError>;
+    fn csv_poll(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;
+    fn csv_status(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;
+    fn viewer_attach(&self, id: &str) -> Result<String, ApiError>;
+    fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError>;
+    fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError>;
 }
 
 /// In-process backend over the cluster-server worker queue.
@@ -186,31 +199,149 @@ impl SimulationBackend for LocalBackend {
         }
     }
 
-    fn probes_after(
-        &self,
-        id: &str,
-        after: u64,
-        snapshot: bool,
-    ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
-        match self.rpc(JobKind::ProbeCoarse {
-            id: id.to_string(),
-            after,
-            snapshot,
-        })? {
-            JobReply::ProbeCoarse(batches) => Ok(batches),
+    fn probe_catalog(&self, id: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError> {
+        match self.rpc(JobKind::ProbeCatalog { id: id.to_string() })? {
+            JobReply::ProbeCatalog(items) => Ok(items),
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
-                "unexpected worker reply for probes: {other:?}"
+                "unexpected worker reply for probe catalog: {other:?}"
             ))),
         }
     }
 
-    fn probe_export(&self, id: &str) -> Result<crate::probe_log::ProbeExport, ApiError> {
-        match self.rpc(JobKind::ProbeExport { id: id.to_string() })? {
-            JobReply::ProbeExport(export) => Ok(export),
+    fn probe_watch_get(&self, id: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
+        match self.rpc(JobKind::ProbeWatchGet { id: id.to_string() })? {
+            JobReply::ProbeWatch(view) => Ok(view),
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
-                "unexpected worker reply for probe export: {other:?}"
+                "unexpected worker reply for watch get: {other:?}"
+            ))),
+        }
+    }
+
+    fn probe_watch_put(
+        &self,
+        id: &str,
+        probes: Vec<crate::probe_log::ProbeRef>,
+    ) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
+        match self.rpc(JobKind::ProbeWatchPut {
+            id: id.to_string(),
+            probes,
+        })? {
+            JobReply::ProbeWatch(view) => Ok(view),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for watch put: {other:?}"
+            ))),
+        }
+    }
+
+    fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError> {
+        match self.rpc(JobKind::ProbeWatchClear { id: id.to_string() })? {
+            JobReply::Accepted => Ok(()),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for watch clear: {other:?}"
+            ))),
+        }
+    }
+
+    fn probe_watch_live(
+        &self,
+        id: &str,
+        after: u64,
+    ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
+        match self.rpc(JobKind::ProbeWatchLive {
+            id: id.to_string(),
+            after,
+        })? {
+            JobReply::ProbeCoarse(batches) => Ok(batches),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for watch live: {other:?}"
+            ))),
+        }
+    }
+
+    fn csv_start(
+        &self,
+        id: &str,
+        range: crate::probe_log::ProbeRange,
+    ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
+        match self.rpc(JobKind::ProbeCsvStart {
+            id: id.to_string(),
+            range,
+        })? {
+            JobReply::ProbeCsvStart {
+                request_id,
+                catalog,
+            } => Ok((request_id, catalog)),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for csv start: {other:?}"
+            ))),
+        }
+    }
+
+    fn csv_poll(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+        match self.rpc(JobKind::ProbeCsvPoll {
+            id: id.to_string(),
+            request_id,
+        })? {
+            JobReply::ProbeCsvPoll(poll) => Ok(poll),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for csv poll: {other:?}"
+            ))),
+        }
+    }
+
+    fn csv_status(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+        match self.rpc(JobKind::ProbeCsvStatus {
+            id: id.to_string(),
+            request_id,
+        })? {
+            JobReply::ProbeCsvPoll(poll) => Ok(poll),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for csv status: {other:?}"
+            ))),
+        }
+    }
+
+    fn viewer_attach(&self, id: &str) -> Result<String, ApiError> {
+        match self.rpc(JobKind::ViewerAttach {
+            id: id.to_string(),
+        })? {
+            JobReply::ViewerToken(token) => Ok(token),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for viewer attach: {other:?}"
+            ))),
+        }
+    }
+
+    fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError> {
+        match self.rpc(JobKind::ViewerCheck {
+            id: id.to_string(),
+            token: token.to_string(),
+        })? {
+            JobReply::Accepted => Ok(()),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for viewer check: {other:?}"
+            ))),
+        }
+    }
+
+    fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError> {
+        match self.rpc(JobKind::ViewerDetach {
+            id: id.to_string(),
+            token: token.to_string(),
+        })? {
+            JobReply::Accepted | JobReply::Err(_) => Ok(()),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for viewer detach: {other:?}"
             ))),
         }
     }

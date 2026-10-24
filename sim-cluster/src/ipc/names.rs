@@ -78,10 +78,70 @@ pub fn probe(cluster_key: &str, board_hash: u64, name_hash: u64) -> String {
     format!("sim-cluster/{cluster_key}/probe/{board_hash:016x}/{name_hash:016x}")
 }
 
-/// Service name: arbiter → server probe samples and catalog rows.
+/// Service name: arbiter → server live probe samples.
 #[must_use]
 pub fn probe_a2s(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/probe/a2s")
+}
+
+/// Service name: arbiter → server probe catalog dump.
+#[must_use]
+pub fn probe_catalog_a2s(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/catalog/a2s")
+}
+
+/// Service name: server → arbiter watch-set replace.
+#[must_use]
+pub fn probe_watch_s2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/watch/s2a")
+}
+
+/// Service name: server → arbiter probe query.
+#[must_use]
+pub fn probe_query_s2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/query/s2a")
+}
+
+/// Service name: arbiter → nodes probe query.
+#[must_use]
+pub fn probe_query_a2n(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/query/a2n")
+}
+
+/// Service name: nodes → arbiter probe query reply.
+#[must_use]
+pub fn probe_query_n2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/query/n2a")
+}
+
+/// Service name: arbiter → server probe query reply.
+#[must_use]
+pub fn probe_query_a2s(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/query/a2s")
+}
+
+/// Service name: server → arbiter CSV export request.
+#[must_use]
+pub fn probe_csv_s2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/csv/s2a")
+}
+
+/// Service name: arbiter → nodes CSV export request.
+#[must_use]
+pub fn probe_csv_a2n(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/csv/a2n")
+}
+
+/// Service name: nodes → arbiter CSV export chunk.
+#[must_use]
+pub fn probe_csv_n2a(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/csv/n2a")
+}
+
+/// Service name: arbiter → server CSV export chunk.
+#[must_use]
+pub fn probe_csv_a2s(cluster_key: &str) -> String {
+    format!("sim-cluster/{cluster_key}/probe/csv/a2s")
 }
 
 /// Default edge id string (matches previous arbiter formatting).

@@ -46,8 +46,8 @@ pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use log_msg::{ClusterLog, LogConsole, LogLevel, LogOrigin};
 pub use node::notify_host_stop;
 pub use probe::{
-    MAX_PROBES_PER_BOARD, PROBE_NAME_CAP, ProbeAdvertisement, ProbeError, ProbePublishers,
-    ProbeWireKind,
+    MAX_PROBES_PER_BOARD, PROBE_NAME_CAP, NodeProbeRuntime, ProbeAdvertisement, ProbeError,
+    ProbePublishers, ProbeWireKind,
 };
 pub use probe_hub::{
     ArbiterProbeError, ArbiterProbeHub, ProbeCatalogEntry, ProbeSample, pack_probe_name,
