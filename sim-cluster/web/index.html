@@ -57,6 +57,13 @@
     font-size: 12px;
   }
   #sim { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  #workspace {
+    flex: 1;
+    min-height: 120px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
   #nodes {
     flex: 1;
     overflow: auto;
@@ -66,6 +73,64 @@
     gap: 12px;
     align-content: start;
   }
+  #action-panel {
+    flex-shrink: 0;
+    height: 32vh;
+    min-height: 280px;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border-top: 1px solid #d8dbe2;
+  }
+  #actionbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid #d8dbe2;
+    font-weight: 650;
+  }
+  #actionview {
+    flex: 1;
+    overflow: auto;
+    padding: 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    align-content: start;
+  }
+  .action-card {
+    border: 1px solid #d8dbe2;
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .action-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .action-card h3 { margin: 0; font-size: 15px; }
+  .action-card label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+  }
+  .action-card input[type="number"] {
+    width: 100%;
+    padding: 6px 8px;
+    font: inherit;
+    border: 1px solid #c5cad3;
+    border-radius: 6px;
+  }
+  #action-error, #action-status { padding: 0 12px; }
+  #action-error:empty, #action-status:empty { display: none; }
+  #action-error { color: #9b2c2c; font-size: 13px; }
+  #action-status { color: #146c43; font-size: 13px; }
   .node {
     background: #fff;
     border: 1px solid #d8dbe2;
@@ -78,8 +143,9 @@
   .state.stopped, .state.ready, .state.starting { color: #8a5a00; }
   .state.exited { color: #9b2c2c; }
   #logs {
-    height: 34vh;
-    min-height: 180px;
+    flex-shrink: 0;
+    height: 22vh;
+    min-height: 140px;
     display: flex;
     flex-direction: column;
     background: #111;
@@ -96,8 +162,9 @@
   }
   #logbar label { display: flex; gap: 8px; align-items: center; }
   #probes {
-    height: 18vh;
-    min-height: 96px;
+    flex-shrink: 0;
+    height: 14vh;
+    min-height: 88px;
     display: flex;
     flex-direction: column;
     background: #111;
@@ -170,7 +237,18 @@
   <div id="command-error"></div>
   <div id="status-error"></div>
 </header>
+<div id="workspace">
 <main id="nodes"></main>
+</div>
+<section id="action-panel">
+  <div id="actionbar">
+    <span>アクション</span>
+    <button id="actions-refresh" type="button">再読み込み</button>
+  </div>
+  <div id="action-error" class="meta"></div>
+  <div id="action-status" class="meta"></div>
+  <div id="actionview"></div>
+</section>
 <section id="logs">
   <div id="logbar">
     <span>ログ</span>
@@ -203,6 +281,10 @@ let statusSource = null;
 let logSource = null;
 let probeSource = null;
 const probeLive = new Map();
+let actionCatalog = [];
+let simState = null;
+let actionPoll = null;
+let actionBusy = false;
 
 function pathId() {
   const path = location.pathname.replace(/\/+$/, "") || "/";
@@ -270,12 +352,191 @@ function renderProbes() {
   document.getElementById("probeview").textContent = lines.join("\n");
 }
 
+function canInvoke() {
+  return simState === "running" && !actionBusy;
+}
+
+function setActionRunEnabled() {
+  const enabled = canInvoke();
+  document.querySelectorAll(".action-run").forEach((btn) => {
+    btn.disabled = !enabled;
+  });
+}
+
 function setButtons(state) {
+  simState = state;
   const dead = state === "exited";
   document.getElementById("start").disabled = dead || state === "running";
   document.getElementById("stop").disabled = dead || state !== "running";
   document.getElementById("reset").disabled = dead;
   document.getElementById("probes-csv").disabled = state !== "stopped";
+  setActionRunEnabled();
+}
+
+function setActionError(text) {
+  document.getElementById("action-error").textContent = text || "";
+}
+
+function setActionStatus(text) {
+  document.getElementById("action-status").textContent = text || "";
+}
+
+function actionKey(row) {
+  return (row.board_id || "") + "/" + (row.device || "") + "/" + (row.action || "");
+}
+
+function paramHint(param) {
+  const bits = [];
+  if (param.unit) bits.push(param.unit);
+  if (param.min != null) bits.push("min " + param.min);
+  if (param.max != null) bits.push("max " + param.max);
+  return bits.join(" · ");
+}
+
+function renderActions() {
+  const root = document.getElementById("actionview");
+  root.replaceChildren();
+  if (!actionCatalog.length) {
+    const empty = document.createElement("p");
+    empty.className = "meta";
+    empty.textContent = "アクションはまだありません。スタート後にボードが公開します。";
+    root.appendChild(empty);
+    return;
+  }
+  for (const row of actionCatalog) {
+    const card = document.createElement("article");
+    card.className = "action-card";
+    const head = document.createElement("div");
+    head.className = "action-card-head";
+    const title = document.createElement("h3");
+    title.textContent = row.action || "";
+    const run = document.createElement("button");
+    run.className = "primary action-run";
+    run.type = "button";
+    run.textContent = "実行";
+    run.disabled = !canInvoke();
+    run.onclick = () => invokeAction(card, row);
+    head.append(title, run);
+    const where = document.createElement("div");
+    where.className = "meta";
+    where.textContent = (row.board_id || "") + " / " + (row.device || "");
+    const desc = document.createElement("div");
+    desc.textContent = row.description || "";
+    card.append(head, where, desc);
+    for (const param of row.params || []) {
+      const label = document.createElement("label");
+      const caption = document.createElement("span");
+      const hint = paramHint(param);
+      caption.textContent = hint ? (param.name + " (" + hint + ")") : param.name;
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "any";
+      input.dataset.param = param.name;
+      if (param.description) label.title = param.description;
+      if (param.min != null) input.min = String(param.min);
+      if (param.max != null) input.max = String(param.max);
+      if (param.default != null) input.value = String(param.default);
+      else if (param.min != null) input.placeholder = String(param.min);
+      label.appendChild(caption);
+      label.appendChild(input);
+      card.appendChild(label);
+    }
+    root.appendChild(card);
+  }
+}
+
+function readParams(card, row) {
+  const params = {};
+  for (const param of row.params || []) {
+    const input = Array.from(card.querySelectorAll("input[data-param]")).find(
+      (el) => el.dataset.param === param.name
+    );
+    const raw = input ? input.value.trim() : "";
+    if (raw === "") {
+      if (param.default != null) {
+        params[param.name] = Number(param.default);
+        continue;
+      }
+      throw new Error("パラメータ " + param.name + " を入力してください");
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+      throw new Error("パラメータ " + param.name + " が数値ではありません");
+    }
+    params[param.name] = value;
+  }
+  return params;
+}
+
+async function loadActions() {
+  if (!simId) return;
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/actions");
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setActionError(apiError(body, res.statusText));
+    return;
+  }
+  const body = await res.json().catch(() => ({}));
+  actionCatalog = body.actions || [];
+  setActionError("");
+  renderActions();
+}
+
+async function invokeAction(card, row) {
+  if (!simId || !canInvoke()) return;
+  let params;
+  try {
+    params = readParams(card, row);
+  } catch (err) {
+    setActionStatus("");
+    setActionError(err.message);
+    return;
+  }
+  actionBusy = true;
+  setActionRunEnabled();
+  setActionError("");
+  setActionStatus(actionKey(row) + " を実行中…");
+  try {
+    const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/actions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        board_id: row.board_id,
+        device: row.device,
+        action: row.action,
+        params,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setActionStatus("");
+      setActionError(apiError(body, res.statusText));
+      return;
+    }
+    setActionError("");
+    setActionStatus(actionKey(row) + " を適用しました");
+  } catch (err) {
+    setActionStatus("");
+    setActionError(err.message || "実行に失敗しました");
+  } finally {
+    actionBusy = false;
+    setActionRunEnabled();
+  }
+}
+
+function stopActionPoll() {
+  if (actionPoll) {
+    clearInterval(actionPoll);
+    actionPoll = null;
+  }
+}
+
+function startActionPoll() {
+  stopActionPoll();
+  loadActions();
+  actionPoll = setInterval(() => {
+    if (actionCatalog.length === 0 && simState !== "exited") loadActions();
+  }, 2000);
 }
 
 function apiError(body, fallback) {
@@ -310,11 +571,13 @@ async function command(name) {
 }
 
 function applyStatus(snap) {
+  const prev = simState;
   document.getElementById("vtime").textContent = formatTime(snap.virtual_time_ns);
   document.getElementById("vraw").textContent = (snap.virtual_time_ns ?? 0) + " ns";
   setStatusError(snap.state === "exited" ? "arbiter has exited" : "");
   renderNodes(snap.nodes || []);
   setButtons(snap.state);
+  if (snap.state === "running" && prev !== "running") loadActions();
 }
 
 function connectStreams() {
@@ -362,8 +625,13 @@ function showSim(id) {
   document.getElementById("sim").style.display = "flex";
   document.getElementById("sim-id").textContent = id;
   logs.length = 0;
+  actionCatalog = [];
+  setActionError("");
+  setActionStatus("");
   renderLogs();
+  renderActions();
   connectStreams();
+  startActionPoll();
 }
 
 document.getElementById("start").onclick = () => command("start");
@@ -376,6 +644,7 @@ document.getElementById("probes-csv").onclick = () => {
   link.download = "probes.csv";
   link.click();
 };
+document.getElementById("actions-refresh").onclick = () => loadActions();
 document.getElementById("level").onchange = () => renderLogs();
 document.getElementById("logview").onscroll = (ev) => {
   const el = ev.target;
