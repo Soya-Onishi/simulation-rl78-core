@@ -1,4 +1,4 @@
-//! Shared fixtures for rl78-core integration tests.
+//! Shared fixtures for rl78 integration tests.
 
 #![allow(dead_code)] // each integration binary only uses a subset
 

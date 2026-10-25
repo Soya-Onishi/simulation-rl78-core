@@ -1128,7 +1128,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rl78-core"
+name = "rl78"
 version = "0.1.0"
 dependencies = [
  "cc",
@@ -1142,8 +1142,10 @@ dependencies = [
 name = "rl78-minimal-board"
 version = "0.1.0"
 dependencies = [
- "rl78-core",
+ "rl78",
+ "serial_test",
  "sim-cluster",
+ "sim-kernel",
 ]
 
 [[package]]
@@ -1377,14 +1379,6 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
-
-[[package]]
-name = "simulation-rl78-core"
-version = "0.1.0"
-dependencies = [
- "rl78-core",
- "sim-kernel",
-]
 
 [[package]]
 name = "slab"

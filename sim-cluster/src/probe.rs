@@ -8,8 +8,8 @@ use iceoryx2::prelude::Node;
 use sim_kernel::{DigitalLevel, ProbePoint, ProbeTap, UartFrame};
 
 use crate::ipc::{
-    IpcError, NodeProbeCsv, NodeProbeQuery, ProbeDigitalPub, ProbeDigitalSample,
-    ProbeQueryReplyWire, ProbeUartPub, ProbeUartSample, CSV_CHUNKS_PER_TICK, QUERY_CHUNK,
+    CSV_CHUNKS_PER_TICK, IpcError, NodeProbeCsv, NodeProbeQuery, ProbeDigitalPub,
+    ProbeDigitalSample, ProbeQueryReplyWire, ProbeUartPub, ProbeUartSample, QUERY_CHUNK,
     QUERY_KIND_LATEST, board_id_hash, open_digital_publisher, open_uart_publisher, probe_id_hash,
     probe_name_hash, send_digital, send_uart,
 };

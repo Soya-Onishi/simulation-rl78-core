@@ -1,5 +1,5 @@
 [package]
-name = "rl78-core"
+name = "rl78"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ description = "RL78 core assembly: tlib link, CPU wrapper, minimal memory map, M
 
 [dependencies]
 object = { version = "0.40.0", features = ["std"] }
-sim-kernel = { path = "../sim-kernel" }
+sim-kernel = { path = "../../../sim-kernel" }
 
 [build-dependencies]
 cc = "1"

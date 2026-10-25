@@ -1,13 +1,13 @@
 //! RL78 minimal board — cluster board binary with a fixed ROM/RAM map.
 //!
-//! Assembles [`rl78_core::minimal_machine`] and hands control to
-//! [`sim_cluster::run_board`]. Firmware loading (if the topology lists an ELF)
-//! is performed by the framework via [`sim_kernel::Machine::load_firmware`].
+//! Assembles [`g23_machine`] and hands control to [`sim_cluster::run_board`].
+//! Firmware loading (if the topology lists an ELF) is performed by the
+//! framework via [`sim_kernel::Machine::load_firmware`].
 
 use std::env;
 use std::process;
 
-use rl78_core::{G23MachineConfig, g23_machine};
+use rl78_minimal_board::{G23MachineConfig, g23_machine};
 use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_board};
 
 fn main() {
