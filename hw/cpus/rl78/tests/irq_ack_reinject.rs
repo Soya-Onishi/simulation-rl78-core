@@ -2,13 +2,14 @@
 
 mod common;
 
-use common::irq_inject::{ISR_ST0, ISR_TM00, REG_IE, REG_PC, arm_cpu, if0, load_vectors_and_idle};
-use rl78_core::{G23MachineConfig, g23_machine};
+use common::irq_inject::{
+    ISR_ST0, ISR_TM00, REG_IE, REG_PC, arm_cpu, g23_test_machine, if0, load_vectors_and_idle,
+};
 use sim_kernel::{Core, Cpu};
 
 #[test]
 fn ack_clears_if_and_reinjects_next_pending() {
-    let (mut machine, _ports, _probes) = g23_machine(G23MachineConfig::default());
+    let mut machine = g23_test_machine();
     load_vectors_and_idle(&mut machine);
     machine.reset();
     arm_cpu(&mut machine);

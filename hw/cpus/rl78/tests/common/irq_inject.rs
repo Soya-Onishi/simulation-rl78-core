@@ -2,8 +2,15 @@
 
 #![allow(dead_code)]
 
-use rl78_core::{IrqId, R7F100Gxl};
-use sim_kernel::{Core, Cpu, EventCtx, Machine, RegId, Tick};
+use rl78::{IrqId, R7F100Gxl};
+use sim_kernel::{Core, Cpu, EventCtl, EventCtx, HasMemoryMap, Machine, RegId, Tick};
+
+pub fn g23_test_machine() -> Machine<R7F100Gxl> {
+    let ctl = EventCtl::new();
+    let part = R7F100Gxl::new(ctl.clone());
+    let bus = part.memory_map().expect("g23 memory map").build().unwrap();
+    Machine::new(part, bus, ctl)
+}
 
 pub const REG_PC: RegId = RegId(8);
 pub const REG_SP: RegId = RegId(9);

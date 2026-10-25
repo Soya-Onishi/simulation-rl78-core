@@ -310,9 +310,7 @@ impl SimulationBackend for LocalBackend {
     }
 
     fn viewer_attach(&self, id: &str) -> Result<String, ApiError> {
-        match self.rpc(JobKind::ViewerAttach {
-            id: id.to_string(),
-        })? {
+        match self.rpc(JobKind::ViewerAttach { id: id.to_string() })? {
             JobReply::ViewerToken(token) => Ok(token),
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(

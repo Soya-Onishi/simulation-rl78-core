@@ -11,3 +11,4 @@ typenum = "1.17"
 iceoryx2-bb-elementary-traits = "0.9.3"
 iceoryx2-bb-derive-macros = "0.9.3"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
+object = { version = "0.40.0", features = ["std"] }

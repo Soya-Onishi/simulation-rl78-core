@@ -29,13 +29,12 @@ pub use probe_bus::{
     open_uart_subscriber, send_digital, send_uart,
 };
 pub use probe_ctrl::{
-    ArbiterProbeCtrl, NodeProbeCsv, NodeProbeQuery, ProbeQueryReplyWire, ProbeQueryWire,
-    ProbeWatchWire, CSV_CHUNKS_PER_TICK, QUERY_CHUNK, QUERY_KIND_LATEST, QUERY_KIND_RANGE,
+    ArbiterProbeCtrl, CSV_CHUNKS_PER_TICK, NodeProbeCsv, NodeProbeQuery, ProbeQueryReplyWire,
+    ProbeQueryWire, ProbeWatchWire, QUERY_CHUNK, QUERY_KIND_LATEST, QUERY_KIND_RANGE,
     QUERY_REPLY_LAST, QUERY_REPLY_TRUNCATED, ServerProbeCtrl,
 };
 pub use probe_forward::{
-    ArbiterProbeForward, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeToServer,
-    ServerProbeInbox,
+    ArbiterProbeForward, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeToServer, ServerProbeInbox,
 };
 pub use runtime::{IpcError, create_node, isolated_config, new_cluster_key, root_path_for_cluster};
 pub use uart_bus::NodeUartPorts;

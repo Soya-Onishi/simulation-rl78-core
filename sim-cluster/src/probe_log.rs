@@ -186,9 +186,8 @@ impl ProbeLog {
     #[must_use]
     pub fn with_cap(sim_id: &str, board_id: &str, cap: usize) -> Self {
         let board_hash = crate::ipc::board_id_hash(board_id);
-        let spill_path = std::env::temp_dir().join(format!(
-            "sim-cluster-probes-{sim_id}-{board_hash:016x}.bin"
-        ));
+        let spill_path =
+            std::env::temp_dir().join(format!("sim-cluster-probes-{sim_id}-{board_hash:016x}.bin"));
         Self {
             cap: cap.max(1),
             catalog: HashMap::new(),

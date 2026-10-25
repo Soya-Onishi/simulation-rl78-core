@@ -121,9 +121,10 @@ impl Core for ScriptedCpu {
 
     fn load_firmware(
         &mut self,
-        _bus: &mut MemoryBus,
-        _image: &[u8],
+        bus: &mut MemoryBus,
+        image: &[u8],
     ) -> Result<(), crate::FirmwareError> {
+        crate::elf::load_elf(image, bus)?;
         Ok(())
     }
 

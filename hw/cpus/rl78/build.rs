@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let tlib_src = manifest_dir.join("tlib");
+    let tlib_src = manifest_dir.join("../../../tlib");
     if !tlib_src.join("CMakeLists.txt").is_file() {
         panic!(
             "tlib sources missing at {}. Run: git submodule update --init --recursive",

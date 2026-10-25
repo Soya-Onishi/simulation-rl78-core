@@ -85,11 +85,7 @@ impl NodeState {
                 state,
                 Some(NodeEffect::ProbeWatch {
                     board_hash,
-                    probe_ids: probe_ids
-                        .iter()
-                        .copied()
-                        .take(usize::from(count))
-                        .collect(),
+                    probe_ids: probe_ids.iter().copied().take(usize::from(count)).collect(),
                 }),
             ),
             // Duplicate / late / early messages: warn and stay.

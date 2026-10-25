@@ -5,9 +5,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{magic_probe_guest_code, write_minimal_elf32};
-use rl78_core::{
-    MinimalMachineConfig, ProbeSink, load_elf_into_machine, minimal_machine_with_probe,
-};
+use rl78::{minimal_machine_with_probe, MinimalMachineConfig, ProbeSink};
 use sim_kernel::Core;
 
 #[derive(Clone, Default)]
@@ -36,7 +34,7 @@ fn guest_writes_magic_probe() {
     payload[1] = (entry >> 8) as u8;
     payload[entry as usize..].copy_from_slice(&code);
     let image = write_minimal_elf32(0, entry, &payload);
-    load_elf_into_machine(&image, &mut machine).unwrap();
+    machine.load_firmware(&image).unwrap();
     machine.reset();
 
     for _ in 0..32 {

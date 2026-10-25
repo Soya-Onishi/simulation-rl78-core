@@ -15,7 +15,7 @@ use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
 use crate::peripherals::gpio::{Gpio, GpioMmio, GpioWindow, PINS};
-use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqId};
+use crate::peripherals::irq::{IrqBankMmio, IrqController, IrqEdgeMmio, IrqId, bind_cpu_line};
 use crate::peripherals::sau::{self, SauCtrlMmio, SauSdrMmio, SauUnit};
 use crate::peripherals::semihosting::SemihostingMmio;
 use crate::peripherals::tau::{self, TauCtrlMmio, TauTdrMmio, TauTisMmio, TauUnit};
@@ -79,12 +79,14 @@ fn wiring(sau: &mut SauUnit, tau: &mut TauUnit, irq: &Arc<Mutex<IrqController>>)
             .source(tau.irq_source(ch))
             .sink(move |values, changed| IrqController::on_input(&irq, id, values, changed));
     }
+
+    bind_cpu_line(irq.clone());
 }
 
 /// Generic G23 core (clock / SAU0 / TAU0 / GPIO / IRQ). Flash/RAM sizes come from the part.
 ///
-/// Board-edge UART and GPIO ports are wired by [`crate::g23_machine`],
-/// not here — endpoint names belong to the board topology.
+/// Board-edge UART and GPIO ports are wired by the board crate, not here —
+/// endpoint names belong to the board topology.
 pub struct Rl78G23Core {
     pub clock: Arc<Mutex<ClockGenerator>>,
     pub sau: Arc<Mutex<SauUnit>>,
@@ -106,6 +108,7 @@ impl Rl78G23Core {
         let mut tau_unit = TauUnit::new(ctl.clone(), outputs);
         let semihosting_unit = SemihostingUnit::new(ctl);
         let core = Rl78Cpu::new();
+
         wiring(&mut sau_unit, &mut tau_unit, &irq);
 
         Self {

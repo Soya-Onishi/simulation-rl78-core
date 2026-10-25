@@ -6,7 +6,6 @@
 
 mod callbacks;
 mod cpu;
-mod elf;
 mod ffi;
 mod magic;
 mod map;
@@ -17,7 +16,6 @@ pub use callbacks::{
     remove_host_region, set_io_bus, take_callback_stop,
 };
 pub use cpu::Rl78Cpu;
-pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
@@ -26,10 +24,8 @@ pub use peripherals::{
     R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
 };
 
-use std::sync::Arc;
-
 use sim_kernel::{
-    BoardPorts, EventCtl, HasMemoryMap, HoldSwitch, InPort, Machine, MapError, MemoryBus, MemoryMapBuilder, OutPort, ProbePoint, ProbeTap, Ram, Rom, UnmappedPolicy, Wire,
+    EventCtl, Machine, MapError, MemoryBus, MemoryMapBuilder, Ram, Rom, UnmappedPolicy,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
@@ -81,84 +77,49 @@ where
         .and_then(|b| b.build())
 }
 
-/// Knobs for [`g23_machine`]. Option byte `0x000C2` is read from ROM at reset.
-#[derive(Clone, Debug, Default)]
-pub struct G23MachineConfig {
-    pub unmapped: UnmappedPolicy,
-}
-
-/// Wire board-edge UART0 (`uart0_tx` / `uart0_rx`) and GPIO pins.
-///
-/// Endpoint names match the cluster topology; this is board glue, not SoC wiring.
-fn wire_board_uart0(core: &Rl78G23Core) -> (BoardPorts, Vec<ProbePoint>) {
-    let uart_tx = OutPort::new("uart0_tx").expect("uart0_tx");
-    let mut uart_rx = InPort::new("uart0_rx").expect("uart0_rx");
-
-    let tap = ProbeTap::new("uart0", sim_kernel::ProbePolicy::EveryDrive);
-
-    {
-        let mut sau = core.sau.lock().expect("sau");
-        let tx = uart_tx.clone();
-        let _tx = Wire::new()
-            .source(sau.tx_source())
-            .sink(move |values, changed| tx.on_input(values, changed))
-            .sink(tap.callback());
-    }
-    {
-        let sau = Arc::clone(&core.sau);
-        let _rx = Wire::new()
-            .source(uart_rx.port_mut())
-            .sink(move |values, changed| SauUnit::on_rx(&sau, 1, values, changed));
-    }
-    let mut ports = BoardPorts::new();
-    ports.insert_out(uart_tx).expect("uart0_tx");
-    ports.insert_in(uart_rx).expect("uart0_rx");
-    (ports, vec![ProbePoint::Uart(tap)])
-}
-
-/// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
-///
-/// Returns the machine, board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx`), and
-/// wiring-side [`ProbePoint`]s attached while the wires were built.
-///
-/// `sw1` owns its [`SourcePort`] and is wired to package pin P0.0. Package pins
-/// are not board [`InPort`]s or [`OutPort`]s.
-pub fn g23_machine(cfg: G23MachineConfig) -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
-    let ctl = EventCtl::new();
-    let part = R7F100Gxl::new(ctl.clone());
-    let (ports, probes) = wire_board_uart0(&part.core);
-    let bus = part
-        .memory_map()
-        .expect("g23 memory map")
-        .policy(cfg.unmapped)
-        .build()
-        .unwrap();
-    let irq = Arc::clone(&part.core.irq);
-    let mut sw1 = HoldSwitch::new("sw1").expect("sw1");
-    let pin = part.gpio_input(0);
-    let _sw = Wire::new()
-        .source(sw1.source_mut())
-        .sink(move |values, changed| {
-            if let Some(&level) = values.get(changed) {
-                pin.drive(level);
-            }
-        });
-    let machine = Machine::with_devices(part, bus, ctl, vec![Box::new(sw1)]).expect("sw1");
-    peripherals::irq::bind_cpu_line(irq);
-    (machine, ports, probes)
-}
-
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use sim_kernel::{BoardPorts, BusError, Cpu, HasMemoryMap, Resettable, Tick, UartFrame};
+    use sim_kernel::{
+        BoardPorts, BusError, Cpu, HasMemoryMap, InPort, OutPort, Resettable, Tick, UartFrame, Wire,
+    };
 
-    fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus, BoardPorts) {
+    /// Test-only SAU0 harness. Board-edge names live in `rl78-minimal-board`.
+    fn wire_uart0(core: &Rl78G23Core) -> BoardPorts {
+        let uart_tx = OutPort::new("uart0_tx").expect("uart0_tx");
+        let mut uart_rx = InPort::new("uart0_rx").expect("uart0_rx");
+        {
+            let mut sau = core.sau.lock().expect("sau");
+            let tx = uart_tx.clone();
+            let _tx = Wire::new()
+                .source(sau.tx_source())
+                .sink(move |values, changed| tx.on_input(values, changed));
+        }
+        {
+            let sau = Arc::clone(&core.sau);
+            let _rx = Wire::new()
+                .source(uart_rx.port_mut())
+                .sink(move |values, changed| SauUnit::on_rx(&sau, 1, values, changed));
+        }
+        let mut ports = BoardPorts::new();
+        ports.insert_out(uart_tx).expect("uart0_tx");
+        ports.insert_in(uart_rx).expect("uart0_rx");
+        ports
+    }
+
+    fn g23_part(ctl: EventCtl) -> (R7F100Gxl, MemoryBus) {
         let mut part = R7F100Gxl::new(ctl);
-        let (ports, _probes) = wire_board_uart0(&part.core);
+        let mut bus = part.memory_map().unwrap().build().unwrap();
+        Resettable::reset(&mut part, &mut bus);
+        (part, bus)
+    }
+
+    fn g23_uart(ctl: EventCtl) -> (R7F100Gxl, MemoryBus, BoardPorts) {
+        let mut part = R7F100Gxl::new(ctl);
+        let ports = wire_uart0(&part.core);
         let mut bus = part.memory_map().unwrap().build().unwrap();
         Resettable::reset(&mut part, &mut bus);
         ports.clear_pending();
@@ -200,18 +161,6 @@ mod tests {
                 .expect("probe buffer")
                 .extend_from_slice(bytes);
         }
-    }
-
-    #[serial]
-    #[test]
-    fn g23_machine_registers_sw1_hold() {
-        let (machine, _ports, _probes) = g23_machine(G23MachineConfig::default());
-        let catalog = machine.action_catalog();
-        assert_eq!(catalog.len(), 1);
-        assert_eq!(catalog[0].device, "sw1");
-        assert_eq!(catalog[0].action, "hold");
-        assert_eq!(catalog[0].device_hash, sim_kernel::id_hash("sw1"));
-        assert_eq!(catalog[0].action_hash, sim_kernel::id_hash("hold"));
     }
 
     #[serial]
@@ -258,7 +207,7 @@ mod tests {
     #[test]
     fn g23_instruction_period_follows_fclk() {
         let ctl = EventCtl::new();
-        let (part, _bus, _ports) = g23_part(ctl);
+        let (part, _bus) = g23_part(ctl);
         // Hold-reset latches HOCO at 32 MHz; one cycle is 31 ns (integer division).
         assert_eq!(Cpu::instruction_period(&part), Some(Tick(31)));
     }
@@ -267,7 +216,7 @@ mod tests {
     #[test]
     fn g23_clock_and_timer_sfr_are_mapped() {
         let ctl = EventCtl::new();
-        let (_, mut bus, _ports) = g23_part(ctl);
+        let (_, mut bus) = g23_part(ctl);
         let mut ckc = [0u8; 1];
         bus.read(0xFFFA4, &mut ckc).unwrap();
         assert_eq!(ckc[0], 0);
@@ -315,7 +264,7 @@ mod tests {
     #[test]
     fn tau_interval_sets_overflow_after_tdr_counts() {
         let ctl = EventCtl::new();
-        let (part, mut bus, _ports) = g23_part(ctl.clone());
+        let (part, mut bus) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -333,7 +282,7 @@ mod tests {
     #[test]
     fn tau_restart_after_tt_ignores_stale_deadline() {
         let ctl = EventCtl::new();
-        let (_, mut bus, _ports) = g23_part(ctl.clone());
+        let (_, mut bus) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -357,7 +306,7 @@ mod tests {
     #[test]
     fn tau_arms_when_fclk_returns() {
         let ctl = EventCtl::new();
-        let (_, mut bus, _ports) = g23_part(ctl.clone());
+        let (_, mut bus) = g23_part(ctl.clone());
         bus.write(0xFFFA1, &[0xC1]).unwrap();
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
@@ -375,7 +324,7 @@ mod tests {
     #[test]
     fn sau_uart_tx_emits_byte_after_frame_time() {
         let ctl = EventCtl::new();
-        let (_part, mut bus, ports) = g23_part(ctl.clone());
+        let (_part, mut bus, ports) = g23_uart(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
@@ -392,7 +341,7 @@ mod tests {
     #[test]
     fn irq_reset_masks_if_until_mk_cleared() {
         let ctl = EventCtl::new();
-        let (part, mut bus, _ports) = g23_part(ctl);
+        let (part, mut bus) = g23_part(ctl);
         let mut mk0 = [0u8; 2];
         bus.read(0xFFFE4, &mut mk0).unwrap();
         assert_eq!(mk0, [0xFF, 0xFF]);
@@ -408,7 +357,7 @@ mod tests {
     #[test]
     fn tau_interval_latches_inttm00() {
         let ctl = EventCtl::new();
-        let (part, mut bus, _ports) = g23_part(ctl.clone());
+        let (part, mut bus) = g23_part(ctl.clone());
         bus.write(0xFFF18, &[31, 0]).unwrap();
         bus.write(0xF01B2, &[0x01, 0x00]).unwrap();
         pump(&mut bus, &ctl, sim_kernel::Tick(0));
@@ -423,7 +372,7 @@ mod tests {
     #[test]
     fn sau_uart_tx_latches_intst0() {
         let ctl = EventCtl::new();
-        let (part, mut bus, _ports) = g23_part(ctl.clone());
+        let (part, mut bus) = g23_part(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
@@ -464,7 +413,7 @@ mod tests {
     #[test]
     fn sau_uart_tx_capture_includes_frame_parameters() {
         let ctl = EventCtl::new();
-        let (_part, mut bus, ports) = g23_part(ctl.clone());
+        let (_part, mut bus, ports) = g23_uart(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
@@ -480,7 +429,7 @@ mod tests {
     #[test]
     fn sau_uart_tx_second_sdr_write_starts_after_first_frame() {
         let ctl = EventCtl::new();
-        let (_part, mut bus, ports) = g23_part(ctl.clone());
+        let (_part, mut bus, ports) = g23_uart(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
@@ -505,7 +454,7 @@ mod tests {
     #[test]
     fn sau_uart_rx_loads_sdr_from_matching_frame() {
         let ctl = EventCtl::new();
-        let (part, mut bus, ports) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_uart(ctl);
         enable_uart0_rx(&mut bus, 0x4004);
         uart0_rx(&ports).receive(matching_uart_frame(b'Z'));
         let mut sdr = [0u8; 2];
@@ -519,7 +468,7 @@ mod tests {
     #[test]
     fn sau_uart_rx_parity_mismatch_sets_pef_and_intsre() {
         let ctl = EventCtl::new();
-        let (part, mut bus, ports) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_uart(ctl);
         enable_uart0_rx(&mut bus, 0x4204);
         uart0_rx(&ports).receive(matching_uart_frame(b'A'));
         let mut ssr = [0u8; 2];
@@ -533,7 +482,7 @@ mod tests {
     #[test]
     fn sau_uart_rx_bit_time_mismatch_sets_fef_and_intsre() {
         let ctl = EventCtl::new();
-        let (part, mut bus, ports) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_uart(ctl);
         enable_uart0_rx(&mut bus, 0x4004);
         let mut frame = matching_uart_frame(b'A');
         frame.bit_time = Tick(1_000);
@@ -549,7 +498,7 @@ mod tests {
     #[test]
     fn sau_uart_rx_error_with_eoc_suppresses_intsr() {
         let ctl = EventCtl::new();
-        let (part, mut bus, ports) = g23_part(ctl);
+        let (part, mut bus, ports) = g23_uart(ctl);
         enable_uart0_rx(&mut bus, 0x4A04);
         uart0_rx(&ports).receive(matching_uart_frame(b'A'));
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
@@ -560,7 +509,7 @@ mod tests {
     #[test]
     fn uart_out_port_pending_loopback_to_sau_rx() {
         let ctl = EventCtl::new();
-        let (part, mut bus, ports) = g23_part(ctl.clone());
+        let (part, mut bus, ports) = g23_uart(ctl.clone());
         bus.write(0xF0118, &[0x04, 0x80]).unwrap();
         bus.write(0xF012A, &[0x01, 0x00]).unwrap();
         bus.write(0xF0122, &[0x01, 0x00]).unwrap();
