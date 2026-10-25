@@ -4,7 +4,6 @@
  * archive (beating weak stubs inside libtlib.a).
  */
 #include <stdint.h>
-#include <stdlib.h>
 
 void *rl78_host_guest_offset_to_host_ptr(uint64_t offset);
 uint64_t rl78_host_read_byte(uint64_t address, uint64_t cpustate);
