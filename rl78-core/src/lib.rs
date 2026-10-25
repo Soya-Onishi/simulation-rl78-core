@@ -29,8 +29,7 @@ pub use peripherals::{
 use std::sync::Arc;
 
 use sim_kernel::{
-    BoardPorts, EventCtl, HasMemoryMap, HoldSwitch, InPort, Machine, MapError, MemoryBus,
-    MemoryMapBuilder, OutPort, ProbePoint, Ram, Rom, UnmappedPolicy, Wire,
+    BoardPorts, EventCtl, HasMemoryMap, HoldSwitch, InPort, Machine, MapError, MemoryBus, MemoryMapBuilder, OutPort, ProbePoint, ProbeTap, Ram, Rom, UnmappedPolicy, Wire,
 };
 
 /// Knobs for [`minimal_machine`]. All configuration is code, not a file.
@@ -94,12 +93,16 @@ pub struct G23MachineConfig {
 fn wire_board_uart0(core: &Rl78G23Core) -> (BoardPorts, Vec<ProbePoint>) {
     let uart_tx = OutPort::new("uart0_tx").expect("uart0_tx");
     let mut uart_rx = InPort::new("uart0_rx").expect("uart0_rx");
+
+    let tap = ProbeTap::new("uart0", sim_kernel::ProbePolicy::EveryDrive);
+
     {
         let mut sau = core.sau.lock().expect("sau");
         let tx = uart_tx.clone();
         let _tx = Wire::new()
             .source(sau.tx_source())
-            .sink(move |values, changed| tx.on_input(values, changed));
+            .sink(move |values, changed| tx.on_input(values, changed))
+            .sink(tap.callback());
     }
     {
         let sau = Arc::clone(&core.sau);
@@ -110,7 +113,7 @@ fn wire_board_uart0(core: &Rl78G23Core) -> (BoardPorts, Vec<ProbePoint>) {
     let mut ports = BoardPorts::new();
     ports.insert_out(uart_tx).expect("uart0_tx");
     ports.insert_in(uart_rx).expect("uart0_rx");
-    (ports, Vec::new())
+    (ports, vec![ProbePoint::Uart(tap)])
 }
 
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
