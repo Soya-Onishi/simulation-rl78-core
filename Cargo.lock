@@ -1133,7 +1133,6 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "cmake",
- "object",
  "serial_test",
  "sim-kernel",
 ]
@@ -1204,9 +1203,9 @@ dependencies = [
 
 [[package]]
 name = "ruzstd"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a252f5e20f038fe7b4ea53e073e65398d652c864cc162fc77c56c2f13717b888"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 dependencies = [
  "twox-hash",
 ]
@@ -1370,6 +1369,7 @@ dependencies = [
  "gdbstub",
  "iceoryx2-bb-derive-macros",
  "iceoryx2-bb-elementary-traits",
+ "object",
  "typenum",
  "xxhash-rust",
 ]
@@ -1615,9 +1615,9 @@ dependencies = [
 
 [[package]]
 name = "twox-hash"
-version = "2.1.3"
+version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typenum"

@@ -1,11 +1,12 @@
 //! ELF loader for guest images (ELF only; no bin/mot).
 //!
-//! Parsing uses the [`object`] crate (`PT_LOAD` segments). Firmware load for a
-//! live machine goes through [`sim_kernel::Core::load_firmware`] on [`Rl78Cpu`];
-//! the helpers here remain thin compatibility wrappers.
+//! Parsing uses the [`object`] crate (`PT_LOAD` segments). This module writes
+//! bytes onto a [`MemoryBus`]; it does not talk to a translation engine.
+//! Architecture crates flush their own caches in [`Core::load_firmware`].
 
-use object::{Endianness, Object, read::elf::ProgramHeader};
-use sim_kernel::{Cpu, FirmwareError, Machine, MemoryBus};
+use object::{read::elf::ProgramHeader, Endianness, Object};
+
+use crate::{BusError, Cpu, FirmwareError, Machine, MemoryBus};
 
 /// ELF `e_machine` value for Renesas RL78 (`EM_RL78`).
 pub const EM_RL78: u16 = 197;
@@ -22,7 +23,7 @@ pub enum LoadError {
     NotElf,
     Unsupported(&'static str),
     Truncated,
-    Bus(sim_kernel::BusError),
+    Bus(BusError),
 }
 
 impl std::fmt::Display for LoadError {
@@ -109,28 +110,42 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
     })
 }
 
-/// Load `image` into `machine` ROM. Does not change PC (see reset).
+/// Load `image` into `machine` via [`Machine::load_firmware`]. Does not change PC.
 ///
-/// Thin wrapper over [`Machine::load_firmware`] / [`sim_kernel::Core::load_firmware`].
+/// The CPU implementation owns any engine-specific follow-up (for example a
+/// translation-cache flush). This helper only reports the ELF entry point.
 pub fn load_elf_into_machine<C: Cpu>(
     image: &[u8],
     machine: &mut Machine<C>,
 ) -> Result<ElfLoad, LoadError> {
-    let loaded = load_elf(image, machine.bus_mut())?;
-    // Same TB flush as [`load_elf_firmware`] when the host map is already bound.
-    unsafe { crate::ffi::tlib_invalidate_translation_cache() };
-
+    let entry = elf_entry(image)?;
+    machine.load_firmware(image)?;
     // TODO: returning entrypoint when loading firmware is not appropriate. Do when trigger reset.
-    Ok(ElfLoad {
-        entry: loaded.entry,
-    })
+    Ok(ElfLoad { entry })
+}
+
+fn elf_entry(image: &[u8]) -> Result<u64, LoadError> {
+    let file = object::File::parse(image).map_err(|_| {
+        if image.len() < 4 || &image[0..4] != b"\x7fELF" {
+            LoadError::NotElf
+        } else {
+            LoadError::Truncated
+        }
+    })?;
+    if !matches!(file, object::File::Elf32(_)) {
+        return Err(LoadError::Unsupported("only ELF32 is supported"));
+    }
+    if file.endianness() != Endianness::Little {
+        return Err(LoadError::Unsupported("ELF must be little-endian"));
+    }
+    Ok(file.entry())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MinimalMachineConfig, minimal_machine};
-    use serial_test::serial;
+    use crate::testing::ScriptedCpu;
+    use crate::{EventCtl, Machine, MemoryMapBuilder, Rom};
 
     /// Build a minimal little-endian ELF32 (ET_EXEC) with one PT_LOAD segment.
     fn write_minimal_elf32(load_addr: u32, entry: u32, payload: &[u8]) -> Vec<u8> {
@@ -167,12 +182,20 @@ mod tests {
         out
     }
 
-    #[serial]
+    fn machine_with_rom(size: usize) -> Machine<ScriptedCpu> {
+        let bus = MemoryMapBuilder::new()
+            .map(0, Box::new(Rom::new(size)))
+            .unwrap()
+            .build()
+            .unwrap();
+        Machine::new(ScriptedCpu::new(vec![]), bus, EventCtl::new())
+    }
+
     #[test]
     fn load_elf_writes_payload_and_reports_entry() {
         let payload = [0x00u8, 0x00, 0x11, 0x22];
         let image = write_minimal_elf32(0x200, 0x200, &payload);
-        let mut machine = minimal_machine(MinimalMachineConfig::default());
+        let mut machine = machine_with_rom(0x1000);
         let loaded = load_elf_into_machine(&image, &mut machine).unwrap();
         assert_eq!(loaded.entry, 0x200);
         let mut buf = [0u8; 4];
@@ -180,12 +203,11 @@ mod tests {
         assert_eq!(buf, payload);
     }
 
-    #[serial]
     #[test]
     fn machine_load_firmware_matches_wrapper() {
         let payload = [0xAAu8, 0xBB];
         let image = write_minimal_elf32(0x300, 0x300, &payload);
-        let mut machine = minimal_machine(MinimalMachineConfig::default());
+        let mut machine = machine_with_rom(0x1000);
         machine.load_firmware(&image).unwrap();
         let mut buf = [0u8; 2];
         machine.bus_mut().read(0x300, &mut buf).unwrap();
@@ -194,7 +216,7 @@ mod tests {
 
     #[test]
     fn rejects_non_elf() {
-        let mut bus = sim_kernel::MemoryBus::new();
+        let mut bus = MemoryBus::new();
         assert!(matches!(
             load_elf(b"not elf", &mut bus),
             Err(LoadError::NotElf)

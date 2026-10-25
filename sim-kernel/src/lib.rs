@@ -14,6 +14,7 @@ mod bus;
 mod clock;
 mod command;
 mod cpu;
+pub mod elf;
 mod event;
 mod gdb;
 mod machine;
@@ -44,6 +45,7 @@ pub use cpu::{
     Core, Cpu, FirmwareError, PendingStop, Quantum, RegId, TlibExit, map_tlib_exit,
     resolve_after_tlib_execute,
 };
+pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use gdb::{GdbBindError, listen_gdb, parse_gdb_dev};
 pub use machine::Machine;

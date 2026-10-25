@@ -10,6 +10,7 @@ Arch-independent simulation kernel crate.
 - `gdb`: QEMU-style GDB stub via the `gdbstub` crate (`listen_gdb`, `parse_gdb_dev`). `SimGdbTarget` implements `Target` / resume / SW breakpoints over `Command`/`Response`. Does **not** send `NotifyHalt`. `tcp::PORT` binds `0.0.0.0`.
 - `bus`: `MemoryMapped`, `MemoryBus`, `MemoryMapBuilder` (`map` / `alias` / `merge` / `policy`), `Rom`/`Ram`, `UnmappedPolicy`. `alias(alias_base, target, size)` takes an absolute guest `target` (hit-tested to a region = base+offset); alias-of-alias allowed; `build() -> Result` flattens chains and returns `MapError::AliasCycle` on loops.
 - `cpu`: `Core` (instruction engine: `run_quantum`, regs, PC, breakpoints) and `Cpu` (`Resettable` + `HasMemoryMap`, owns a `Core`, `instruction_period`). `Quantum`, `PendingStop`, `TlibExit`, `map_tlib_exit` / `resolve_after_tlib_execute`.
+- `elf`: generic ELF32 LE `PT_LOAD` into `MemoryBus`. No translation-engine flush here — arch crates do that in `Core::load_firmware` (RL78: tlib TB invalidate). Tests use `ScriptedCpu` + `Rom`, not an arch machine.
 - `command`: `Command` / `Response` / inspect surface. `NotifyHalt` is a no-op placeholder — future kernel stop-commit hook for multi-board arbiter; must **not** cluster-halt on guest-local `StopReason::Halt` (RL78 STOP / WFI).
 - `clock` / `event` / `stop` / `breakpoint`: virtual time, scheduled events, stop reasons, BP store. `EventCtx` is bus + stop only.
 - `testing` (cfg test): fake CPU for kernel unit tests.

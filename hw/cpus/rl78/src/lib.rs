@@ -6,7 +6,6 @@
 
 mod callbacks;
 mod cpu;
-mod elf;
 mod ffi;
 mod magic;
 mod map;
@@ -17,7 +16,6 @@ pub use callbacks::{
     remove_host_region, set_io_bus, take_callback_stop,
 };
 pub use cpu::Rl78Cpu;
-pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};

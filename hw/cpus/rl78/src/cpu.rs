@@ -23,7 +23,6 @@ use sim_kernel::{
 };
 
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
-use crate::elf;
 use crate::ffi::{self, Rl78Reg};
 
 static SEAT: Mutex<bool> = Mutex::new(false);
@@ -424,7 +423,7 @@ impl Core for Rl78Cpu {
     }
 
     fn load_firmware(&mut self, bus: &mut MemoryBus, image: &[u8]) -> Result<(), FirmwareError> {
-        elf::load_elf(image, bus)?;
+        sim_kernel::elf::load_elf(image, bus)?;
         // Same TB flush as [`load_elf_firmware`] when the host map is already bound.
         unsafe { crate::ffi::tlib_invalidate_translation_cache() }; 
 
