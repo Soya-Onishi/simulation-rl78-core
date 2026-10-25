@@ -23,6 +23,7 @@ use sim_kernel::{
 };
 
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
+use crate::elf;
 use crate::ffi::{self, Rl78Reg};
 
 static SEAT: Mutex<bool> = Mutex::new(false);
@@ -358,10 +359,6 @@ impl Core for Rl78Cpu {
         self.memory_bound = true;
     }
 
-    fn load_firmware(&mut self, bus: &mut MemoryBus, image: &[u8]) -> Result<(), FirmwareError> {
-        crate::elf::load_elf_firmware(self, bus, image)
-    }
-
     fn run_quantum(&mut self, max_instructions: u32) -> Quantum {
         let exit = unsafe { ffi::tlib_execute(max_instructions) };
         let instructions = unsafe { ffi::tlib_get_executed_instructions() };
@@ -424,6 +421,14 @@ impl Core for Rl78Cpu {
                 unsafe { ffi::tlib_add_breakpoint(*addr) };
             }
         }
+    }
+
+    fn load_firmware(&mut self, bus: &mut MemoryBus, image: &[u8]) -> Result<(), FirmwareError> {
+        elf::load_elf(image, bus)?;
+        // Same TB flush as [`load_elf_firmware`] when the host map is already bound.
+        unsafe { crate::ffi::tlib_invalidate_translation_cache() }; 
+
+        Ok(())
     }
 }
 

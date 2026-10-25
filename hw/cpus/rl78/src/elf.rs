@@ -5,9 +5,7 @@
 //! the helpers here remain thin compatibility wrappers.
 
 use object::{Endianness, Object, read::elf::ProgramHeader};
-use sim_kernel::{FirmwareError, Machine, MemoryBus};
-
-use crate::Rl78Cpu;
+use sim_kernel::{Cpu, FirmwareError, Machine, MemoryBus};
 
 /// ELF `e_machine` value for Renesas RL78 (`EM_RL78`).
 pub const EM_RL78: u16 = 197;
@@ -114,9 +112,9 @@ pub fn load_elf(image: &[u8], bus: &mut MemoryBus) -> Result<ElfLoad, LoadError>
 /// Load `image` into `machine` ROM. Does not change PC (see reset).
 ///
 /// Thin wrapper over [`Machine::load_firmware`] / [`sim_kernel::Core::load_firmware`].
-pub fn load_elf_into_machine(
+pub fn load_elf_into_machine<C: Cpu>(
     image: &[u8],
-    machine: &mut Machine<Rl78Cpu>,
+    machine: &mut Machine<C>,
 ) -> Result<ElfLoad, LoadError> {
     let loaded = load_elf(image, machine.bus_mut())?;
     // Same TB flush as [`load_elf_firmware`] when the host map is already bound.
@@ -126,20 +124,6 @@ pub fn load_elf_into_machine(
     Ok(ElfLoad {
         entry: loaded.entry,
     })
-}
-
-/// Parse ELF, write PT_LOAD segments, and invalidate TBs.
-///
-/// Does not set PC — that belongs to CPU reset (reset vector at `0x00000`).
-pub(crate) fn load_elf_firmware(
-    _cpu: &mut Rl78Cpu,
-    bus: &mut MemoryBus,
-    image: &[u8],
-) -> Result<(), FirmwareError> {
-    load_elf(image, bus)?;
-    // ROM bytes changed under an already-bound host map; drop stale TBs.
-    unsafe { crate::ffi::tlib_invalidate_translation_cache() };
-    Ok(())
 }
 
 #[cfg(test)]
