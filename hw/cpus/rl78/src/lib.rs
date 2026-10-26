@@ -20,8 +20,8 @@ pub use ffi::{Rl78Reg, excp};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 pub use peripherals::{
-    ClockGenerator, ClockOutputs, ClockTree, Cycles, Gpio, Hertz, IrqController, IrqId, IrqRequest,
-    R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
+    ADC_SOURCES, AdcUnit, ClockGenerator, ClockOutputs, ClockTree, Cycles, Gpio, Hertz,
+    IrqController, IrqId, IrqRequest, R7F100Gxl, Rl78G23Core, SauUnit, TauUnit,
 };
 
 use sim_kernel::{
@@ -235,6 +235,14 @@ mod tests {
         let mut sdr = [0u8; 2];
         bus.read(0xFFF10, &mut sdr).unwrap();
         assert_eq!(sdr[0], 0x5A);
+
+        bus.write(0xFFF32, &[0x20]).unwrap();
+        let mut adm1 = [0u8; 1];
+        bus.read(0xFFF32, &mut adm1).unwrap();
+        assert_eq!(adm1[0], 0x20);
+        let mut adul = [0u8; 1];
+        bus.read(0xF0011, &mut adul).unwrap();
+        assert_eq!(adul[0], 0xFF);
     }
 
     #[test]
@@ -351,6 +359,28 @@ mod tests {
         bus.write(0xFFFE4, &[0xFF, 0xBF]).unwrap();
         let pending = part.core.irq.lock().unwrap().pending().unwrap();
         assert_eq!(pending.index, IrqId::INTTM00);
+    }
+
+    #[serial]
+    #[test]
+    fn adc_oneshot_latches_intad() {
+        let ctl = EventCtl::new();
+        let (part, mut bus) = g23_part(ctl.clone());
+        part.adc_input(0)
+            .drive(sim_kernel::AnalogVoltage(2_500_000));
+        bus.write(0xFFF32, &[0x20]).unwrap();
+        bus.write(0xFFF30, &[0x80]).unwrap();
+        pump(&mut bus, &ctl, Tick(1));
+        let mut adm0 = [0u8; 1];
+        bus.read(0xFFF30, &mut adm0).unwrap();
+        assert_eq!(adm0[0], 0x80);
+        pump(&mut bus, &ctl, Tick(72_000));
+        bus.read(0xFFF30, &mut adm0).unwrap();
+        assert_eq!(adm0[0], 0x00);
+        let mut adcr = [0u8; 2];
+        bus.read(0xFFF1E, &mut adcr).unwrap();
+        assert_eq!(u16::from_le_bytes(adcr) >> 6, 0x0200);
+        assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTAD));
     }
 
     #[serial]

@@ -3,14 +3,15 @@
 use std::sync::{Arc, Mutex};
 
 use sim_kernel::{
-    Addr, Cpu, Device, DigitalLevel, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder,
-    Ram, Resettable, Rom, SourcePort, Tick, Wire,
+    Addr, AnalogVoltage, Cpu, Device, DigitalLevel, EventCtl, HasMemoryMap, MapError, MemoryBus,
+    MemoryMapBuilder, Ram, Resettable, Rom, SourcePort, Tick, Wire,
 };
 
 use crate::cpu::Rl78Cpu;
 
 use crate::map::MemoryLayout;
 use crate::peripherals::SemihostingUnit;
+use crate::peripherals::adc::{AdcMmio, AdcUnit, AdcWindow, SOURCE_NUM as ADC_SOURCES};
 use crate::peripherals::clock::{
     ClockGenerator, ClockHocoMmio, ClockOscDivMmio, ClockSfrMmio, ClockTrimMmio,
 };
@@ -41,6 +42,9 @@ const GPIO_OTHER0: Addr = 0xF0030;
 const GPIO_PIOR: Addr = 0xF0077;
 const GPIO_PIDIS: Addr = 0xF007D;
 const GPIO_OTHER1: Addr = 0xF0260;
+const ADC_ADCR: Addr = 0xFFF1E;
+const ADC_ADM: Addr = 0xFFF30;
+const ADC_EXT: Addr = 0xF0010;
 const SEMIHOSTING: Addr = 0xE0000;
 /// Flash option byte `FRQSEL` (QEMU `rom_ptr(0x000C2)`).
 const OPTION_BYTE_ADDR: Addr = 0x000C2;
@@ -60,7 +64,12 @@ const TAU_IRQ: [IrqId; tau::CHANNELS] = [
     IrqId::INTTM07,
 ];
 
-fn wiring(sau: &mut SauUnit, tau: &mut TauUnit, irq: &Arc<Mutex<IrqController>>) {
+fn wiring(
+    sau: &mut SauUnit,
+    tau: &mut TauUnit,
+    adc: &mut AdcUnit,
+    irq: &Arc<Mutex<IrqController>>,
+) {
     for (ch, id) in SAU_IRQ.iter().copied().enumerate() {
         let irq = Arc::clone(irq);
         let _wire = Wire::new()
@@ -79,19 +88,28 @@ fn wiring(sau: &mut SauUnit, tau: &mut TauUnit, irq: &Arc<Mutex<IrqController>>)
             .source(tau.irq_source(ch))
             .sink(move |values, changed| IrqController::on_input(&irq, id, values, changed));
     }
+    {
+        let irq = Arc::clone(irq);
+        let _wire = Wire::new()
+            .source(adc.irq_source())
+            .sink(move |values, changed| {
+                IrqController::on_input(&irq, IrqId::INTAD, values, changed)
+            });
+    }
 
     bind_cpu_line(irq.clone());
 }
 
-/// Generic G23 core (clock / SAU0 / TAU0 / GPIO / IRQ). Flash/RAM sizes come from the part.
+/// Generic G23 core (clock / SAU0 / TAU0 / GPIO / ADC / IRQ). Flash/RAM sizes come from the part.
 ///
-/// Board-edge UART and GPIO ports are wired by the board crate, not here —
+/// Board-edge UART, GPIO, and analog ports are wired by the board crate, not here —
 /// endpoint names belong to the board topology.
 pub struct Rl78G23Core {
     pub clock: Arc<Mutex<ClockGenerator>>,
     pub sau: Arc<Mutex<SauUnit>>,
     pub tau: Arc<Mutex<TauUnit>>,
     pub gpio: Arc<Mutex<Gpio>>,
+    pub adc: Arc<Mutex<AdcUnit>>,
     pub semihosting: Arc<Mutex<SemihostingUnit>>,
     pub irq: Arc<Mutex<IrqController>>,
     /// RL78 instruction engine. Created in [`Self::new`]. tlib allows one live instance.
@@ -105,17 +123,19 @@ impl Rl78G23Core {
         let outputs = clock.lock().expect("clock").outputs();
         let irq = Arc::new(Mutex::new(IrqController::new()));
         let mut sau_unit = SauUnit::new(ctl.clone(), outputs.clone());
-        let mut tau_unit = TauUnit::new(ctl.clone(), outputs);
+        let mut tau_unit = TauUnit::new(ctl.clone(), outputs.clone());
+        let mut adc_unit = AdcUnit::new(ctl.clone(), outputs);
         let semihosting_unit = SemihostingUnit::new(ctl);
         let core = Rl78Cpu::new();
 
-        wiring(&mut sau_unit, &mut tau_unit, &irq);
+        wiring(&mut sau_unit, &mut tau_unit, &mut adc_unit, &irq);
 
         Self {
             clock,
             sau: Arc::new(Mutex::new(sau_unit)),
             tau: Arc::new(Mutex::new(tau_unit)),
             gpio: Arc::new(Mutex::new(Gpio::new())),
+            adc: Arc::new(Mutex::new(adc_unit)),
             semihosting: Arc::new(Mutex::new(semihosting_unit)),
             irq,
             core,
@@ -129,6 +149,7 @@ impl Resettable for Rl78G23Core {
         Resettable::reset(&mut *self.sau.lock().expect("sau"), bus);
         Resettable::reset(&mut *self.tau.lock().expect("tau"), bus);
         Resettable::reset(&mut *self.gpio.lock().expect("gpio"), bus);
+        Resettable::reset(&mut *self.adc.lock().expect("adc"), bus);
         Resettable::reset(&mut *self.irq.lock().expect("irq"), bus);
         Resettable::reset(&mut *self.semihosting.lock().expect("semihosting"), bus);
         Resettable::reset(&mut self.core, bus);
@@ -213,6 +234,18 @@ impl HasMemoryMap for Rl78G23Core {
                 Box::new(GpioMmio::new(Arc::clone(&self.gpio), GpioWindow::Other1)),
             )?
             .map(
+                ADC_ADCR,
+                Box::new(AdcMmio::new(Arc::clone(&self.adc), AdcWindow::Adcr)),
+            )?
+            .map(
+                ADC_ADM,
+                Box::new(AdcMmio::new(Arc::clone(&self.adc), AdcWindow::Adm)),
+            )?
+            .map(
+                ADC_EXT,
+                Box::new(AdcMmio::new(Arc::clone(&self.adc), AdcWindow::Ext)),
+            )?
+            .map(
                 SEMIHOSTING,
                 Box::new(SemihostingMmio::new(Arc::clone(&self.semihosting))),
             )
@@ -227,6 +260,8 @@ struct PackagePins {
     /// Pad level driven by the port block. Shared so a later [`Wire::source`]
     /// on [`R7F100Gxl::gpio_output`] is the port the core drives.
     output: [Arc<Mutex<SourcePort<DigitalLevel>>>; PINS],
+    /// Analog voltage into the ADC (`ANI0` is index 0).
+    analog: [SourcePort<AnalogVoltage>; ADC_SOURCES],
 }
 
 /// Connect each package pin to the core port block.
@@ -251,7 +286,18 @@ fn wire_package_pins(core: &Rl78G23Core) -> PackagePins {
                 });
         }
     }
-    PackagePins { input, output }
+    let mut analog = std::array::from_fn(|_| SourcePort::new());
+    for (channel, port) in analog.iter_mut().enumerate() {
+        let adc = Arc::clone(&core.adc);
+        let _analog = Wire::new()
+            .source(port)
+            .sink(move |values, changed| AdcUnit::on_channel(&adc, channel, values, changed));
+    }
+    PackagePins {
+        input,
+        output,
+        analog,
+    }
 }
 
 /// R7F100GxL: G23 core, this part's ROM/RAM windows, and the package pins.
@@ -291,6 +337,12 @@ impl R7F100Gxl {
     #[must_use]
     pub fn gpio_output(&self, pin: usize) -> Arc<Mutex<SourcePort<DigitalLevel>>> {
         Arc::clone(&self.pins.output[pin])
+    }
+
+    /// Analog input for ADC slot `channel` (`0` is ANI0). Already wired into the converter.
+    #[must_use]
+    pub fn adc_input(&self, channel: usize) -> SourcePort<AnalogVoltage> {
+        self.pins.analog[channel].clone()
     }
 }
 
