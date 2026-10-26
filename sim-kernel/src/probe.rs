@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::virtual_time::virtual_time_ns;
-use crate::wiring::{DigitalLevel, UartFrame};
+use crate::wiring::{AnalogVoltage, DigitalLevel, UartFrame};
 
 /// When a [`ProbeTap`] accepts a driven value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +118,7 @@ where
 pub enum ProbePoint {
     Digital(Arc<ProbeTap<DigitalLevel>>),
     Uart(Arc<ProbeTap<UartFrame>>),
+    Analog(Arc<ProbeTap<AnalogVoltage>>),
 }
 
 impl ProbePoint {
@@ -126,6 +127,7 @@ impl ProbePoint {
         match self {
             Self::Digital(tap) => tap.name(),
             Self::Uart(tap) => tap.name(),
+            Self::Analog(tap) => tap.name(),
         }
     }
 }

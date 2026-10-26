@@ -1,5 +1,11 @@
 [workspace]
-members = ["hw/cpus/*", "boards/rl78-minimal-board", "sim-kernel", "sim-cluster"]
+members = [
+    "hw/cpus/*",
+    "hw/dac",
+    "boards/rl78-minimal-board",
+    "sim-kernel",
+    "sim-cluster",
+]
 resolver = "3"
 
 [workspace.package]

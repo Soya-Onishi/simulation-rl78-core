@@ -145,6 +145,7 @@ impl ProbeQueryRecord {
             kind: match record.kind {
                 ProbeKind::Digital => 1,
                 ProbeKind::Uart => 2,
+                ProbeKind::Analog => 3,
             },
             _pad: 0,
         }

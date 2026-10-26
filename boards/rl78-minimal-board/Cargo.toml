@@ -10,6 +10,7 @@ name = "rl78-minimal-board"
 path = "src/main.rs"
 
 [dependencies]
+dac = { path = "../../hw/dac" }
 rl78 = { path = "../../hw/cpus/rl78" }
 sim-cluster = { path = "../../sim-cluster" }
 sim-kernel = { path = "../../sim-kernel" }

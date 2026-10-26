@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use iceoryx2::prelude::Node;
 
 use crate::ipc::{
-    IpcError, ProbeDigitalSample, ProbeDigitalSub, ProbeUartSample, ProbeUartSub,
-    open_digital_subscriber, open_uart_subscriber, probe_id_hash,
+    IpcError, ProbeAnalogSample, ProbeAnalogSub, ProbeDigitalSample, ProbeDigitalSub,
+    ProbeUartSample, ProbeUartSub, open_analog_subscriber, open_digital_subscriber,
+    open_uart_subscriber, probe_id_hash,
 };
 use crate::probe::{PROBE_NAME_CAP, ProbeAdvertisement, ProbeWireKind};
 
@@ -26,6 +27,7 @@ pub struct ProbeCatalogEntry {
 pub enum ProbeSample {
     Digital(ProbeDigitalSample),
     Uart(ProbeUartSample),
+    Analog(ProbeAnalogSample),
 }
 
 /// Failures from arbiter probe subscribe helpers.
@@ -44,6 +46,7 @@ pub enum ArbiterProbeError {
 enum LiveSub {
     Digital(ProbeDigitalSub),
     Uart(ProbeUartSub),
+    Analog(ProbeAnalogSub),
 }
 
 /// Catalog + optional live subscribers for probe samples.
@@ -140,6 +143,12 @@ impl ArbiterProbeHub {
                 entry.board_hash,
                 entry.name_hash,
             )?),
+            ProbeWireKind::Analog => LiveSub::Analog(open_analog_subscriber(
+                node,
+                &self.cluster_key,
+                entry.board_hash,
+                entry.name_hash,
+            )?),
         };
         self.subs.insert(probe_id, sub);
         Ok(())
@@ -209,6 +218,17 @@ impl ArbiterProbeHub {
                             .map_err(|e| IpcError::Message(format!("probe uart recv: {e:?}")))?
                         {
                             Some(sample) => out.push(ProbeSample::Uart(*sample)),
+                            None => break,
+                        }
+                    }
+                }
+                LiveSub::Analog(s) => {
+                    for _ in 0..limit_per_probe {
+                        match s
+                            .receive()
+                            .map_err(|e| IpcError::Message(format!("probe analog recv: {e:?}")))?
+                        {
+                            Some(sample) => out.push(ProbeSample::Analog(*sample)),
                             None => break,
                         }
                     }

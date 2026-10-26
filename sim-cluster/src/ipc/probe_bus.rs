@@ -4,7 +4,7 @@ use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
 
-use sim_kernel::{DigitalLevel, UartFrame};
+use sim_kernel::{AnalogVoltage, DigitalLevel, UartFrame};
 
 use super::names;
 use super::runtime::IpcError;
@@ -51,10 +51,21 @@ pub struct ProbeUartSample {
     pub value: UartFrame,
 }
 
+/// Analog probe sample on the wire (`value` is microvolts).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
+pub struct ProbeAnalogSample {
+    pub probe_id: u64,
+    pub virtual_time_ns: u64,
+    pub value: AnalogVoltage,
+}
+
 pub type ProbeDigitalPub = Publisher<ipc::Service, ProbeDigitalSample, ()>;
 pub type ProbeDigitalSub = Subscriber<ipc::Service, ProbeDigitalSample, ()>;
 pub type ProbeUartPub = Publisher<ipc::Service, ProbeUartSample, ()>;
 pub type ProbeUartSub = Subscriber<ipc::Service, ProbeUartSample, ()>;
+pub type ProbeAnalogPub = Publisher<ipc::Service, ProbeAnalogSample, ()>;
+pub type ProbeAnalogSub = Subscriber<ipc::Service, ProbeAnalogSample, ()>;
 
 /// Open or create a digital probe publisher for `(board_hash, name_hash)`.
 pub fn open_digital_publisher(
@@ -89,6 +100,17 @@ pub fn open_digital_subscriber(
     open_digital_subscriber_named(node, &name, PROBE_BUFFER)
 }
 
+/// Open or create an analog probe publisher for `(board_hash, name_hash)`.
+pub fn open_analog_publisher(
+    node: &Node<ipc::Service>,
+    cluster_key: &str,
+    board_hash: u64,
+    name_hash: u64,
+) -> Result<ProbeAnalogPub, IpcError> {
+    let name = names::probe(cluster_key, board_hash, name_hash);
+    open_analog_publisher_named(node, &name, PROBE_BUFFER)
+}
+
 /// Open or create a UART probe subscriber.
 pub fn open_uart_subscriber(
     node: &Node<ipc::Service>,
@@ -98,6 +120,17 @@ pub fn open_uart_subscriber(
 ) -> Result<ProbeUartSub, IpcError> {
     let name = names::probe(cluster_key, board_hash, name_hash);
     open_uart_subscriber_named(node, &name, PROBE_BUFFER)
+}
+
+/// Open or create an analog probe subscriber.
+pub fn open_analog_subscriber(
+    node: &Node<ipc::Service>,
+    cluster_key: &str,
+    board_hash: u64,
+    name_hash: u64,
+) -> Result<ProbeAnalogSub, IpcError> {
+    let name = names::probe(cluster_key, board_hash, name_hash);
+    open_analog_subscriber_named(node, &name, PROBE_BUFFER)
 }
 
 fn open_digital_publisher_named(
@@ -192,6 +225,52 @@ fn open_uart_subscriber_named(
         .map_err(|e| IpcError::Message(format!("probe subscriber {name}: {e:?}")))
 }
 
+fn open_analog_publisher_named(
+    node: &Node<ipc::Service>,
+    name: &str,
+    capacity: usize,
+) -> Result<ProbeAnalogPub, IpcError> {
+    let svc_name: ServiceName = name
+        .try_into()
+        .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
+    let svc = node
+        .service_builder(&svc_name)
+        .publish_subscribe::<ProbeAnalogSample>()
+        .max_publishers(1)
+        .max_subscribers(1)
+        .max_nodes(16)
+        .subscriber_max_buffer_size(capacity)
+        .enable_safe_overflow(true)
+        .open_or_create()
+        .map_err(|e| IpcError::Message(format!("open_or_create probe pub {name}: {e:?}")))?;
+    svc.publisher_builder()
+        .create()
+        .map_err(|e| IpcError::Message(format!("probe publisher {name}: {e:?}")))
+}
+
+fn open_analog_subscriber_named(
+    node: &Node<ipc::Service>,
+    name: &str,
+    capacity: usize,
+) -> Result<ProbeAnalogSub, IpcError> {
+    let svc_name: ServiceName = name
+        .try_into()
+        .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
+    let svc = node
+        .service_builder(&svc_name)
+        .publish_subscribe::<ProbeAnalogSample>()
+        .max_publishers(1)
+        .max_subscribers(1)
+        .max_nodes(16)
+        .subscriber_max_buffer_size(capacity)
+        .enable_safe_overflow(true)
+        .open_or_create()
+        .map_err(|e| IpcError::Message(format!("open_or_create probe sub {name}: {e:?}")))?;
+    svc.subscriber_builder()
+        .create()
+        .map_err(|e| IpcError::Message(format!("probe subscriber {name}: {e:?}")))
+}
+
 /// Best-effort publish; loan/send failure drops the sample.
 pub fn send_digital(puber: &ProbeDigitalPub, sample: ProbeDigitalSample) {
     if let Err(e) = puber.send_copy(sample) {
@@ -203,6 +282,13 @@ pub fn send_digital(puber: &ProbeDigitalPub, sample: ProbeDigitalSample) {
 pub fn send_uart(puber: &ProbeUartPub, sample: ProbeUartSample) {
     if let Err(e) = puber.send_copy(sample) {
         log::warn!("probe uart send dropped: {e:?}");
+    }
+}
+
+/// Best-effort publish; loan/send failure drops the sample.
+pub fn send_analog(puber: &ProbeAnalogPub, sample: ProbeAnalogSample) {
+    if let Err(e) = puber.send_copy(sample) {
+        log::warn!("probe analog send dropped: {e:?}");
     }
 }
 

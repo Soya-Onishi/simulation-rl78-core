@@ -25,6 +25,7 @@ const SPILL_REC: usize = 8 + 8 + 1 + 2;
 pub enum ProbeKind {
     Digital,
     Uart,
+    Analog,
 }
 
 impl ProbeKind {
@@ -33,6 +34,7 @@ impl ProbeKind {
         match kind {
             1 => Some(Self::Digital),
             2 => Some(Self::Uart),
+            3 => Some(Self::Analog),
             _ => None,
         }
     }
@@ -42,6 +44,7 @@ impl ProbeKind {
         match self {
             Self::Digital => "digital",
             Self::Uart => "uart",
+            Self::Analog => "analog",
         }
     }
 }
@@ -54,7 +57,8 @@ pub struct ProbePointName {
     pub kind: ProbeKind,
 }
 
-/// One stored sample. `value` is a [`sim_kernel::DigitalLevel`] as `u16`, or a UART data word.
+/// One stored sample. `value` is a [`sim_kernel::DigitalLevel`] as `u16`, a UART
+/// data word, or analog millivolts (`µV / 1000`, clamped to `u16`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProbeRecord {
     pub probe_id: u64,
@@ -173,6 +177,7 @@ pub struct ProbeLog {
     running: bool,
     coarse_since: Instant,
     digital_last: HashMap<u64, ProbeRecord>,
+    analog_last: HashMap<u64, ProbeRecord>,
     uart_window: Vec<ProbeRecord>,
     latest: HashMap<u64, ProbeRecord>,
 }
@@ -198,6 +203,7 @@ impl ProbeLog {
             running: false,
             coarse_since: Instant::now(),
             digital_last: HashMap::new(),
+            analog_last: HashMap::new(),
             uart_window: Vec::new(),
             latest: HashMap::new(),
         }
@@ -218,6 +224,7 @@ impl ProbeLog {
         if !self.running && running {
             self.coarse_since = Instant::now();
             self.digital_last.clear();
+            self.analog_last.clear();
             self.uart_window.clear();
         }
         self.running = running;
@@ -241,6 +248,9 @@ impl ProbeLog {
             match record.kind {
                 ProbeKind::Digital => {
                     self.digital_last.insert(record.probe_id, record);
+                }
+                ProbeKind::Analog => {
+                    self.analog_last.insert(record.probe_id, record);
                 }
                 ProbeKind::Uart => self.uart_window.push(record),
             }
@@ -352,6 +362,7 @@ impl ProbeLog {
         buf[16] = match record.kind {
             ProbeKind::Digital => 1,
             ProbeKind::Uart => 2,
+            ProbeKind::Analog => 3,
         };
         buf[17..19].copy_from_slice(&record.value.to_le_bytes());
         file.write_all(&buf).is_ok()
@@ -359,6 +370,7 @@ impl ProbeLog {
 
     fn emit_coarse(&mut self) -> Vec<ProbeRecord> {
         let mut records: Vec<ProbeRecord> = self.digital_last.drain().map(|(_, rec)| rec).collect();
+        records.extend(self.analog_last.drain().map(|(_, rec)| rec));
         records.append(&mut self.uart_window);
         if records.is_empty() {
             return Vec::new();
@@ -401,6 +413,7 @@ pub fn display_value(kind: ProbeKind, value: u16) -> String {
         }
         .to_string(),
         ProbeKind::Uart => value.to_string(),
+        ProbeKind::Analog => value.to_string(),
     }
 }
 

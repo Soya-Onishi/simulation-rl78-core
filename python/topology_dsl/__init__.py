@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
-Payload = Literal["uart", "digital"]
+Payload = Literal["uart", "digital", "analog"]
 Direction = Literal["in", "out"]
 
 

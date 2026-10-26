@@ -15,13 +15,15 @@ use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::Node;
 use iceoryx2::prelude::ipc;
-use sim_kernel::{BoardPorts, OutPort, SourcePort, UartFrame};
+use sim_kernel::{AnalogVoltage, BoardPorts, OutPort, SourcePort, UartFrame};
 
-use crate::ipc::{IpcError, NodeUartPorts, edge_id};
+use crate::ipc::{IpcError, NodeAnalogPorts, NodeUartPorts, edge_id};
 use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, LogicalTopology, PayloadKind};
 
 type UartPub = Publisher<ipc::Service, UartFrame, ()>;
 type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
+type AnalogPub = Publisher<ipc::Service, AnalogVoltage, ()>;
+type AnalogSub = Subscriber<ipc::Service, AnalogVoltage, ()>;
 
 /// Failures from data-plane open / bind / pump.
 #[derive(Debug, thiserror::Error)]
@@ -282,6 +284,237 @@ impl DataPlane for UartDataPlane {
     }
 }
 
+struct AnalogRxLane {
+    sub: AnalogSub,
+    port: SourcePort<AnalogVoltage>,
+}
+
+struct AnalogTxLane {
+    port: OutPort<AnalogVoltage>,
+    pubs: Vec<AnalogPub>,
+}
+
+struct AnalogPendingRx {
+    edge_id: String,
+    ep: String,
+    sub: AnalogSub,
+}
+
+struct AnalogPendingTx {
+    ep: String,
+    edge_ids: Vec<String>,
+}
+
+/// Analog edge↔endpoint mapping opened before board ports exist.
+pub struct AnalogDataPlaneMap {
+    producers: HashMap<String, AnalogPub>,
+    pending_rx: Vec<AnalogPendingRx>,
+    pending_tx: Vec<AnalogPendingTx>,
+    required_ins: HashSet<String>,
+    required_outs: HashSet<String>,
+}
+
+impl AnalogDataPlaneMap {
+    pub fn open(
+        node: &Node<ipc::Service>,
+        cluster_key: &str,
+        board_id: &str,
+        board: &BoardSpec,
+        topo_edges: &[DirectedEdge],
+    ) -> Result<Self, IpcError> {
+        let NodeAnalogPorts {
+            mut producers,
+            mut consumers,
+        } = NodeAnalogPorts::open_for_board(node, cluster_key, board_id, topo_edges)?;
+
+        let mut pending_rx = Vec::new();
+        let mut tx_ep_to_edges: HashMap<String, Vec<String>> = HashMap::new();
+
+        for edge in topo_edges {
+            if edge.payload != PayloadKind::Analog {
+                continue;
+            }
+            let id = edge_id(
+                &edge.from_board,
+                &edge.from_endpoint,
+                &edge.to_board,
+                &edge.to_endpoint,
+            );
+            match (
+                edge.to_board.as_str() == board_id,
+                edge.from_board.as_str() == board_id,
+            ) {
+                (true, _) => {
+                    let Some(sub) = consumers.remove(&id) else {
+                        return Err(IpcError::Message(format!(
+                            "missing analog consumer for {id}"
+                        )));
+                    };
+                    pending_rx.push(AnalogPendingRx {
+                        edge_id: id,
+                        ep: edge.to_endpoint.clone(),
+                        sub,
+                    });
+                }
+                (false, true) => {
+                    tx_ep_to_edges
+                        .entry(edge.from_endpoint.clone())
+                        .or_default()
+                        .push(id);
+                }
+                (false, false) => {}
+            }
+        }
+
+        let pending_tx: Vec<AnalogPendingTx> = tx_ep_to_edges
+            .into_iter()
+            .map(|(ep, edge_ids)| AnalogPendingTx { ep, edge_ids })
+            .collect();
+
+        let needed: HashSet<&str> = pending_tx
+            .iter()
+            .flat_map(|t| t.edge_ids.iter().map(String::as_str))
+            .collect();
+        producers.retain(|id, _| needed.contains(id.as_str()));
+
+        let mut required_ins = HashSet::new();
+        let mut required_outs = HashSet::new();
+        for ep in &board.endpoints {
+            if ep.payload != PayloadKind::Analog {
+                continue;
+            }
+            match ep.direction {
+                EndpointDirection::In => {
+                    required_ins.insert(ep.name.clone());
+                }
+                EndpointDirection::Out => {
+                    required_outs.insert(ep.name.clone());
+                }
+            }
+        }
+
+        Ok(Self {
+            producers,
+            pending_rx,
+            pending_tx,
+            required_ins,
+            required_outs,
+        })
+    }
+
+    pub fn bind(mut self, ports: &BoardPorts) -> Result<AnalogDataPlane, DataPlaneError> {
+        for name in &self.required_ins {
+            if ports.in_port::<AnalogVoltage>(name).is_none() {
+                return Err(DataPlaneError::Message(format!(
+                    "missing InPort<AnalogVoltage> for topology endpoint `{name}`"
+                )));
+            }
+        }
+        for name in &self.required_outs {
+            if ports.out_port::<AnalogVoltage>(name).is_none() {
+                return Err(DataPlaneError::Message(format!(
+                    "missing OutPort<AnalogVoltage> for topology endpoint `{name}`"
+                )));
+            }
+        }
+
+        let mut rx = Vec::with_capacity(self.pending_rx.len());
+        for pending in self.pending_rx {
+            let port = ports
+                .in_port::<AnalogVoltage>(&pending.ep)
+                .map(|p| p.port().clone())
+                .ok_or_else(|| {
+                    DataPlaneError::Message(format!(
+                        "analog rx: no InPort for endpoint `{}` (edge {})",
+                        pending.ep, pending.edge_id
+                    ))
+                })?;
+            rx.push(AnalogRxLane {
+                sub: pending.sub,
+                port,
+            });
+        }
+
+        let mut tx = Vec::with_capacity(self.pending_tx.len());
+        for pending in self.pending_tx {
+            let port = ports
+                .out_port::<AnalogVoltage>(&pending.ep)
+                .cloned()
+                .ok_or_else(|| {
+                    DataPlaneError::Message(format!(
+                        "analog tx: no OutPort for endpoint `{}`",
+                        pending.ep
+                    ))
+                })?;
+            let mut pubs = Vec::with_capacity(pending.edge_ids.len());
+            for edge_id in pending.edge_ids {
+                let puber = self.producers.remove(&edge_id).ok_or_else(|| {
+                    DataPlaneError::Message(format!("missing analog producer for {edge_id}"))
+                })?;
+                pubs.push(puber);
+            }
+            tx.push(AnalogTxLane { port, pubs });
+        }
+
+        Ok(AnalogDataPlane { rx, tx })
+    }
+}
+
+impl DataPlaneMap for AnalogDataPlaneMap {
+    fn bind(self: Box<Self>, ports: &BoardPorts) -> Result<Box<dyn DataPlane>, DataPlaneError> {
+        Ok(Box::new((*self).bind(ports)?))
+    }
+}
+
+/// Bound analog data plane for one board.
+pub struct AnalogDataPlane {
+    rx: Vec<AnalogRxLane>,
+    tx: Vec<AnalogTxLane>,
+}
+
+impl DataPlane for AnalogDataPlane {
+    fn pump_rx(&mut self) -> Result<(), DataPlaneError> {
+        for lane in &self.rx {
+            for _ in 0..64 {
+                match lane
+                    .sub
+                    .receive()
+                    .map_err(|e| DataPlaneError::Message(format!("analog recv: {e:?}")))?
+                {
+                    Some(sample) => lane.port.drive(*sample),
+                    None => break,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn pump_tx(&mut self) -> Result<(), DataPlaneError> {
+        for lane in &self.tx {
+            for sample in lane.port.drain_pending() {
+                for puber in &lane.pubs {
+                    if let Err(err) = puber.send_copy(sample) {
+                        log::warn!("analog tx try_send: {err:?}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn discard_rx(&mut self) -> Result<(), DataPlaneError> {
+        for lane in &self.rx {
+            while lane
+                .sub
+                .receive()
+                .map_err(|e| DataPlaneError::Message(format!("analog recv: {e:?}")))?
+                .is_some()
+            {}
+        }
+        Ok(())
+    }
+}
+
 /// Open every data-plane map needed by `board_id` for the given topology.
 pub fn open_data_planes(
     node: &Node<ipc::Service>,
@@ -307,6 +540,11 @@ pub fn open_data_planes(
                 let map = UartDataPlaneMap::open(node, cluster_key, board_id, board, &topo.edges)?;
                 maps.push(Box::new(map));
             }
+            PayloadKind::Analog => {
+                let map =
+                    AnalogDataPlaneMap::open(node, cluster_key, board_id, board, &topo.edges)?;
+                maps.push(Box::new(map));
+            }
             PayloadKind::Digital => {
                 // Out of scope for issue #62.
             }
@@ -327,7 +565,7 @@ pub fn bind_data_planes(
 mod tests {
     use std::time::Duration;
 
-    use sim_kernel::{BoardPorts, InPort, OutPort, UartFrame, Wire};
+    use sim_kernel::{AnalogVoltage, BoardPorts, InPort, OutPort, UartFrame, Wire};
 
     use super::*;
     use crate::ipc::{create_node, isolated_config, new_cluster_key};
@@ -486,5 +724,94 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(got, Some(frame));
+    }
+
+    fn analog_board(id: &str, out_name: &str, in_name: &str) -> BoardSpec {
+        BoardSpec {
+            id: id.into(),
+            kind: "rl78".into(),
+            elf: None,
+            endpoints: vec![
+                EndpointSpec {
+                    name: out_name.into(),
+                    direction: EndpointDirection::Out,
+                    payload: PayloadKind::Analog,
+                },
+                EndpointSpec {
+                    name: in_name.into(),
+                    direction: EndpointDirection::In,
+                    payload: PayloadKind::Analog,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn analog_dataplane_tx_ipc_rx_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = new_cluster_key();
+        let config = isolated_config(dir.path()).unwrap();
+        let topo = LogicalTopology {
+            boards: vec![
+                analog_board("a", "dac0", "ain"),
+                analog_board("p", "vout", "vin"),
+            ],
+            edges: vec![DirectedEdge {
+                from_board: "a".into(),
+                from_endpoint: "dac0".into(),
+                to_board: "p".into(),
+                to_endpoint: "vin".into(),
+                payload: PayloadKind::Analog,
+                uart_ring_len: None,
+            }],
+            margin_ns: 1_000,
+            headroom_threshold_ns: 500,
+            ready_timeout_ms: 1_000,
+        };
+        let na = create_node(&config, "adp-a").unwrap();
+        let np = create_node(&config, "adp-p").unwrap();
+        let map_a = AnalogDataPlaneMap::open(&na, &key, "a", &topo.boards[0], &topo.edges).unwrap();
+        let map_p = AnalogDataPlaneMap::open(&np, &key, "p", &topo.boards[1], &topo.edges).unwrap();
+        let sample = AnalogVoltage(5_000_000);
+
+        {
+            let mut ports_a = BoardPorts::new();
+            ports_a
+                .insert_out(OutPort::<AnalogVoltage>::new("dac0").unwrap())
+                .unwrap();
+            ports_a
+                .insert_in(InPort::<AnalogVoltage>::new("ain").unwrap())
+                .unwrap();
+            let mut plane_a = map_a.bind(&ports_a).unwrap();
+            ports_a
+                .out_port::<AnalogVoltage>("dac0")
+                .unwrap()
+                .on_input(&[sample], 0);
+            plane_a.pump_tx().unwrap();
+        }
+
+        let mut ports_p = BoardPorts::new();
+        let mut vin = InPort::<AnalogVoltage>::new("vin").unwrap();
+        let tap = OutPort::<AnalogVoltage>::new("vin_tap").unwrap();
+        let _wire = Wire::new().source(vin.port_mut()).sink({
+            let tap = tap.clone();
+            move |values, changed| tap.on_input(values, changed)
+        });
+        ports_p.insert_in(vin).unwrap();
+        ports_p
+            .insert_out(OutPort::<AnalogVoltage>::new("vout").unwrap())
+            .unwrap();
+        let mut plane_p = map_p.bind(&ports_p).unwrap();
+        let mut got = None;
+        for _ in 0..100 {
+            plane_p.pump_rx().unwrap();
+            let pending = tap.pending();
+            if !pending.is_empty() {
+                got = pending.into_iter().next();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got, Some(sample));
     }
 }
