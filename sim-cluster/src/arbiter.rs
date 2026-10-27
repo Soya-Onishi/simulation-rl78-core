@@ -48,6 +48,8 @@ pub enum ArbiterError {
 pub struct ArbiterOptions {
     pub topology_path: PathBuf,
     pub node_bin: PathBuf,
+    /// Plant node binary (`kind == "plant"`). Default: `minimal-plant` next to the arbiter.
+    pub plant_bin: PathBuf,
     /// Unique key for this cluster instance (iceoryx isolation + service names).
     pub cluster_key: String,
     /// Absolute iceoryx root path for this cluster.
@@ -65,6 +67,7 @@ impl ArbiterOptions {
         Ok(Self {
             topology_path,
             node_bin: exe_dir.join("rl78-minimal-board"),
+            plant_bin: exe_dir.join("minimal-plant"),
             cluster_key,
             iox_root,
         })
@@ -85,12 +88,7 @@ pub fn run_arbiter_with_topology(
     opts: &ArbiterOptions,
     topo: &LogicalTopology,
 ) -> Result<(), ArbiterError> {
-    if !opts.node_bin.is_file() {
-        return Err(ArbiterError::Message(format!(
-            "board binary not found at {} (build rl78-minimal-board or pass --node-bin)",
-            opts.node_bin.display()
-        )));
-    }
+    ensure_node_bins(opts, topo)?;
     run_host_session(opts, topo)
 }
 
@@ -618,10 +616,50 @@ fn analog_millivolts_u16(uv: i64) -> u16 {
     uv.saturating_div(1000).clamp(0, i64::from(u16::MAX)) as u16
 }
 
+fn binary_for_kind<'a>(opts: &'a ArbiterOptions, kind: &str) -> Result<&'a PathBuf, ArbiterError> {
+    match kind {
+        "rl78" => Ok(&opts.node_bin),
+        "plant" => Ok(&opts.plant_bin),
+        other => Err(ArbiterError::Message(format!(
+            "unknown board kind `{other}` (expected rl78 or plant)"
+        ))),
+    }
+}
+
+fn ensure_node_bins(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(), ArbiterError> {
+    let mut need_rl78 = false;
+    let mut need_plant = false;
+    for board in &topo.boards {
+        match board.kind.as_str() {
+            "rl78" => need_rl78 = true,
+            "plant" => need_plant = true,
+            other => {
+                return Err(ArbiterError::Message(format!(
+                    "unknown board kind `{other}` (expected rl78 or plant)"
+                )));
+            }
+        }
+    }
+    if need_rl78 && !opts.node_bin.is_file() {
+        return Err(ArbiterError::Message(format!(
+            "board binary not found at {} (build rl78-minimal-board or pass --node-bin)",
+            opts.node_bin.display()
+        )));
+    }
+    if need_plant && !opts.plant_bin.is_file() {
+        return Err(ArbiterError::Message(format!(
+            "plant binary not found at {} (build minimal-plant or pass --plant-bin)",
+            opts.plant_bin.display()
+        )));
+    }
+    Ok(())
+}
+
 fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Child>, ArbiterError> {
     let mut children = Vec::new();
     for board in &topo.boards {
-        let child = Command::new(&opts.node_bin)
+        let bin = binary_for_kind(opts, &board.kind)?;
+        let child = Command::new(bin)
             .arg("--board-id")
             .arg(&board.id)
             .arg("--cluster-key")
@@ -738,6 +776,20 @@ mod tests {
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[test]
+    fn binary_for_kind_selects_rl78_and_plant() {
+        let opts = ArbiterOptions {
+            topology_path: PathBuf::from("t.json"),
+            node_bin: PathBuf::from("/tmp/rl78-minimal-board"),
+            plant_bin: PathBuf::from("/tmp/minimal-plant"),
+            cluster_key: "k".into(),
+            iox_root: PathBuf::from("/tmp/iox"),
+        };
+        assert_eq!(binary_for_kind(&opts, "rl78").unwrap(), &opts.node_bin);
+        assert_eq!(binary_for_kind(&opts, "plant").unwrap(), &opts.plant_bin);
+        assert!(binary_for_kind(&opts, "avr").is_err());
+    }
 
     #[test]
     fn reset_raises_allowed_to_now_plus_margin() {

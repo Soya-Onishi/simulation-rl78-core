@@ -9,6 +9,7 @@ use sim_cluster::{ArbiterOptions, run_arbiter};
 fn main() {
     let mut topology: Option<PathBuf> = None;
     let mut node_bin: Option<PathBuf> = None;
+    let mut plant_bin: Option<PathBuf> = None;
     let mut cluster_key: Option<String> = None;
     let mut iox_root: Option<PathBuf> = None;
     let mut args = env::args().skip(1);
@@ -31,6 +32,13 @@ fn main() {
                     process::exit(2);
                 };
                 node_bin = Some(PathBuf::from(path));
+            }
+            "--plant-bin" => {
+                let Some(path) = args.next() else {
+                    eprintln!("cluster-arbiter: --plant-bin requires a path");
+                    process::exit(2);
+                };
+                plant_bin = Some(PathBuf::from(path));
             }
             "--cluster-key" => {
                 let Some(key) = args.next() else {
@@ -74,6 +82,9 @@ fn main() {
     if let Some(node_bin) = node_bin {
         opts.node_bin = node_bin;
     }
+    if let Some(plant_bin) = plant_bin {
+        opts.plant_bin = plant_bin;
+    }
     opts.cluster_key = cluster_key;
     opts.iox_root = iox_root;
 
@@ -84,10 +95,11 @@ fn main() {
 }
 
 fn usage() -> &'static str {
-    "Usage: cluster-arbiter --topology <logical.json> --cluster-key <key> --iox-root <path> [--node-bin <path>]\n\
+    "Usage: cluster-arbiter --topology <logical.json> --cluster-key <key> --iox-root <path> [--node-bin <path>] [--plant-bin <path>]\n\
      \n\
      Spawned by cluster-server. Host commands arrive on iceoryx `ctrl/s2a`
      and status is published on `status/a2s`. Logs use `log/a2s`.\n\
      The process stays up after stop until a shutdown command.\n\
-     Default board binary is rl78-minimal-board next to this executable.\n"
+     Default board binary is rl78-minimal-board next to this executable.\n\
+     Default plant binary is minimal-plant next to this executable.\n"
 }

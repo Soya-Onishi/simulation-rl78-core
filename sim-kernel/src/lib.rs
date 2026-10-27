@@ -15,9 +15,11 @@ mod clock;
 mod command;
 mod cpu;
 pub mod elf;
+mod entity;
 mod event;
 mod gdb;
 mod machine;
+mod plant;
 mod ports;
 mod probe;
 mod reset;
@@ -46,9 +48,11 @@ pub use cpu::{
     resolve_after_tlib_execute,
 };
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
+pub use entity::{AdvanceCtx, Entity, EntityPoll};
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use gdb::{GdbBindError, listen_gdb, parse_gdb_dev};
 pub use machine::Machine;
+pub use plant::{Model, Plant};
 pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
 pub use probe::{ProbePoint, ProbePolicy, ProbeSample, ProbeTap};
 pub use reset::Resettable;

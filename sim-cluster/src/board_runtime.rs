@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use sim_kernel::{
-    ActionFailure, BoardPorts, Command, Cpu, FirmwareError, Machine, ProbePoint, Response,
+    ActionFailure, BoardPorts, Command, Cpu, Entity, FirmwareError, Machine, ProbePoint, Response,
     SimConfig, SimState, Simulator, StopReason, Tick,
 };
 
@@ -150,11 +150,24 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
     }
 }
 
-/// Run the board framework with a machine built by `build`.
+/// Run the board framework with a [`Machine`] built by `build`.
 ///
 /// `build` assembles ROM/RAM (and peripherals) only — it must not load firmware.
 /// When the topology board entry has an `elf` source, this function loads those
-/// bytes and calls [`Machine::load_firmware`].
+/// bytes and calls [`Entity::load_firmware`].
+pub fn run_board<C: Cpu>(
+    opts: BoardOptions,
+    build: impl FnOnce() -> (Machine<C>, BoardPorts, Vec<ProbePoint>),
+) -> Result<(), BoardError> {
+    run_node(opts, build)
+}
+
+/// Run the node framework with an entity built by `build`.
+///
+/// `build` assembles the entity (board machine or plant) and board-edge ports.
+/// It must not load firmware. When the topology board entry has an `elf` source,
+/// this function loads those bytes and calls [`Entity::load_firmware`].
+/// An empty [`Entity::action_catalog`] skips advertise and [`service_actions`].
 ///
 /// The third return value is the wiring-side [`ProbePoint`] list. This function
 /// opens one publisher per point. Before the first [`ControlToArbiter::Ready`],
@@ -162,9 +175,9 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 ///
 /// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
 /// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
-pub fn run_board<C: Cpu>(
+pub fn run_node<E: Entity>(
     opts: BoardOptions,
-    build: impl FnOnce() -> (Machine<C>, BoardPorts, Vec<ProbePoint>),
+    build: impl FnOnce() -> (E, BoardPorts, Vec<ProbePoint>),
 ) -> Result<(), BoardError> {
     let board_id = opts.board_id.as_str();
     let board_hash = board_id_hash(board_id);
@@ -181,7 +194,7 @@ pub fn run_board<C: Cpu>(
     let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
     let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
 
-    let (machine, ports, probe_points) = build();
+    let (entity, ports, probe_points) = build();
     let mut probes = NodeProbeRuntime::open(
         &iox_node,
         &opts.cluster_key,
@@ -189,17 +202,17 @@ pub fn run_board<C: Cpu>(
         topo.boards.len(),
         probe_points,
     )?;
-    let mut sim = Simulator::new(machine, SimConfig::default());
+    let mut sim = Simulator::new(entity, SimConfig::default());
     if let Some(elf) = &board.elf {
         let image = elf_source::load(elf)?;
-        sim.machine_mut().load_firmware(&image)?;
+        sim.entity_mut().load_firmware(&image)?;
         log::info!(
             "loaded firmware {} ({} bytes)",
             elf_source::describe(elf),
             image.len()
         );
     }
-    sim.machine_mut().reset();
+    sim.entity_mut().reset();
     ports.clear_pending();
 
     let mut data_planes = bind_data_planes(plane_maps, &ports)?;
@@ -210,6 +223,7 @@ pub fn run_board<C: Cpu>(
     let mut last_time_report: Option<u64> = None;
     let mut probe_ads = Some(probes.advertisements().to_vec());
     let mut actions_advertised = false;
+    let mut has_actions = false;
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
@@ -227,13 +241,16 @@ pub fn run_board<C: Cpu>(
                 match effect {
                     NodeEffect::SendReady => {
                         if !actions_advertised {
-                            let catalog = sim.machine().action_catalog();
+                            let catalog = sim.entity().action_catalog();
+                            has_actions = !catalog.is_empty();
                             for entry in &catalog {
                                 let sample = ActionAdvertise::new(board_hash, entry)?;
                                 actions.publish_upstream(&ActionUpstream::Advertise(sample))?;
                             }
                             actions_advertised = true;
-                            log::info!("advertised {} action(s)", catalog.len());
+                            if has_actions {
+                                log::info!("advertised {} action(s)", catalog.len());
+                            }
                         }
                         if let Some(probes) = probe_ads.take() {
                             for adv in &probes {
@@ -263,12 +280,12 @@ pub fn run_board<C: Cpu>(
                     }
                     NodeEffect::Reset => {
                         last_time_report = None;
-                        sim.machine_mut().reset();
+                        sim.entity_mut().reset();
                         log::info!("simulator Reset");
                         for plane in &mut data_planes {
                             plane.discard_rx()?;
                         }
-                        log::info!("discarded queued uart rx");
+                        log::info!("discarded queued rx");
                     }
                     NodeEffect::ProbeWatch {
                         board_hash,
@@ -296,7 +313,9 @@ pub fn run_board<C: Cpu>(
             }
         }
 
-        service_actions(&actions, &mut sim, state, board_hash)?;
+        if has_actions {
+            service_actions(&actions, &mut sim, state, board_hash)?;
+        }
         probes.service_queries()?;
         probes.service_csv()?;
 
@@ -318,7 +337,7 @@ pub fn run_board<C: Cpu>(
 
             match sim.poll() {
                 Some(Response::Stopped(reason)) => {
-                    let virtual_time_ns = sim.machine().clock().now().0;
+                    let virtual_time_ns = sim.entity().now().0;
                     maybe_time_report(
                         &control,
                         board_hash,
@@ -345,7 +364,7 @@ pub fn run_board<C: Cpu>(
                     log::warn!("unexpected sim response {other:?}");
                 }
                 None => {
-                    let virtual_time_ns = sim.machine().clock().now().0;
+                    let virtual_time_ns = sim.entity().now().0;
                     maybe_time_report(
                         &control,
                         board_hash,
@@ -370,9 +389,9 @@ pub fn run_board<C: Cpu>(
 /// Every drained request is executed. [`ACTION_RECV_CAP`] is only how many
 /// samples the subscriber can hold; anything past that is dropped by the
 /// transport.
-fn service_actions(
+fn service_actions<E: Entity>(
     actions: &NodeActions,
-    sim: &mut Simulator<impl Cpu>,
+    sim: &mut Simulator<E>,
     state: NodeState,
     board_hash: u64,
 ) -> Result<(), BoardError> {
@@ -390,12 +409,12 @@ fn service_actions(
         }
         return Ok(());
     }
-    let now = sim.machine().clock().now();
-    sim.machine_mut().poll_actions(now);
+    let now = sim.entity().now();
+    sim.entity_mut().poll_actions(now);
 
     for req in mine {
-        let now = sim.machine().clock().now();
-        let status = match sim.machine_mut().apply_action(
+        let now = sim.entity().now();
+        let status = match sim.entity_mut().apply_action(
             req.device_hash,
             req.action_hash,
             now,

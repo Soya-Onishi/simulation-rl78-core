@@ -7,9 +7,11 @@ use crate::action::{ActionCatalogEntry, ActionFailure, Device, DeviceError};
 use crate::breakpoint::BreakpointStore;
 use crate::bus::{Addr, BusError, MemoryBus};
 use crate::clock::{Tick, VirtualClock};
-use crate::command::SimError;
+use crate::command::{Command, InspectResult, Response, SimError};
 use crate::cpu::{Core, Cpu, FirmwareError, RegId};
-use crate::event::{EventCtl, EventQueue};
+use crate::entity::{AdvanceCtx, Entity, EntityPoll};
+use crate::event::{EventCtl, EventCtx, EventQueue};
+use crate::stop::StopReason;
 
 /// Concrete machine owned exclusively by the simulation thread.
 ///
@@ -203,5 +205,202 @@ impl<C: Cpu> Machine<C> {
             self.bus.as_mut(),
             &mut self.breakpoints,
         )
+    }
+
+    fn fire_due_events(&mut self) -> Option<StopReason> {
+        loop {
+            let now = self.clock.now();
+            let Some((_id, mut event)) = self.events_mut().pop_due(now) else {
+                break;
+            };
+            let stop = {
+                let mut ctx = EventCtx {
+                    now,
+                    bus: self.bus_mut(),
+                    stop: None,
+                };
+                event.fire(&mut ctx);
+                ctx.stop
+            };
+            if let Some(stop) = stop {
+                return Some(stop);
+            }
+        }
+        None
+    }
+
+    fn sync_breakpoints(&mut self) {
+        let (cpu, _, breakpoints) = self.parts_mut();
+        let snapshot = breakpoints.as_slice().to_vec();
+        cpu.sync_breakpoints(&snapshot);
+    }
+
+    fn inspect_command(&mut self, cmd: Command) -> Response {
+        match cmd {
+            Command::ReadReg { id } => match self.read_reg(id) {
+                Ok(value) => Response::Inspect(InspectResult::Reg { id, value }),
+                Err(err) => Response::Error(err),
+            },
+            Command::WriteReg { id, value } => match self.write_reg(id, value) {
+                Ok(()) => Response::Inspect(InspectResult::Ok),
+                Err(err) => Response::Error(err),
+            },
+            Command::ReadMem { addr, len } => {
+                let mut data = vec![0u8; len as usize];
+                match self.read_mem(addr, &mut data) {
+                    Ok(()) => Response::Inspect(InspectResult::Mem { addr, data }),
+                    Err(err) => Response::Error(SimError::Bus(err)),
+                }
+            }
+            Command::WriteMem { addr, data } => match self.write_mem(addr, &data) {
+                Ok(()) => Response::Inspect(InspectResult::Ok),
+                Err(err) => Response::Error(SimError::Bus(err)),
+            },
+            Command::AddBreakpoint { addr } => {
+                let id = self.breakpoints_mut().insert(addr);
+                self.sync_breakpoints();
+                Response::Inspect(InspectResult::Breakpoint { id })
+            }
+            Command::RemoveBreakpoint { id } => {
+                if self.breakpoints_mut().remove(id) {
+                    self.sync_breakpoints();
+                    Response::Inspect(InspectResult::Ok)
+                } else {
+                    Response::Error(SimError::UnknownBreakpoint(id))
+                }
+            }
+            Command::ClearBreakpoints => {
+                self.breakpoints_mut().clear();
+                self.sync_breakpoints();
+                Response::Inspect(InspectResult::Ok)
+            }
+            Command::Start
+            | Command::Step
+            | Command::Stop
+            | Command::Quit
+            | Command::SetAllowed { .. }
+            | Command::NotifyHalt { .. } => {
+                unreachable!("lifecycle commands are handled in Simulator::command")
+            }
+        }
+    }
+}
+
+impl<C: Cpu> Entity for Machine<C> {
+    fn poll(&mut self, ctx: AdvanceCtx) -> EntityPoll {
+        if let Some(stop) = self.fire_due_events() {
+            return EntityPoll::Done(Response::Stopped(stop));
+        }
+
+        let now = self.clock().now();
+        if ctx.budget.is_zero() {
+            return EntityPoll::NoProgress;
+        }
+
+        let budget_ns = self
+            .events_mut()
+            .next_deadline()
+            .unwrap_or(Tick::MAX)
+            .saturating_sub(now)
+            .min(ctx.max_quantum)
+            .min(ctx.budget);
+
+        let Some(ns_per_insn) = self
+            .cpu()
+            .instruction_period()
+            .filter(|tick| !tick.is_zero())
+        else {
+            if budget_ns.is_zero() {
+                return EntityPoll::NoProgress;
+            }
+            self.advance_clock(budget_ns);
+            if let Some(stop) = self.fire_due_events() {
+                return EntityPoll::Done(Response::Stopped(stop));
+            }
+            return EntityPoll::Progressed;
+        };
+        if ns_per_insn > ctx.max_quantum {
+            return EntityPoll::Done(Response::Error(SimError::InstructionPeriodExceedsQuantum {
+                period: ns_per_insn,
+                max_quantum: ctx.max_quantum,
+            }));
+        }
+        let max_instructions = if ctx.step_once {
+            1
+        } else {
+            budget_ns
+                .saturating_div(ns_per_insn)
+                .min(u64::from(u32::MAX)) as u32
+        };
+        if max_instructions == 0 {
+            if budget_ns.is_zero() {
+                return EntityPoll::NoProgress;
+            }
+            self.advance_clock(budget_ns);
+            if let Some(stop) = self.fire_due_events() {
+                return EntityPoll::Done(Response::Stopped(stop));
+            }
+            return EntityPoll::Progressed;
+        }
+
+        let result = {
+            let (cpu, _, _) = self.parts_mut();
+            cpu.run_quantum(max_instructions)
+        };
+        if result.instructions == 0 && result.stop.is_none() {
+            return EntityPoll::NoProgress;
+        }
+        let elapsed = ns_per_insn.saturating_mul(result.instructions);
+        self.advance_clock(elapsed);
+
+        if let Some(access) = self.bus_mut().take_trap() {
+            return EntityPoll::Done(Response::Stopped(StopReason::Unmapped {
+                addr: access.addr,
+                write: access.write,
+            }));
+        }
+
+        if let Some(stop) = result.stop {
+            return EntityPoll::Done(Response::Stopped(stop));
+        }
+
+        if let Some(stop) = self.fire_due_events() {
+            return EntityPoll::Done(Response::Stopped(stop));
+        }
+        EntityPoll::Progressed
+    }
+
+    fn reset(&mut self) {
+        Machine::reset(self);
+    }
+
+    fn now(&self) -> Tick {
+        self.clock().now()
+    }
+
+    fn inspect(&mut self, cmd: Command) -> Response {
+        self.inspect_command(cmd)
+    }
+
+    fn load_firmware(&mut self, image: &[u8]) -> Result<(), FirmwareError> {
+        Machine::load_firmware(self, image)
+    }
+
+    fn action_catalog(&self) -> Vec<ActionCatalogEntry> {
+        Machine::action_catalog(self)
+    }
+
+    fn poll_actions(&mut self, now: Tick) {
+        Machine::poll_actions(self, now);
+    }
+
+    fn apply_action(
+        &mut self,
+        device_hash: u64,
+        action_hash: u64,
+        now: Tick,
+        raw: &[(u64, f64)],
+    ) -> Result<(), ActionFailure> {
+        Machine::apply_action(self, device_hash, action_hash, now, raw)
     }
 }
