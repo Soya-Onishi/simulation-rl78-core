@@ -382,10 +382,11 @@ impl AdcUnit {
         raw.min(max) << shift
     }
 
-    fn range_threshold(&self, range: u8) -> u16 {
+    /// Bits compared with `ADUL`/`ADLL` (hardware `ADCRH`).
+    fn comparison_bits(&self, adcr: u16) -> u8 {
         match self.resolution {
-            Resolution::Bits8 | Resolution::Bits10 => u16::from(range) << 8,
-            Resolution::Bits12 => u16::from(range) << 4,
+            Resolution::Bits8 | Resolution::Bits10 => ((adcr >> 8) & 0xFF) as u8,
+            Resolution::Bits12 => ((adcr >> 4) & 0xFF) as u8,
         }
     }
 
@@ -395,12 +396,11 @@ impl AdcUnit {
         if self.scan_index == 0 {
             self.adcr = result;
         }
-        let adul = self.range_threshold(self.adul);
-        let adll = self.range_threshold(self.adll);
+        let compared = self.comparison_bits(result);
         let is_valid = if self.interrupt_in_range {
-            adll <= self.adcr && self.adcr <= adul
+            self.adll <= compared && compared <= self.adul
         } else {
-            self.adcr < adll || adul <= self.adcr
+            compared < self.adll || self.adul <= compared
         };
         if is_valid {
             self.scan_adcr[self.scan_index as usize] = result;
@@ -653,10 +653,7 @@ impl AdcUnit {
     }
 
     fn read_adcrh(&self) -> u8 {
-        match self.resolution {
-            Resolution::Bits12 => ((self.adcr >> 4) & 0xFF) as u8,
-            _ => ((self.adcr >> 8) & 0xFF) as u8,
-        }
+        self.comparison_bits(self.adcr)
     }
 
     fn read_adcrn(&self, select: usize) -> u16 {
@@ -664,11 +661,7 @@ impl AdcUnit {
     }
 
     fn read_adcrnh(&self, select: usize) -> u8 {
-        let value = self.read_adcrn(select);
-        match self.resolution {
-            Resolution::Bits12 => ((value >> 4) & 0xFF) as u8,
-            _ => ((value >> 8) & 0xFF) as u8,
-        }
+        self.comparison_bits(self.read_adcrn(select))
     }
 
     fn read_adcr_window(&self, offset: u64, buf: &mut [u8]) -> Result<(), BusError> {
@@ -1017,11 +1010,50 @@ mod tests {
         assert_eq!(read_u16(&mut bus, ADCR) >> 6, 0x03FF);
     }
 
+    fn oneshot_irq_count(adc: &Arc<Mutex<AdcUnit>>, ctl: &EventCtl, adm2: u8) -> u32 {
+        let seen = Arc::new(Mutex::new(0u32));
+        let recorded = Arc::clone(&seen);
+        let _irq = {
+            let mut g = adc.lock().unwrap();
+            Wire::new()
+                .source(g.irq_source())
+                .sink(move |_, _| *recorded.lock().unwrap() += 1)
+        };
+        let mut bus = mapped(adc);
+        bus.write(ADM2, &[adm2]).unwrap();
+        bus.write(ADM1, &[0x20]).unwrap();
+        bus.write(ADM0, &[0x80]).unwrap();
+        pump(&mut bus, ctl, Tick(72_000));
+        *seen.lock().unwrap()
+    }
+
     #[test]
     fn oneshot_pulses_irq() {
         let ctl = EventCtl::new();
         let adc = Arc::new(Mutex::new(AdcUnit::new(ctl.clone(), running_clock())));
         adc.lock().unwrap().set_voltage(0, AnalogVoltage(2_500_000));
+        assert_eq!(oneshot_irq_count(&adc, &ctl, 0x00), 1);
+    }
+
+    #[test]
+    fn full_scale_is_in_range_for_each_resolution() {
+        for adm2 in [0x00, 0x01, 0x02] {
+            let ctl = EventCtl::new();
+            let adc = Arc::new(Mutex::new(AdcUnit::new(ctl.clone(), running_clock())));
+            adc.lock().unwrap().set_voltage(0, AnalogVoltage(5_000_000));
+            assert_eq!(
+                oneshot_irq_count(&adc, &ctl, adm2),
+                1,
+                "ADM2={adm2:#04x} full-scale should raise INTAD"
+            );
+        }
+    }
+
+    #[test]
+    fn ten_bit_full_scale_is_out_of_range_when_adul_is_fe() {
+        let ctl = EventCtl::new();
+        let adc = Arc::new(Mutex::new(AdcUnit::new(ctl.clone(), running_clock())));
+        adc.lock().unwrap().set_voltage(0, AnalogVoltage(5_000_000));
         let seen = Arc::new(Mutex::new(0u32));
         let recorded = Arc::clone(&seen);
         let _irq = {
@@ -1031,9 +1063,11 @@ mod tests {
                 .sink(move |_, _| *recorded.lock().unwrap() += 1)
         };
         let mut bus = mapped(&adc);
+        bus.write(ADUL, &[0xFE]).unwrap();
         bus.write(ADM1, &[0x20]).unwrap();
         bus.write(ADM0, &[0x80]).unwrap();
         pump(&mut bus, &ctl, Tick(72_000));
-        assert_eq!(*seen.lock().unwrap(), 1);
+        assert_eq!(*seen.lock().unwrap(), 0);
+        assert_eq!(read_u16(&mut bus, ADCR) >> 6, 0x03FF);
     }
 }
