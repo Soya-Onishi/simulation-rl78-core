@@ -83,8 +83,8 @@ fn convert(level: DigitalLevel, last: &Mutex<AnalogVoltage>) -> AnalogVoltage {
 
 impl Resettable for LevelDac {
     fn reset(&mut self, _bus: &mut MemoryBus) {
-        *self.last.lock().expect("dac last") = AnalogVoltage(0);
-        self.analog.drive(AnalogVoltage(0));
+        let v = *self.last.lock().expect("dac last");
+        self.analog.drive(v);
     }
 }
 
@@ -152,15 +152,21 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_held_voltage() {
+    fn reset_redrives_held_voltage() {
         let (mut dac, analog) = wired_dac();
         dac.drive(DigitalLevel::High);
         analog.clear_pending();
         let mut bus = empty_bus();
         dac.reset(&mut bus);
-        assert_eq!(analog.pending().last().copied(), Some(AnalogVoltage(0)));
+        assert_eq!(
+            analog.pending().last().copied(),
+            Some(AnalogVoltage(HIGH_UV))
+        );
         analog.clear_pending();
-        assert_eq!(dac.drive(DigitalLevel::HiZ), AnalogVoltage(0));
-        assert_eq!(analog.pending().last().copied(), Some(AnalogVoltage(0)));
+        assert_eq!(dac.drive(DigitalLevel::HiZ), AnalogVoltage(HIGH_UV));
+        assert_eq!(
+            analog.pending().last().copied(),
+            Some(AnalogVoltage(HIGH_UV))
+        );
     }
 }
