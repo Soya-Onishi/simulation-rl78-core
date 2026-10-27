@@ -149,6 +149,8 @@ pub struct AdcUnit {
     adcr: u16,
     scan_adcr: [u16; SCAN_CHANNELS],
     scan_index: u8,
+    /// Any conversion in the current scan (or select) was inside the ADUL/ADLL window.
+    range_hit: bool,
     test_target: TestTarget,
     voltages: [AnalogVoltage; SOURCE_NUM],
     irq_out: SourcePort<()>,
@@ -182,6 +184,7 @@ impl AdcUnit {
             adcr: 0,
             scan_adcr: [0; SCAN_CHANNELS],
             scan_index: 0,
+            range_hit: false,
             test_target: TestTarget::Normal,
             voltages: [AnalogVoltage(0); SOURCE_NUM],
             irq_out: SourcePort::new(),
@@ -248,6 +251,7 @@ impl AdcUnit {
         self.adcr = 0;
         self.scan_adcr = [0; SCAN_CHANNELS];
         self.scan_index = 0;
+        self.range_hit = false;
         self.input_source = InputSource::Ani0;
         self.adul = 0xFF;
         self.adll = 0x00;
@@ -341,6 +345,7 @@ impl AdcUnit {
     fn start(&mut self, inner: &Arc<Mutex<AdcUnit>>) {
         self.cancel_pending();
         self.scan_index = 0;
+        self.range_hit = false;
         self.schedule(inner, self.first_duration());
     }
 
@@ -404,14 +409,18 @@ impl AdcUnit {
         };
         if is_valid {
             self.scan_adcr[self.scan_index as usize] = result;
+            self.range_hit = true;
         }
         let mut next = self.scan_index;
         if self.convert_mode == ConvertMode::Scan {
             next = (next + 1) % SCAN_CHANNELS as u8;
         }
         self.scan_index = next;
-        if next == 0 && is_valid {
-            self.irq_out.drive(());
+        if next == 0 {
+            if self.range_hit {
+                self.irq_out.drive(());
+            }
+            self.range_hit = false;
         }
         if self.operation_mode == OperationMode::Oneshot && next == 0 {
             self.conversion_running = false;
@@ -975,6 +984,82 @@ mod tests {
         assert_eq!(read_u8(&mut bus, ADM0), 0x40);
         assert_eq!(read_u16(&mut bus, ADCR0) >> 6, 0);
         assert_eq!(read_u16(&mut bus, ADCR0 + 2) >> 6, 0x0100);
+    }
+
+    fn scan_oneshot_irq_after(
+        adc: &Arc<Mutex<AdcUnit>>,
+        ctl: &EventCtl,
+        adul: u8,
+        adll: u8,
+    ) -> (u32, MemoryBus) {
+        let seen = Arc::new(Mutex::new(0u32));
+        let recorded = Arc::clone(&seen);
+        let _irq = {
+            let mut g = adc.lock().unwrap();
+            Wire::new()
+                .source(g.irq_source())
+                .sink(move |_, _| *recorded.lock().unwrap() += 1)
+        };
+        let mut bus = mapped(adc);
+        bus.write(ADUL, &[adul]).unwrap();
+        bus.write(ADLL, &[adll]).unwrap();
+        bus.write(ADM0, &[0x40]).unwrap();
+        bus.write(ADM1, &[0x20]).unwrap();
+        bus.write(ADS, &[0x00]).unwrap();
+        bus.write(ADM0, &[0xC0]).unwrap();
+        pump(&mut bus, ctl, Tick(1));
+        pump(&mut bus, ctl, Tick(72_000));
+        pump(&mut bus, ctl, Tick(140_000));
+        pump(&mut bus, ctl, Tick(208_000));
+        assert_eq!(*seen.lock().unwrap(), 0);
+        pump(&mut bus, ctl, Tick(276_000));
+        (*seen.lock().unwrap(), bus)
+    }
+
+    fn scan_channel_voltages(adc: &Arc<Mutex<AdcUnit>>) {
+        for i in 0..4 {
+            adc.lock()
+                .unwrap()
+                .set_voltage(i, AnalogVoltage(i64::from(i as u32) * 1_250_000));
+        }
+    }
+
+    #[test]
+    fn scan_irq_if_any_channel_in_range() {
+        let ctl = EventCtl::new();
+        let adc = Arc::new(Mutex::new(AdcUnit::new(ctl.clone(), running_clock())));
+        scan_channel_voltages(&adc);
+        // ADCRH of 0 V / 1.25 V / 2.5 V / 3.75 V is 0x00 / 0x40 / 0x80 / 0xC0.
+        let (irqs, mut bus) = scan_oneshot_irq_after(&adc, &ctl, 0x50, 0x00);
+        assert_eq!(irqs, 1);
+        assert_eq!(read_u16(&mut bus, ADCR0) >> 6, 0);
+        assert_eq!(read_u16(&mut bus, ADCR0 + 2) >> 6, 0x0100);
+        assert_eq!(read_u16(&mut bus, ADCR0 + 4), 0);
+        assert_eq!(read_u16(&mut bus, ADCR0 + 6), 0);
+    }
+
+    #[test]
+    fn scan_irq_when_only_last_channel_in_range() {
+        let ctl = EventCtl::new();
+        let adc = Arc::new(Mutex::new(AdcUnit::new(ctl.clone(), running_clock())));
+        scan_channel_voltages(&adc);
+        let (irqs, mut bus) = scan_oneshot_irq_after(&adc, &ctl, 0xFF, 0xC0);
+        assert_eq!(irqs, 1);
+        assert_eq!(read_u16(&mut bus, ADCR0), 0);
+        assert_eq!(read_u16(&mut bus, ADCR0 + 6) >> 6, 0x0300);
+    }
+
+    #[test]
+    fn scan_no_irq_when_every_channel_out_of_range() {
+        let ctl = EventCtl::new();
+        let adc = Arc::new(Mutex::new(AdcUnit::new(ctl.clone(), running_clock())));
+        scan_channel_voltages(&adc);
+        let (irqs, mut bus) = scan_oneshot_irq_after(&adc, &ctl, 0x30, 0x10);
+        assert_eq!(irqs, 0);
+        assert_eq!(read_u16(&mut bus, ADCR0), 0);
+        assert_eq!(read_u16(&mut bus, ADCR0 + 2), 0);
+        assert_eq!(read_u16(&mut bus, ADCR0 + 4), 0);
+        assert_eq!(read_u16(&mut bus, ADCR0 + 6), 0);
     }
 
     #[test]
