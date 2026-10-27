@@ -46,13 +46,31 @@ fn main() {
 /// `dac0`), and wiring-side [`ProbePoint`]s attached while the wires were built.
 ///
 /// `sw1` owns its [`sim_kernel::SourcePort`] and is wired to package pin P0.0.
-/// Package pin P0.1 drives [`LevelDac`] → analog `dac0`.
-/// Package pins are not board [`InPort`]s or [`OutPort`]s.
+/// Package pin P0.1 drives [`LevelDac`]; the board [`OutPort`] `dac0` is bound
+/// here, like UART0 TX. Package pins are not board [`InPort`]s or [`OutPort`]s.
 pub fn g23_machine() -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
     let ctl = EventCtl::new();
     let part = R7F100Gxl::new(ctl.clone());
     let (mut ports, mut probes) = wire_board_uart0(&part.core);
-    let dac = wire_dac0(&part, &mut ports, &mut probes);
+
+    let mut dac = LevelDac::new("dac0").expect("dac0");
+    let dac0 = OutPort::new("dac0").expect("dac0");
+    let tap = ProbeTap::new("dac0", sim_kernel::ProbePolicy::OnChange);
+    {
+        let analog = dac0.clone();
+        let _dac_tx = Wire::new()
+            .source(dac.source_mut())
+            .sink(move |values, changed| analog.on_input(values, changed))
+            .sink(tap.callback());
+    }
+    {
+        let gpio = part.gpio_output(1);
+        let mut src = gpio.lock().expect("p0.1");
+        let _dac_in = Wire::new().source(&mut src).sink(dac.callback());
+    }
+    ports.insert_out(dac0).expect("dac0");
+    probes.push(ProbePoint::Analog(tap));
+
     let bus = part
         .memory_map()
         .expect("g23 memory map")
@@ -71,23 +89,6 @@ pub fn g23_machine() -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
     let machine =
         Machine::with_devices(part, bus, ctl, vec![Box::new(sw1), Box::new(dac)]).expect("devices");
     (machine, ports, probes)
-}
-
-/// Wire P0.1 → [`LevelDac`] → analog board-edge `dac0`.
-fn wire_dac0(part: &R7F100Gxl, ports: &mut BoardPorts, probes: &mut Vec<ProbePoint>) -> LevelDac {
-    let dac = LevelDac::new("dac0").expect("dac0");
-    let analog = dac.out_port().clone();
-    let tap = ProbeTap::new("dac0", sim_kernel::ProbePolicy::OnChange);
-    {
-        let gpio = part.gpio_output(1);
-        let mut src = gpio.lock().expect("p0.1");
-        let _w = Wire::new()
-            .source(&mut src)
-            .sink(dac.and_then(tap.callback()));
-    }
-    ports.insert_out(analog).expect("dac0");
-    probes.push(ProbePoint::Analog(tap));
-    dac
 }
 
 /// Wire board-edge UART0 (`uart0_tx` / `uart0_rx`).
