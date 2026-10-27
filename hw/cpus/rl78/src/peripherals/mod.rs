@@ -1,5 +1,6 @@
-//! On-chip RL78 peripherals (clock, SAU, TAU, GPIO, IRQ) and sim-only semihosting.
+//! On-chip RL78 peripherals (clock, SAU, TAU, GPIO, ADC, IRQ) and sim-only semihosting.
 
+mod adc;
 mod clock;
 mod g23;
 pub(crate) mod gpio;
@@ -8,6 +9,7 @@ mod sau;
 mod semihosting;
 mod tau;
 
+pub use adc::{AdcUnit, SOURCE_NUM as ADC_SOURCES};
 pub use clock::{ClockGenerator, ClockOutputs, ClockTree, Cycles, Hertz};
 pub use g23::{R7F100Gxl, Rl78G23Core};
 pub use gpio::Gpio;

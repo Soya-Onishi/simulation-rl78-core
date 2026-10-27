@@ -9,7 +9,7 @@ RL78-specific core on top of `sim-kernel` + tlib.
 - `map`: `Rl78Device` / `MemoryLayout`; default `Generic64k` — ROM `0x00000` 64KiB, RAM `0xF0100` 32KiB (leaves `0xF0000` for probe).
 - `magic`: `MagicProbe` + `ProbeSink` (stdout or test buffer).
 - `elf`: load RL78 ELF into machine ROM (`object` crate); `EM_RL78`.
-- Crate name `rl78` at `hw/cpus/rl78`. Entry helpers: `minimal_machine` / `minimal_machine_with_probe` / `build_minimal_bus` (`Machine<Rl78Cpu>`, 1 ns/insn). SoC part is `R7F100Gxl` (`Cpu`, holds `Rl78Cpu` in `Rl78G23Core`). Board-edge wiring (`g23_machine`, `uart0_tx`/`uart0_rx`, `sw1`) lives in `rl78-minimal-board`, not this crate. GPIO is `peripherals/gpio.rs`; quantum uses `f_clk` period (32 MHz \u2192 31 ns). `Rl78G23Core::new` always builds `Rl78Cpu`. Tests that construct it must be `#[serial]` (one tlib seat per process).
+- Crate name `rl78` at `hw/cpus/rl78`. Entry helpers: `minimal_machine` / `minimal_machine_with_probe` / `build_minimal_bus` (`Machine<Rl78Cpu>`, 1 ns/insn). SoC part is `R7F100Gxl` (`Cpu`, holds `Rl78Cpu` in `Rl78G23Core`). Board-edge wiring (`g23_machine`, `uart0_tx`/`uart0_rx`, `sw1`) lives in `rl78-minimal-board`, not this crate. GPIO is `peripherals/gpio.rs`; ADC is `peripherals/adc.rs` (QEMU `hw/rl78/adc.c`; windows `0xFFF1E` / `0xFFF30` / `0xF0010`; analog via `AnalogVoltage` µV, `R7F100Gxl::adc_input`); quantum uses `f_clk` period (32 MHz \u2192 31 ns). `Rl78G23Core::new` always builds `Rl78Cpu`. Tests that construct it must be `#[serial]` (one tlib seat per process).
 
 ## Invariants
 - Do not hand-edit in-tree CMake build dirs; Cargo OUT_DIR owns tlib artifacts.
