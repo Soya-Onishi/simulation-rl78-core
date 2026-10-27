@@ -5,13 +5,13 @@
 
 use iceoryx2::prelude::Node;
 
-use sim_kernel::{DigitalLevel, ProbePoint, ProbeTap, UartFrame};
+use sim_kernel::{AnalogVoltage, DigitalLevel, ProbePoint, ProbeTap, UartFrame};
 
 use crate::ipc::{
-    CSV_CHUNKS_PER_TICK, IpcError, NodeProbeCsv, NodeProbeQuery, ProbeDigitalPub,
-    ProbeDigitalSample, ProbeQueryReplyWire, ProbeUartPub, ProbeUartSample, QUERY_CHUNK,
-    QUERY_KIND_LATEST, board_id_hash, open_digital_publisher, open_uart_publisher, probe_id_hash,
-    probe_name_hash, send_digital, send_uart,
+    CSV_CHUNKS_PER_TICK, IpcError, NodeProbeCsv, NodeProbeQuery, ProbeAnalogPub, ProbeAnalogSample,
+    ProbeDigitalPub, ProbeDigitalSample, ProbeQueryReplyWire, ProbeUartPub, ProbeUartSample,
+    QUERY_CHUNK, QUERY_KIND_LATEST, board_id_hash, open_analog_publisher, open_digital_publisher,
+    open_uart_publisher, probe_id_hash, probe_name_hash, send_analog, send_digital, send_uart,
 };
 use crate::probe_log::{ProbeKind, ProbeLog, ProbePointName, ProbeRange, ProbeRecord, load_export};
 
@@ -27,6 +27,7 @@ pub const PROBE_NAME_CAP: usize = 64;
 pub enum ProbeWireKind {
     Digital = 1,
     Uart = 2,
+    Analog = 3,
 }
 
 impl ProbeWireKind {
@@ -35,6 +36,7 @@ impl ProbeWireKind {
         match v {
             1 => Some(Self::Digital),
             2 => Some(Self::Uart),
+            3 => Some(Self::Analog),
             _ => None,
         }
     }
@@ -73,6 +75,15 @@ enum PublisherSlot {
         probe_id: u64,
         publisher: ProbeUartPub,
     },
+    Analog {
+        tap: std::sync::Arc<ProbeTap<AnalogVoltage>>,
+        probe_id: u64,
+        publisher: ProbeAnalogPub,
+    },
+}
+
+fn analog_millivolts(uv: i64) -> u16 {
+    uv.saturating_div(1000).clamp(0, i64::from(u16::MAX)) as u16
 }
 
 /// Iceoryx publishers for the probe points a board builder returned.
@@ -112,6 +123,15 @@ impl ProbePublishers {
                         publisher,
                     });
                 }
+                ProbePoint::Analog(tap) => {
+                    let publisher =
+                        open_analog_publisher(node, cluster_key, board_hash, adv.name_hash)?;
+                    slots.push(PublisherSlot::Analog {
+                        tap,
+                        probe_id: adv.probe_id,
+                        publisher,
+                    });
+                }
             }
         }
         Ok(Self { slots, ads })
@@ -138,6 +158,16 @@ impl ProbePublishers {
                             virtual_time_ns: sample.virtual_time_ns,
                             kind: ProbeKind::Uart,
                             value: sample.value.data,
+                        });
+                    }
+                }
+                PublisherSlot::Analog { tap, probe_id, .. } => {
+                    if let Some(sample) = tap.take_pending() {
+                        log.push(ProbeRecord {
+                            probe_id: *probe_id,
+                            virtual_time_ns: sample.virtual_time_ns,
+                            kind: ProbeKind::Analog,
+                            value: analog_millivolts(sample.value.0),
                         });
                     }
                 }
@@ -178,6 +208,21 @@ impl ProbePublishers {
                                 data: record.value,
                                 ..UartFrame::default()
                             },
+                        },
+                    );
+                    return;
+                }
+                PublisherSlot::Analog {
+                    probe_id,
+                    publisher,
+                    ..
+                } if *probe_id == record.probe_id => {
+                    send_analog(
+                        publisher,
+                        ProbeAnalogSample {
+                            probe_id: record.probe_id,
+                            virtual_time_ns: record.virtual_time_ns,
+                            value: AnalogVoltage(i64::from(record.value).saturating_mul(1000)),
                         },
                     );
                     return;
@@ -223,6 +268,22 @@ impl ProbePublishers {
                         );
                     }
                 }
+                PublisherSlot::Analog {
+                    tap,
+                    probe_id,
+                    publisher,
+                } => {
+                    if let Some(sample) = tap.take_pending() {
+                        send_analog(
+                            publisher,
+                            ProbeAnalogSample {
+                                probe_id: *probe_id,
+                                virtual_time_ns: sample.virtual_time_ns,
+                                value: sample.value,
+                            },
+                        );
+                    }
+                }
             }
         }
     }
@@ -249,6 +310,7 @@ fn plan(board_id: &str, points: &[ProbePoint]) -> Result<Vec<ProbeAdvertisement>
         let kind = match point {
             ProbePoint::Digital(_) => ProbeWireKind::Digital,
             ProbePoint::Uart(_) => ProbeWireKind::Uart,
+            ProbePoint::Analog(_) => ProbeWireKind::Analog,
         };
         ads.push(ProbeAdvertisement {
             name: name.to_string(),
@@ -296,6 +358,7 @@ impl NodeProbeRuntime {
                 kind: match adv.kind {
                     ProbeWireKind::Digital => ProbeKind::Digital,
                     ProbeWireKind::Uart => ProbeKind::Uart,
+                    ProbeWireKind::Analog => ProbeKind::Analog,
                 },
             });
         }

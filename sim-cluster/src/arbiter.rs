@@ -520,6 +520,12 @@ fn forward_probes(hub: &ArbiterProbeHub, tx: &ArbiterProbeForward) -> Result<(),
                 ProbeWireKind::Uart as u8,
                 sample.value.data,
             ),
+            ProbeSample::Analog(sample) => tx.publish_sample(
+                sample.probe_id,
+                sample.virtual_time_ns,
+                ProbeWireKind::Analog as u8,
+                analog_millivolts_u16(sample.value.0),
+            ),
         };
         result?;
     }
@@ -606,6 +612,10 @@ fn step_time_sync(
     }
 
     Ok(SyncStep::Continue)
+}
+
+fn analog_millivolts_u16(uv: i64) -> u16 {
+    uv.saturating_div(1000).clamp(0, i64::from(u16::MAX)) as u16
 }
 
 fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Child>, ArbiterError> {

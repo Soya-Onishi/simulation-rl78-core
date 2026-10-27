@@ -201,6 +201,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dac"
+version = "0.1.0"
+dependencies = [
+ "sim-kernel",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1141,6 +1148,7 @@ dependencies = [
 name = "rl78-minimal-board"
 version = "0.1.0"
 dependencies = [
+ "dac",
  "rl78",
  "serial_test",
  "sim-cluster",

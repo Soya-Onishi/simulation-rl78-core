@@ -1,0 +1,9 @@
+[package]
+name = "dac"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "1-bit level DAC: digital High/Low/HiZ to analog voltage"
+
+[dependencies]
+sim-kernel = { path = "../../sim-kernel" }

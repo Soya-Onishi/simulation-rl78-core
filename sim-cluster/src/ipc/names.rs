@@ -72,6 +72,13 @@ pub fn uart_edge(cluster_key: &str, edge_id: &str) -> String {
     format!("sim-cluster/{cluster_key}/uart/{digest:016x}")
 }
 
+/// Service name for one directed analog edge.
+#[must_use]
+pub fn analog_edge(cluster_key: &str, edge_id: &str) -> String {
+    let digest = xxh3_64(edge_id.as_bytes());
+    format!("sim-cluster/{cluster_key}/analog/{digest:016x}")
+}
+
 /// Service name for one board probe point.
 #[must_use]
 pub fn probe(cluster_key: &str, board_hash: u64, name_hash: u64) -> String {
@@ -161,6 +168,15 @@ mod tests {
         // Sanitizing both to underscores would collide; hashes must differ.
         assert_ne!(uart_edge("k", &a), uart_edge("k", &b));
         assert_eq!(uart_edge("k", &a), uart_edge("k", &a));
+    }
+
+    #[test]
+    fn analog_edge_names_distinguish_similar_edges() {
+        let a = edge_id("a", "dac0", "p", "vin");
+        let b = edge_id("a_dac0", "", "p_vin", "");
+        assert_ne!(analog_edge("k", &a), analog_edge("k", &b));
+        assert_eq!(analog_edge("k", &a), analog_edge("k", &a));
+        assert!(analog_edge("k", &a).contains("/analog/"));
     }
 
     #[test]

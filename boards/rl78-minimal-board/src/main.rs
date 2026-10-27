@@ -11,6 +11,7 @@ use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_board};
 
 use std::sync::Arc;
 
+use dac::LevelDac;
 use rl78::{R7F100Gxl, Rl78G23Core, SauUnit};
 use sim_kernel::{
     BoardPorts, EventCtl, HasMemoryMap, HoldSwitch, InPort, Machine, OutPort, ProbePoint, ProbeTap,
@@ -41,15 +42,35 @@ fn main() {
 
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
 ///
-/// Returns the machine, board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx`), and
-/// wiring-side [`ProbePoint`]s attached while the wires were built.
+/// Returns the machine, board-edge [`BoardPorts`] (`uart0_tx` / `uart0_rx` /
+/// `dac0`), and wiring-side [`ProbePoint`]s attached while the wires were built.
 ///
 /// `sw1` owns its [`sim_kernel::SourcePort`] and is wired to package pin P0.0.
-/// Package pins are not board [`InPort`]s or [`OutPort`]s.
+/// Package pin P0.1 drives [`LevelDac`]; the board [`OutPort`] `dac0` is bound
+/// here, like UART0 TX. Package pins are not board [`InPort`]s or [`OutPort`]s.
 pub fn g23_machine() -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
     let ctl = EventCtl::new();
     let part = R7F100Gxl::new(ctl.clone());
-    let (ports, probes) = wire_board_uart0(&part.core);
+    let (mut ports, mut probes) = wire_board_uart0(&part.core);
+
+    let mut dac = LevelDac::new("dac0").expect("dac0");
+    let dac0 = OutPort::new("dac0").expect("dac0");
+    let tap = ProbeTap::new("dac0", sim_kernel::ProbePolicy::OnChange);
+    {
+        let analog = dac0.clone();
+        let _dac_tx = Wire::new()
+            .source(dac.source_mut())
+            .sink(move |values, changed| analog.on_input(values, changed))
+            .sink(tap.callback());
+    }
+    {
+        let gpio = part.gpio_output(1);
+        let mut src = gpio.lock().expect("p0.1");
+        let _dac_in = Wire::new().source(&mut src).sink(dac.callback());
+    }
+    ports.insert_out(dac0).expect("dac0");
+    probes.push(ProbePoint::Analog(tap));
+
     let bus = part
         .memory_map()
         .expect("g23 memory map")
@@ -65,7 +86,8 @@ pub fn g23_machine() -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
                 pin.drive(level);
             }
         });
-    let machine = Machine::with_devices(part, bus, ctl, vec![Box::new(sw1)]).expect("sw1");
+    let machine =
+        Machine::with_devices(part, bus, ctl, vec![Box::new(sw1), Box::new(dac)]).expect("devices");
     (machine, ports, probes)
 }
 
@@ -114,5 +136,64 @@ mod tests {
         assert_eq!(catalog[0].action, "hold");
         assert_eq!(catalog[0].device_hash, sim_kernel::id_hash("sw1"));
         assert_eq!(catalog[0].action_hash, sim_kernel::id_hash("hold"));
+    }
+
+    #[serial]
+    #[test]
+    fn p01_level_dac_high_low_hiz() {
+        let (machine, ports, probes) = g23_machine();
+        assert!(
+            probes
+                .iter()
+                .any(|p| matches!(p, ProbePoint::Analog(tap) if tap.name() == "dac0"))
+        );
+        let dac0 = ports.out_port::<sim_kernel::AnalogVoltage>("dac0").unwrap();
+        machine
+            .cpu()
+            .core
+            .gpio
+            .lock()
+            .expect("gpio")
+            .out_source(1)
+            .drive(sim_kernel::DigitalLevel::High);
+        assert_eq!(
+            dac0.pending().last().copied(),
+            Some(sim_kernel::AnalogVoltage(dac::HIGH_UV))
+        );
+        dac0.clear_pending();
+        machine
+            .cpu()
+            .core
+            .gpio
+            .lock()
+            .expect("gpio")
+            .out_source(1)
+            .drive(sim_kernel::DigitalLevel::Low);
+        assert_eq!(
+            dac0.pending().last().copied(),
+            Some(sim_kernel::AnalogVoltage(0))
+        );
+        dac0.clear_pending();
+        machine
+            .cpu()
+            .core
+            .gpio
+            .lock()
+            .expect("gpio")
+            .out_source(1)
+            .drive(sim_kernel::DigitalLevel::High);
+        dac0.clear_pending();
+        machine
+            .cpu()
+            .core
+            .gpio
+            .lock()
+            .expect("gpio")
+            .out_source(1)
+            .drive(sim_kernel::DigitalLevel::HiZ);
+        assert_eq!(
+            dac0.pending().last().copied(),
+            Some(sim_kernel::AnalogVoltage(dac::HIGH_UV))
+        );
     }
 }

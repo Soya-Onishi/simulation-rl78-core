@@ -32,7 +32,10 @@ pub enum DigitalLevel {
 unsafe impl ZeroCopySend for DigitalLevel {}
 
 /// Analog voltage in microvolts, used as a [`Wire`] payload.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, ZeroCopySend)]
 pub struct AnalogVoltage(pub i64);
 
 /// UART stop-bit count carried on a [`UartFrame`].

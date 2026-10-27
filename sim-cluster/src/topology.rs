@@ -23,6 +23,7 @@ pub const DEFAULT_UART_RING_LEN: u32 = 256;
 pub enum PayloadKind {
     Uart,
     Digital,
+    Analog,
 }
 
 /// Direction of an external endpoint relative to the board.
