@@ -12,7 +12,8 @@ use crate::stop::StopReason;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Start,
-    /// Run exactly one instruction (or until a nested stop), then stop.
+    /// Run exactly one poll (one instruction on a [`crate::Machine`], or one
+    /// plant execution unit), then stop.
     Step,
     Stop,
     Quit,
@@ -78,6 +79,8 @@ pub enum SimError {
         period: Tick,
         max_quantum: Tick,
     },
+    /// Inspect command is not supported on this entity (e.g. a plant).
+    Unsupported,
 }
 
 /// Notifications and command completions produced by the simulation thread.
@@ -133,6 +136,7 @@ impl fmt::Display for SimError {
                 f,
                 "instruction period {period} exceeds max quantum {max_quantum}"
             ),
+            Self::Unsupported => write!(f, "command is not supported on this entity"),
         }
     }
 }

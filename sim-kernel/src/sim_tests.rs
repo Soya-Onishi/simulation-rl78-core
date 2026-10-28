@@ -31,7 +31,7 @@ fn empty_machine(cpu: ScriptedCpu) -> Machine<ScriptedCpu> {
     Machine::new(cpu, MemoryBus::new(), EventCtl::new())
 }
 
-fn run_until_stop(sim: &mut Simulator<ScriptedCpu>) -> Response {
+fn run_until_stop(sim: &mut Simulator<Machine<ScriptedCpu>>) -> Response {
     sim.command(Command::Start);
     loop {
         if let Some(response) = sim.poll() {

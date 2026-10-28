@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use crate::clock::Tick;
 use crate::command::{Command, InspectResult, Response, SimError};
-use crate::cpu::{Core, Cpu};
-use crate::event::EventCtx;
+use crate::cpu::Cpu;
+use crate::entity::{AdvanceCtx, Entity, EntityPoll};
 use crate::machine::Machine;
 use crate::stop::StopReason;
 
@@ -17,7 +17,7 @@ pub const DEFAULT_MAX_QUANTUM: Tick = Tick(10_000);
 /// Kernel run configuration.
 #[derive(Clone, Debug)]
 pub struct SimConfig {
-    /// Cap on virtual time advanced per [`Simulator::poll`].
+    /// Cap on virtual time advanced per [`Simulator::poll`] for a [`Machine`].
     pub max_quantum: Tick,
 }
 
@@ -46,22 +46,22 @@ pub trait BeforeQuantum: Send {
 }
 
 /// In-thread simulator. [`spawn`] runs this on a dedicated thread.
-pub struct Simulator<C: Cpu> {
-    machine: Machine<C>,
+pub struct Simulator<E: Entity> {
+    entity: E,
     state: SimState,
     cfg: SimConfig,
-    /// When true, the next quantum is capped to one instruction and then stops.
+    /// When true, the next poll completes as [`StopReason::Step`].
     step_once: bool,
     before_quantum: Option<Box<dyn BeforeQuantum>>,
     /// Multi-board ceiling: virtual time must not advance past this tick.
     allowed: Option<Tick>,
 }
 
-impl<C: Cpu> Simulator<C> {
+impl<E: Entity> Simulator<E> {
     #[must_use]
-    pub fn new(machine: Machine<C>, cfg: SimConfig) -> Self {
+    pub fn new(entity: E, cfg: SimConfig) -> Self {
         Self {
-            machine,
+            entity,
             state: SimState::Stopped,
             cfg,
             step_once: false,
@@ -93,7 +93,7 @@ impl<C: Cpu> Simulator<C> {
         let Some(allowed) = self.allowed else {
             return false;
         };
-        allowed.saturating_sub(self.machine.clock().now()).is_zero()
+        allowed.saturating_sub(self.entity.now()).is_zero()
     }
 
     #[must_use]
@@ -102,12 +102,12 @@ impl<C: Cpu> Simulator<C> {
     }
 
     #[must_use]
-    pub fn machine(&self) -> &Machine<C> {
-        &self.machine
+    pub fn entity(&self) -> &E {
+        &self.entity
     }
 
-    pub fn machine_mut(&mut self) -> &mut Machine<C> {
-        &mut self.machine
+    pub fn entity_mut(&mut self) -> &mut E {
+        &mut self.entity
     }
 
     /// Apply a control-plane command.
@@ -146,11 +146,16 @@ impl<C: Cpu> Simulator<C> {
                 // (RL78 STOP / WFI). GDB must not own this hook.
                 Response::Inspect(InspectResult::Ok)
             }
-            other => self.inspect(other),
+            other => {
+                if self.state == SimState::Running {
+                    return Response::Error(SimError::Running);
+                }
+                self.entity.inspect(other)
+            }
         }
     }
 
-    /// If running, fire due events and execute one CPU quantum.
+    /// If running, advance the entity by one execution unit.
     pub fn poll(&mut self) -> Option<Response> {
         if self.state != SimState::Running {
             return None;
@@ -160,126 +165,41 @@ impl<C: Cpu> Simulator<C> {
             hook.before_quantum();
         }
 
-        if let Some(response) = self.fire_due_events() {
-            return Some(response);
-        }
-
-        let now = self.machine.clock().now();
+        let now = self.entity.now();
         if let Some(allowed) = self.allowed
             && allowed.saturating_sub(now).is_zero()
         {
-            // Hard block at the multi-board ceiling until a new Allowed arrives.
             return None;
         }
 
-        let budget_ns = {
-            let mut budget = self
-                .machine
-                .events_mut()
-                .next_deadline()
-                .unwrap_or(Tick::MAX)
-                .saturating_sub(now)
-                .min(self.cfg.max_quantum);
-            if let Some(allowed) = self.allowed {
-                budget = budget.min(allowed.saturating_sub(now));
-            }
-            budget
+        let budget = match self.allowed {
+            Some(allowed) => allowed.saturating_sub(now),
+            None => Tick::MAX,
         };
-        let Some(ns_per_insn) = self
-            .machine
-            .cpu()
-            .instruction_period()
-            .filter(|tick| !tick.is_zero())
-        else {
-            // Clock stopped: retire nothing, but still reach the next deadline.
-            if budget_ns.is_zero() {
-                return None;
-            }
-            self.machine.advance_clock(budget_ns);
-            return self.fire_due_events();
+        let ctx = AdvanceCtx {
+            budget,
+            max_quantum: self.cfg.max_quantum,
+            step_once: self.step_once,
         };
-        if ns_per_insn > self.cfg.max_quantum {
-            // One instruction cannot fit in a quantum, so the CPU would never retire.
-            self.step_once = false;
-            self.state = SimState::Stopped;
-            return Some(Response::Error(SimError::InstructionPeriodExceedsQuantum {
-                period: ns_per_insn,
-                max_quantum: self.cfg.max_quantum,
-            }));
-        }
-        let max_instructions = if self.step_once {
-            1
-        } else {
-            budget_ns
-                .saturating_div(ns_per_insn)
-                .min(u64::from(u32::MAX)) as u32
-        };
-        if max_instructions == 0 {
-            // Less than one instruction remains before the next deadline or time
-            // ceiling. The period itself fits in `max_quantum` (checked above).
-            // Advancing by that remainder lets due events fire; returning without
-            // advancing would spin forever while Running.
-            if budget_ns.is_zero() {
-                return None;
+        match self.entity.poll(ctx) {
+            EntityPoll::NoProgress => None,
+            EntityPoll::Progressed => {
+                if self.step_once {
+                    self.step_once = false;
+                    self.state = SimState::Stopped;
+                    Some(Response::Stopped(StopReason::Step))
+                } else {
+                    None
+                }
             }
-            self.machine.advance_clock(budget_ns);
-            return self.fire_due_events();
-        }
-
-        let result = {
-            let (cpu, _, _) = self.machine.parts_mut();
-            cpu.run_quantum(max_instructions)
-        };
-        // Zero retired instructions with no stop is a normal engine exit
-        // (e.g. IRQ `exit_request`), not guest Halt — retry on the next poll.
-        if result.instructions == 0 && result.stop.is_none() {
-            return None;
-        }
-        let elapsed = ns_per_insn.saturating_mul(result.instructions);
-        self.machine.advance_clock(elapsed);
-
-        if let Some(access) = self.machine.bus_mut().take_trap() {
-            self.step_once = false;
-            self.state = SimState::Stopped;
-            return Some(Response::Stopped(StopReason::Unmapped {
-                addr: access.addr,
-                write: access.write,
-            }));
-        }
-
-        if let Some(stop) = result.stop {
-            return self.commit_stop(stop);
-        }
-
-        if self.step_once {
-            self.step_once = false;
-            self.state = SimState::Stopped;
-            return Some(Response::Stopped(StopReason::Step));
-        }
-
-        self.fire_due_events()
-    }
-
-    fn fire_due_events(&mut self) -> Option<Response> {
-        loop {
-            let now = self.machine.clock().now();
-            let Some((_id, mut event)) = self.machine.events_mut().pop_due(now) else {
-                break;
-            };
-            let stop = {
-                let mut ctx = EventCtx {
-                    now,
-                    bus: self.machine.bus_mut(),
-                    stop: None,
-                };
-                event.fire(&mut ctx);
-                ctx.stop
-            };
-            if let Some(stop) = stop {
-                return self.commit_stop(stop);
+            EntityPoll::Done(Response::Stopped(reason)) => self.commit_stop(reason),
+            EntityPoll::Done(Response::Error(err)) => {
+                self.step_once = false;
+                self.state = SimState::Stopped;
+                Some(Response::Error(err))
             }
+            EntityPoll::Done(other) => Some(other),
         }
-        None
     }
 
     /// Commit a stop reason from CPU or an event.
@@ -306,64 +226,16 @@ impl<C: Cpu> Simulator<C> {
             }
         }
     }
+}
 
-    fn inspect(&mut self, cmd: Command) -> Response {
-        if self.state == SimState::Running {
-            return Response::Error(SimError::Running);
-        }
-        match cmd {
-            Command::ReadReg { id } => match self.machine.read_reg(id) {
-                Ok(value) => Response::Inspect(InspectResult::Reg { id, value }),
-                Err(err) => Response::Error(err),
-            },
-            Command::WriteReg { id, value } => match self.machine.write_reg(id, value) {
-                Ok(()) => Response::Inspect(InspectResult::Ok),
-                Err(err) => Response::Error(err),
-            },
-            Command::ReadMem { addr, len } => {
-                let mut data = vec![0u8; len as usize];
-                match self.machine.read_mem(addr, &mut data) {
-                    Ok(()) => Response::Inspect(InspectResult::Mem { addr, data }),
-                    Err(err) => Response::Error(SimError::Bus(err)),
-                }
-            }
-            Command::WriteMem { addr, data } => match self.machine.write_mem(addr, &data) {
-                Ok(()) => Response::Inspect(InspectResult::Ok),
-                Err(err) => Response::Error(SimError::Bus(err)),
-            },
-            Command::AddBreakpoint { addr } => {
-                let id = self.machine.breakpoints_mut().insert(addr);
-                self.sync_breakpoints();
-                Response::Inspect(InspectResult::Breakpoint { id })
-            }
-            Command::RemoveBreakpoint { id } => {
-                if self.machine.breakpoints_mut().remove(id) {
-                    self.sync_breakpoints();
-                    Response::Inspect(InspectResult::Ok)
-                } else {
-                    Response::Error(SimError::UnknownBreakpoint(id))
-                }
-            }
-            Command::ClearBreakpoints => {
-                self.machine.breakpoints_mut().clear();
-                self.sync_breakpoints();
-                Response::Inspect(InspectResult::Ok)
-            }
-            Command::Start
-            | Command::Step
-            | Command::Stop
-            | Command::Quit
-            | Command::SetAllowed { .. }
-            | Command::NotifyHalt { .. } => {
-                unreachable!("lifecycle commands are handled in command()")
-            }
-        }
+impl<C: Cpu> Simulator<Machine<C>> {
+    #[must_use]
+    pub fn machine(&self) -> &Machine<C> {
+        self.entity()
     }
 
-    fn sync_breakpoints(&mut self) {
-        let (cpu, _, breakpoints) = self.machine.parts_mut();
-        let snapshot = breakpoints.as_slice().to_vec();
-        cpu.sync_breakpoints(&snapshot);
+    pub fn machine_mut(&mut self) -> &mut Machine<C> {
+        self.entity_mut()
     }
 }
 
