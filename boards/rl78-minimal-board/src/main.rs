@@ -7,7 +7,7 @@
 use std::env;
 use std::process;
 
-use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_board};
+use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_node};
 
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ fn main() {
         }
     };
 
-    if let Err(err) = run_board(opts, g23_machine) {
+    if let Err(err) = run_node(opts, g23_machine) {
         eprintln!("rl78-minimal-board: {err}");
         process::exit(1);
     }

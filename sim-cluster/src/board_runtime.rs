@@ -150,18 +150,6 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
     }
 }
 
-/// Run the board framework with a [`Machine`] built by `build`.
-///
-/// `build` assembles ROM/RAM (and peripherals) only — it must not load firmware.
-/// When the topology board entry has an `elf` source, this function loads those
-/// bytes and calls [`Entity::load_firmware`].
-pub fn run_board<C: Cpu>(
-    opts: BoardOptions,
-    build: impl FnOnce() -> (Machine<C>, BoardPorts, Vec<ProbePoint>),
-) -> Result<(), BoardError> {
-    run_node(opts, build)
-}
-
 /// Run the node framework with an entity built by `build`.
 ///
 /// `build` assembles the entity (board machine or plant) and board-edge ports.

@@ -33,7 +33,7 @@ pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_pa
 pub use backend::{LocalBackend, SimulationBackend};
 pub use board_runtime::{
     BoardCliError, BoardError, BoardOptions, board_usage, cluster_host_stop_reason,
-    parse_board_args, run_board, run_node,
+    parse_board_args, run_node,
 };
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
