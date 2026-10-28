@@ -81,10 +81,12 @@ impl<E: Entity> Simulator<E> {
         self.allowed
     }
 
-    /// True when Running and virtual time has reached the multi-board ceiling.
+    /// True when Running and virtual time has passed the multi-board ceiling.
     ///
-    /// The sim thread must park on the command channel in this state; returning
-    /// from [`Self::poll`] alone would busy-spin until the next `SetAllowed`.
+    /// `allowed == now` is not waiting: the entity may still step or fire events
+    /// at that instant. The sim thread must park on the command channel when this
+    /// is true; returning from [`Self::poll`] alone would busy-spin until the
+    /// next `SetAllowed`.
     #[must_use]
     pub fn waiting_on_allowed_ceiling(&self) -> bool {
         if self.state != SimState::Running {
@@ -93,7 +95,7 @@ impl<E: Entity> Simulator<E> {
         let Some(allowed) = self.allowed else {
             return false;
         };
-        allowed.saturating_sub(self.entity.now()).is_zero()
+        self.entity.now() > allowed
     }
 
     #[must_use]
@@ -167,7 +169,7 @@ impl<E: Entity> Simulator<E> {
 
         let now = self.entity.now();
         if let Some(allowed) = self.allowed
-            && allowed.saturating_sub(now).is_zero()
+            && now > allowed
         {
             return None;
         }
