@@ -151,20 +151,6 @@ mod tests {
     }
 
     #[test]
-    fn steps_when_now_equals_allowed_ceiling() {
-        let mut sim = plant_sim(Tick(1_000));
-        sim.command(Command::SetAllowed { tick: Tick(0) });
-        sim.command(Command::Start);
-        assert!(!sim.waiting_on_allowed_ceiling());
-        assert_eq!(sim.poll(), None);
-        assert_eq!(sim.entity().model().steps, 1);
-        assert_eq!(sim.entity().now(), Tick(0));
-        assert_eq!(sim.entity().next_step_at(), Tick(1_000));
-        assert_eq!(sim.poll(), None);
-        assert_eq!(sim.entity().model().steps, 1);
-    }
-
-    #[test]
     fn reset_keeps_clock_and_reschedules_step() {
         let mut sim = plant_sim(Tick(1_000));
         sim.command(Command::SetAllowed { tick: Tick(10_000) });

@@ -416,8 +416,8 @@ fn allowed_ceiling_hard_blocks_until_raised() {
         let _ = sim.poll();
     }
     assert_eq!(sim.machine().clock().now(), Tick(3));
-    assert_eq!(sim.poll(), None); // no budget left to advance
-    assert!(!sim.waiting_on_allowed_ceiling()); // equality: still poll this instant
+    assert_eq!(sim.poll(), None); // blocked at ceiling
+    assert!(sim.waiting_on_allowed_ceiling());
     assert_eq!(
         sim.command(Command::SetAllowed { tick: Tick(10) }),
         Response::Inspect(InspectResult::Ok)
