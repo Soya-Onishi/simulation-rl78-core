@@ -56,7 +56,10 @@ impl NodeState {
             (NodeState::Stopped, ControlToNode::StartupRecord { .. }) => {
                 (NodeState::Stopped, Some(NodeEffect::SendReady))
             }
-            (NodeState::Stopped, ControlToNode::Start) => (NodeState::Running, None),
+            (NodeState::Stopped | NodeState::Running, ControlToNode::Start { allowed_ns }) => (
+                NodeState::Running,
+                Some(NodeEffect::SetAllowed { allowed_ns }),
+            ),
             // Ceiling may be republished while stopped, immediately after Reset
             // and before the following Start.
             (
@@ -189,9 +192,16 @@ mod tests {
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::SendReady));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start);
+        let (n, eff) = s.on_message(ControlToNode::Start { allowed_ns: 0 });
         assert_eq!(n, NodeState::Running);
-        assert!(eff.is_none());
+        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 0 }));
+    }
+
+    #[test]
+    fn node_start_while_running_updates_allowed() {
+        let (n, eff) = NodeState::Running.on_message(ControlToNode::Start { allowed_ns: 80 });
+        assert_eq!(n, NodeState::Running);
+        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 80 }));
     }
 
     #[test]
@@ -202,9 +212,9 @@ mod tests {
         });
         assert_eq!(n, NodeState::Stopped);
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start);
+        let (n, eff) = s.on_message(ControlToNode::Start { allowed_ns: 50 });
         assert_eq!(n, NodeState::Running);
-        assert!(eff.is_none());
+        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 50 }));
     }
 
     #[test]
@@ -218,9 +228,9 @@ mod tests {
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 1_000 }));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start);
+        let (n, eff) = s.on_message(ControlToNode::Start { allowed_ns: 1_000 });
         assert_eq!(n, NodeState::Running);
-        assert!(eff.is_none());
+        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 1_000 }));
     }
 
     #[test]

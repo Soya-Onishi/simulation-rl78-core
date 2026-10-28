@@ -9,6 +9,7 @@ use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
 
+use crate::control::HostStopReason;
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 
 use super::names;
@@ -22,16 +23,19 @@ const NODE_CAP: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub enum HostCommandWire {
-    Start = 1,
-    Stop = 2,
-    Reset = 3,
-    Shutdown = 4,
+    Start { has_until: u8, until_ns: u64 },
+    Stop,
+    Reset,
+    Shutdown,
 }
 
 impl HostCommandWire {
     fn from_cmd(cmd: HostCommand) -> Self {
         match cmd {
-            HostCommand::Start => Self::Start,
+            HostCommand::Start { until_ns } => Self::Start {
+                has_until: u8::from(until_ns.is_some()),
+                until_ns: until_ns.unwrap_or(0),
+            },
             HostCommand::Stop => Self::Stop,
             HostCommand::Reset => Self::Reset,
             HostCommand::Shutdown => Self::Shutdown,
@@ -40,7 +44,12 @@ impl HostCommandWire {
 
     fn to_cmd(self) -> HostCommand {
         match self {
-            Self::Start => HostCommand::Start,
+            Self::Start {
+                has_until,
+                until_ns,
+            } => HostCommand::Start {
+                until_ns: (has_until != 0).then_some(until_ns),
+            },
             Self::Stop => HostCommand::Stop,
             Self::Reset => HostCommand::Reset,
             Self::Shutdown => HostCommand::Shutdown,
@@ -109,6 +118,8 @@ impl Default for HostNodeWire {
 pub struct HostStatusWire {
     running: u8,
     virtual_time_ns: u64,
+    /// 0 = omitted; otherwise [`HostStopReason`] discriminant.
+    stop_reason: u8,
     node_count: u16,
     nodes: [HostNodeWire; NODE_CAP],
 }
@@ -131,6 +142,12 @@ impl HostStatusWire {
         Self {
             running: u8::from(status.state == "running"),
             virtual_time_ns: status.virtual_time_ns,
+            stop_reason: status
+                .stop_reason
+                .as_deref()
+                .and_then(HostStopReason::from_label)
+                .map(HostStopReason::to_wire)
+                .unwrap_or(0),
             node_count: u16::try_from(count).unwrap_or(u16::MAX),
             nodes,
         }
@@ -153,6 +170,8 @@ impl HostStatusWire {
                 "stopped".to_string()
             },
             virtual_time_ns: self.virtual_time_ns,
+            stop_reason: HostStopReason::from_wire(self.stop_reason)
+                .map(|reason| reason.as_str().to_string()),
             nodes,
         }
     }
@@ -316,6 +335,7 @@ mod tests {
         let status = SessionStatus {
             state: "running".into(),
             virtual_time_ns: 42,
+            stop_reason: None,
             nodes: vec![SessionNode {
                 id: "board-a".into(),
                 kind: "rl78".into(),
@@ -327,9 +347,24 @@ mod tests {
     }
 
     #[test]
+    fn status_round_trip_keeps_stop_reason() {
+        let status = SessionStatus {
+            state: "stopped".into(),
+            virtual_time_ns: 1000,
+            stop_reason: Some("until".into()),
+            nodes: vec![],
+        };
+        let back = HostStatusWire::from_status(&status).to_status();
+        assert_eq!(back, status);
+    }
+
+    #[test]
     fn command_round_trip() {
         for cmd in [
-            HostCommand::Start,
+            HostCommand::Start { until_ns: None },
+            HostCommand::Start {
+                until_ns: Some(1_000_000),
+            },
             HostCommand::Stop,
             HostCommand::Reset,
             HostCommand::Shutdown,

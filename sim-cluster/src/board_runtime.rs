@@ -3,6 +3,7 @@
 //! Board binaries supply a machine factory; this module owns CLI parsing, IPC,
 //! topology lookup, firmware loading, and the same-thread guest loop.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
@@ -14,7 +15,8 @@ use sim_kernel::{
 };
 
 use crate::action::{
-    ACTION_RECV_CAP, ActionAdvertise, ActionPackError, ActionResult, ActionStatus, ActionUpstream,
+    ACTION_RECV_CAP, ActionAdvertise, ActionPackError, ActionRequest, ActionResult, ActionStatus,
+    ActionUpstream,
 };
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
@@ -210,6 +212,7 @@ pub fn run_board<C: Cpu>(
     let mut last_time_report: Option<u64> = None;
     let mut probe_ads = Some(probes.advertisements().to_vec());
     let mut actions_advertised = false;
+    let mut pending_actions: VecDeque<ActionRequest> = VecDeque::new();
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
@@ -263,6 +266,7 @@ pub fn run_board<C: Cpu>(
                     }
                     NodeEffect::Reset => {
                         last_time_report = None;
+                        pending_actions.clear();
                         sim.machine_mut().reset();
                         log::info!("simulator Reset");
                         for plane in &mut data_planes {
@@ -296,7 +300,7 @@ pub fn run_board<C: Cpu>(
             }
         }
 
-        service_actions(&actions, &mut sim, state, board_hash)?;
+        service_actions(&actions, &mut sim, state, board_hash, &mut pending_actions)?;
         probes.service_queries()?;
         probes.service_csv()?;
 
@@ -365,35 +369,32 @@ pub fn run_board<C: Cpu>(
     }
 }
 
-/// Drain the request inbox and answer every sample addressed to this board.
+/// Drain the request inbox. Stopped nodes queue; Running nodes apply FIFO
+/// (queued first) before the guest poll of this iteration.
 ///
-/// Every drained request is executed. [`ACTION_RECV_CAP`] is only how many
-/// samples the subscriber can hold; anything past that is dropped by the
-/// transport.
+/// [`ACTION_RECV_CAP`] is only how many samples the subscriber can hold;
+/// anything past that is dropped by the transport.
 fn service_actions(
     actions: &NodeActions,
     sim: &mut Simulator<impl Cpu>,
     state: NodeState,
     board_hash: u64,
+    pending: &mut VecDeque<ActionRequest>,
 ) -> Result<(), BoardError> {
-    let mut mine = Vec::new();
     for _ in 0..ACTION_RECV_CAP {
         match actions.try_request()? {
-            Some(req) if req.board_hash == board_hash => mine.push(req),
+            Some(req) if req.board_hash == board_hash => pending.push_back(req),
             Some(_) => {}
             None => break,
         }
     }
     if state != NodeState::Running {
-        for req in mine {
-            reply(actions, req.request_id, ActionStatus::Stopped)?;
-        }
         return Ok(());
     }
     let now = sim.machine().clock().now();
     sim.machine_mut().poll_actions(now);
 
-    for req in mine {
+    while let Some(req) = pending.pop_front() {
         let now = sim.machine().clock().now();
         let status = match sim.machine_mut().apply_action(
             req.device_hash,

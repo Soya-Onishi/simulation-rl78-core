@@ -26,7 +26,27 @@ pub struct StatusEvent {
     pub id: String,
     pub state: String,
     pub virtual_time_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     pub nodes: Vec<SessionNode>,
+}
+
+/// Body for `POST /api/simulation/{id}/start`. Empty / omitted `until_ns` is unlimited.
+#[derive(Debug, Default, Deserialize)]
+pub struct StartSimulationRequest {
+    pub until_ns: Option<u64>,
+}
+
+impl StartSimulationRequest {
+    /// Parse a start body. Empty bytes are unlimited.
+    pub fn from_body(body: &[u8]) -> Result<Self, ApiError> {
+        let trimmed = body.trim_ascii();
+        if trimmed.is_empty() {
+            return Ok(Self::default());
+        }
+        serde_json::from_slice(trimmed)
+            .map_err(|_| ApiError::bad_request("bad_param", "invalid start body"))
+    }
 }
 
 /// SSE `log` event payload.
@@ -154,3 +174,38 @@ impl std::fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+#[cfg(test)]
+mod tests {
+    use super::StartSimulationRequest;
+
+    #[test]
+    fn start_body_empty_is_unlimited() {
+        assert_eq!(
+            StartSimulationRequest::from_body(b"").unwrap().until_ns,
+            None
+        );
+        assert_eq!(
+            StartSimulationRequest::from_body(b" \n\t")
+                .unwrap()
+                .until_ns,
+            None
+        );
+        assert_eq!(
+            StartSimulationRequest::from_body(b"{}").unwrap().until_ns,
+            None
+        );
+    }
+
+    #[test]
+    fn start_body_reads_until_ns() {
+        let parsed = StartSimulationRequest::from_body(b"{\"until_ns\":1000}").unwrap();
+        assert_eq!(parsed.until_ns, Some(1000));
+    }
+
+    #[test]
+    fn start_body_rejects_bad_json() {
+        assert!(StartSimulationRequest::from_body(b"not-json").is_err());
+        assert!(StartSimulationRequest::from_body(b"{\"until_ns\":\"x\"}").is_err());
+    }
+}
