@@ -3,7 +3,7 @@
 RL78 guest sim: Rust workspace + tlib (TCG) submodule. No config files — machine maps are Rust code.
 
 ## Crates
-- `simulation-rl78-core` (`src/main.rs`): thin CLI bin; REPL thread + sim thread via `sim_kernel::spawn`.
+- `simulation-rl78-core` (`src/main.rs`): thin CLI bin; REPL thread + sim thread via `sim_kernel::spawn`. GDB RSP is served by `cluster-server`, not this CLI.
 - `sim-kernel`: arch-independent kernel — virtual clock, event queue, `MemoryBus`/`MemoryMapped`, start/stop/quit, inspect API. See `mem:sim-kernel/core`.
 - `rl78-core`: RL78 assembly — tlib static link (`build.rs`+CMake), `Rl78Cpu`, minimal map, Magic probe, ELF load via `Cpu::load_firmware`. See `mem:rl78-core/core`.
 - `sim-cluster`: multi-board cluster — logical topology JSON, `cluster-server` (axum: sim UI `/{id}` (GET `/` and unknown id are 404), API under `/api/simulation...` + SSE status/log; LocalBackend trait boundary for future remote sim; does not exit with the arbiter; HTTP create accepts topology JSON only — `elf` must be `http(s)://` or `base64:`; python DSL is client-side via `python -m topology_dsl create` / `scripts/create-sim`), `cluster-arbiter` (Ready then host start/stop/reset over iceoryx `ctrl/s2a`; status on `status/a2s`), `board_runtime::run_board` (same-thread Simulator loop). Default board binary: `rl78-minimal-board`. Python DSL under `python/topology_dsl/`. Issue #37/#47; IPC via iceoryx2 pub/sub (`sim-cluster/src/ipc/`).

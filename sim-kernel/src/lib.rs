@@ -3,10 +3,10 @@
 //! Owns virtual time, the event queue, the memory bus contract, typed pin
 //! wires, off-board [`InPort`] / [`OutPort`] endpoints, and the
 //! start/stop/quit control surface. Architecture crates implement [`Core`] inside
-//! a [`Cpu`] (on-chip part) and assemble a [`Machine`]; host front-ends (CLI, GDB)
+//! a [`Cpu`] (on-chip part) and assemble a [`Machine`]; host front-ends
 //! talk through
-//! [`Command`] / [`Response`] on the simulation thread. The optional GDB
-//! stub lives in this crate and uses the same control plane.
+//! [`Command`] / [`Response`] on the simulation thread. The GDB stub lives
+//! in `sim-cluster` (cluster-server) and uses this inspect surface.
 
 mod action;
 mod breakpoint;
@@ -17,7 +17,6 @@ mod cpu;
 pub mod elf;
 mod entity;
 mod event;
-mod gdb;
 mod machine;
 mod plant;
 mod ports;
@@ -50,7 +49,6 @@ pub use cpu::{
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use entity::{AdvanceCtx, Entity, EntityPoll};
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
-pub use gdb::{GdbBindError, listen_gdb, parse_gdb_dev};
 pub use machine::Machine;
 pub use plant::{Model, Plant};
 pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
