@@ -602,7 +602,7 @@ fn apply_start(
             log::info!("start until_ns={until_ns:?} <= now={now}; stay stopped");
         }
         *until_cap = None;
-        *last_stop_reason = Some(HostStopReason::Until);
+        last_stop_reason.get_or_insert(HostStopReason::Until);
         return Ok(());
     }
 
