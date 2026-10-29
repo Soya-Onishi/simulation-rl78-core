@@ -3,6 +3,7 @@ members = [
     "hw/cpus/*",
     "hw/dac",
     "boards/rl78-minimal-board",
+    "plants/minimal-plant",
     "sim-kernel",
     "sim-cluster",
 ]

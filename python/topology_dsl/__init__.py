@@ -85,6 +85,10 @@ class Topology:
         self._boards[board_id] = board
         return board
 
+    def plant(self, plant_id: str, *, kind: str = "plant") -> Board:
+        """Register a plant node (no ELF). JSON is still a ``boards[]`` entry."""
+        return self.board(plant_id, kind=kind)
+
     def add_edge(
         self,
         src: EndpointRef,
