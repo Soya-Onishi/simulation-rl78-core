@@ -237,6 +237,7 @@ struct Simulation {
     probe_ctrl: ServerProbeCtrl,
     probe_catalog: HashMap<u64, ProbePointName>,
     catalog_ready: bool,
+    action_catalog_ready: bool,
     watch: ProbeWatch,
     catalog: Vec<crate::contract::AdvertisedAction>,
     next_request_id: u64,
@@ -631,6 +632,7 @@ fn create_simulation(
         probe_ctrl,
         probe_catalog: HashMap::new(),
         catalog_ready: false,
+        action_catalog_ready: false,
         watch: ProbeWatch {
             probes: Vec::new(),
             probe_ids: Vec::new(),
@@ -674,7 +676,8 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(
     if !sim.boards.contains_key(&board_hash) {
         return Err(ApiError::not_found("unknown board"));
     }
-    if let Some(err) = catalog_invoke_error(sim, request) {
+    require_action_catalog(sim)?;
+    if let Some(err) = catalog_invoke_error(&sim.catalog, request) {
         return Err(err);
     }
     let raw: Vec<(u64, f64)> = request
@@ -698,9 +701,27 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(
     Ok(())
 }
 
-fn catalog_invoke_error(sim: &Simulation, request: &InvokeActionRequest) -> Option<ApiError> {
-    let on_board = sim
-        .catalog
+fn require_action_catalog(sim: &Simulation) -> Result<(), ApiError> {
+    require_action_catalog_ready(sim.action_catalog_ready)
+}
+
+fn require_action_catalog_ready(ready: bool) -> Result<(), ApiError> {
+    if ready {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            503,
+            "not_ready",
+            "action catalog is not ready",
+        ))
+    }
+}
+
+fn catalog_invoke_error(
+    catalog: &[AdvertisedAction],
+    request: &InvokeActionRequest,
+) -> Option<ApiError> {
+    let on_board = catalog
         .iter()
         .filter(|row| row.board_id == request.board_id)
         .collect::<Vec<_>>();
@@ -730,6 +751,9 @@ fn poll_actions(sim: &mut Simulation) {
                         eprintln!("cluster-server {}: action advertise: {err}", sim.id);
                     }
                 }
+            }
+            Ok(Some(ActionUpstream::CatalogEnd)) => {
+                sim.action_catalog_ready = true;
             }
             Ok(Some(ActionUpstream::Result(_))) => {}
             Ok(None) => break,
@@ -1327,6 +1351,55 @@ emit(t)
         .unwrap_err();
         assert_eq!(err.status, 400);
         assert_eq!(err.code, "invalid_topology");
+    }
+
+    fn invoke_request(board_id: &str, device: &str, action: &str) -> InvokeActionRequest {
+        InvokeActionRequest {
+            board_id: board_id.into(),
+            device: device.into(),
+            action: action.into(),
+            params: Default::default(),
+        }
+    }
+
+    fn advertised(board_id: &str, device: &str, action: &str) -> AdvertisedAction {
+        AdvertisedAction {
+            board_id: board_id.into(),
+            device: device.into(),
+            action: action.into(),
+            description: String::new(),
+            params: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn invoke_rejected_until_action_catalog_is_ready() {
+        assert!(require_action_catalog_ready(true).is_ok());
+        let err = require_action_catalog_ready(false).unwrap_err();
+        assert_eq!(err.status, 503);
+        assert_eq!(err.code, "not_ready");
+        assert_eq!(err.message, "action catalog is not ready");
+    }
+
+    #[test]
+    fn catalog_mismatch_is_unknown_device_when_board_has_no_rows() {
+        let err = catalog_invoke_error(&[], &invoke_request("a", "sw1", "hold")).unwrap();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.message, "unknown device");
+    }
+
+    #[test]
+    fn catalog_mismatch_is_unknown_action_when_device_exists() {
+        let catalog = [advertised("a", "sw1", "hold")];
+        let err = catalog_invoke_error(&catalog, &invoke_request("a", "sw1", "missing")).unwrap();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.message, "unknown action");
+    }
+
+    #[test]
+    fn catalog_mismatch_accepts_known_device_and_action() {
+        let catalog = [advertised("a", "sw1", "hold")];
+        assert!(catalog_invoke_error(&catalog, &invoke_request("a", "sw1", "hold")).is_none());
     }
 
     #[test]

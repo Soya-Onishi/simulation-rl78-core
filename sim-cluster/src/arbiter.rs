@@ -202,6 +202,9 @@ fn await_ready(
     // that observes Ready. Drain once more before later advertisements are
     // discarded.
     forward_catalog(actions, server)?;
+    if let Some(server) = server {
+        server.publish_upstream(&ActionUpstream::CatalogEnd)?;
+    }
 
     log::info!(
         "Ready barrier complete ({} nodes, {} probes)",
@@ -284,7 +287,8 @@ enum SyncStep {
 ///
 /// Nodes `send_copy` every advertisement before `Ready`, so the samples are already
 /// in the action subscriber when `Ready` becomes visible. Draining here before the
-/// control receive keeps that order without a catalog-end sample.
+/// control receive keeps that order. The arbiter then publishes `CatalogEnd` on the
+/// server action channel so the HTTP layer can tell the catalog is complete.
 fn forward_catalog(
     actions: Option<&ArbiterNodeActions>,
     server: Option<&ArbiterServerActions>,
