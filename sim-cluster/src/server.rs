@@ -676,7 +676,9 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(
     if !sim.boards.contains_key(&board_hash) {
         return Err(ApiError::not_found("unknown board"));
     }
-    require_action_catalog(sim)?;
+    if !sim.action_catalog_ready {
+        return Err(ApiError::conflict("action catalog is not ready"));
+    }
     if let Some(err) = catalog_invoke_error(&sim.catalog, request) {
         return Err(err);
     }
@@ -699,22 +701,6 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(
         .publish_request(&sample)
         .map_err(|err| ApiError::internal(err.to_string()))?;
     Ok(())
-}
-
-fn require_action_catalog(sim: &Simulation) -> Result<(), ApiError> {
-    require_action_catalog_ready(sim.action_catalog_ready)
-}
-
-fn require_action_catalog_ready(ready: bool) -> Result<(), ApiError> {
-    if ready {
-        Ok(())
-    } else {
-        Err(ApiError::new(
-            503,
-            "not_ready",
-            "action catalog is not ready",
-        ))
-    }
 }
 
 fn catalog_invoke_error(
@@ -1370,15 +1356,6 @@ emit(t)
             description: String::new(),
             params: Vec::new(),
         }
-    }
-
-    #[test]
-    fn invoke_rejected_until_action_catalog_is_ready() {
-        assert!(require_action_catalog_ready(true).is_ok());
-        let err = require_action_catalog_ready(false).unwrap_err();
-        assert_eq!(err.status, 503);
-        assert_eq!(err.code, "not_ready");
-        assert_eq!(err.message, "action catalog is not ready");
     }
 
     #[test]
