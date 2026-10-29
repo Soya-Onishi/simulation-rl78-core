@@ -161,14 +161,16 @@ pub struct ActionResult {
 
 /// Node → arbiter (and arbiter → server) sample.
 ///
-/// The advertise variant is the catalog row; the result variant is two words.
-/// Both stay inline so the sample remains `Copy` for `send_copy`.
+/// Advertise is one catalog row. Result is two words. CatalogEnd is published
+/// by the arbiter once, after the Ready barrier has forwarded every advertise.
+/// Variants stay inline so the sample remains `Copy` for `send_copy`.
 #[allow(clippy::large_enum_variant)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, ZeroCopySend)]
 pub enum ActionUpstream {
     Advertise(ActionAdvertise),
     Result(ActionResult),
+    CatalogEnd,
 }
 
 #[derive(Debug)]

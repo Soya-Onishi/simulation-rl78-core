@@ -319,7 +319,9 @@ mod tests {
                 assert_eq!(result.request_id, 7);
                 assert_eq!(result.status, ActionStatus::Applied as u8);
             }
-            ActionUpstream::Advertise(_) => panic!("expected a result"),
+            ActionUpstream::Advertise(_) | ActionUpstream::CatalogEnd => {
+                panic!("expected a result")
+            }
         }
     }
 }

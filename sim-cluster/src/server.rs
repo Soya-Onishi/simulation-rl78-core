@@ -15,7 +15,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use iceoryx2::prelude::{Node, ipc};
 
-use crate::action::{ActionRequest, ActionStatus, ActionUpstream};
+use crate::action::{ActionRequest, ActionUpstream};
 use crate::backend::{LocalBackend, SimulationBackend};
 use crate::contract::{
     ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, StatusEvent,
@@ -37,9 +37,6 @@ use crate::topology::{LogicalTopology, TopologyError};
 /// Live SSE readers start at the high-water mark, so this only covers logs
 /// that arrive between polls.
 const LOG_CAP: usize = 100;
-
-/// Wall-clock wait for a node to apply an action. This is not the hold duration.
-const ACTION_WAIT: Duration = Duration::from_secs(5);
 
 /// Live batches kept while `/probes/stream` is between reconnects.
 const WATCH_PENDING_KEEP: usize = 64;
@@ -204,7 +201,6 @@ pub enum JobReply {
     Logs(Vec<LogEvent>),
     HighWater(u64),
     Actions(ActionList),
-    Applied,
     ProbeCatalog(Vec<ProbeCatalogItem>),
     ProbeWatch(ProbeWatchView),
     ProbeCoarse(Vec<CoarseBatch>),
@@ -230,6 +226,7 @@ struct Simulation {
     host: ServerHostPort,
     state: String,
     virtual_time_ns: u64,
+    stop_reason: Option<String>,
     nodes: Vec<SessionNode>,
     logs: VecDeque<StoredLog>,
     next_seq: u64,
@@ -240,9 +237,9 @@ struct Simulation {
     probe_ctrl: ServerProbeCtrl,
     probe_catalog: HashMap<u64, ProbePointName>,
     catalog_ready: bool,
+    action_catalog_ready: bool,
     watch: ProbeWatch,
     catalog: Vec<crate::contract::AdvertisedAction>,
-    pending: HashMap<u64, PendingAction>,
     next_request_id: u64,
     viewer: Option<String>,
     csv_job: Option<CsvJob>,
@@ -256,11 +253,6 @@ struct CsvJob {
     truncated: bool,
     failed: bool,
     done: bool,
-    deadline: Instant,
-}
-
-struct PendingAction {
-    reply: Sender<JobReply>,
     deadline: Instant,
 }
 
@@ -472,16 +464,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         },
         JobKind::Invoke { id, request } => match world.sims.get_mut(&id) {
             Some(sim) => match queue_invoke(sim, &request) {
-                Ok(request_id) => {
-                    sim.pending.insert(
-                        request_id,
-                        PendingAction {
-                            reply: job.reply,
-                            deadline: Instant::now() + ACTION_WAIT,
-                        },
-                    );
-                    return;
-                }
+                Ok(()) => JobReply::Accepted,
                 Err(err) => JobReply::Err(err),
             },
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
@@ -638,6 +621,7 @@ fn create_simulation(
         host,
         state: "stopped".into(),
         virtual_time_ns: 0,
+        stop_reason: None,
         nodes,
         logs: VecDeque::new(),
         next_seq: 1,
@@ -648,6 +632,7 @@ fn create_simulation(
         probe_ctrl,
         probe_catalog: HashMap::new(),
         catalog_ready: false,
+        action_catalog_ready: false,
         watch: ProbeWatch {
             probes: Vec::new(),
             probe_ids: Vec::new(),
@@ -655,7 +640,6 @@ fn create_simulation(
             pending: VecDeque::new(),
         },
         catalog: Vec::new(),
-        pending: HashMap::new(),
         next_request_id: 1,
         viewer: None,
         csv_job: None,
@@ -679,20 +663,24 @@ fn status_event(sim: &Simulation) -> StatusEvent {
         id: sim.id.clone(),
         state: sim.state.clone(),
         virtual_time_ns: sim.virtual_time_ns,
+        stop_reason: sim.stop_reason.clone(),
         nodes: sim.nodes.clone(),
     }
 }
 
-fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<u64, ApiError> {
+fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(), ApiError> {
     if sim.state == "exited" {
         return Err(ApiError::conflict("arbiter has exited"));
-    }
-    if sim.state != "running" {
-        return Err(ApiError::new(409, "stopped", "simulation is stopped"));
     }
     let board_hash = sim_kernel::id_hash(&request.board_id);
     if !sim.boards.contains_key(&board_hash) {
         return Err(ApiError::not_found("unknown board"));
+    }
+    if !sim.action_catalog_ready {
+        return Err(ApiError::conflict("action catalog is not ready"));
+    }
+    if let Some(err) = catalog_invoke_error(&sim.catalog, request) {
+        return Err(err);
     }
     let raw: Vec<(u64, f64)> = request
         .params
@@ -712,26 +700,31 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<u
     sim.actions
         .publish_request(&sample)
         .map_err(|err| ApiError::internal(err.to_string()))?;
-    Ok(request_id)
+    Ok(())
+}
+
+fn catalog_invoke_error(
+    catalog: &[AdvertisedAction],
+    request: &InvokeActionRequest,
+) -> Option<ApiError> {
+    let on_board = catalog
+        .iter()
+        .filter(|row| row.board_id == request.board_id)
+        .collect::<Vec<_>>();
+    if on_board
+        .iter()
+        .any(|row| row.device == request.device && row.action == request.action)
+    {
+        return None;
+    }
+    if on_board.iter().any(|row| row.device == request.device) {
+        Some(ApiError::not_found("unknown action"))
+    } else {
+        Some(ApiError::not_found("unknown device"))
+    }
 }
 
 fn poll_actions(sim: &mut Simulation) {
-    let now = Instant::now();
-    let expired: Vec<u64> = sim
-        .pending
-        .iter()
-        .filter(|(_, pending)| now >= pending.deadline)
-        .map(|(id, _)| *id)
-        .collect();
-    for id in expired {
-        if let Some(pending) = sim.pending.remove(&id) {
-            let _ = pending.reply.send(JobReply::Err(ApiError::new(
-                504,
-                "timeout",
-                "action was not applied before the deadline",
-            )));
-        }
-    }
     loop {
         match sim.actions.try_upstream() {
             Ok(Some(ActionUpstream::Advertise(sample))) => {
@@ -745,20 +738,10 @@ fn poll_actions(sim: &mut Simulation) {
                     }
                 }
             }
-            Ok(Some(ActionUpstream::Result(result))) => {
-                let Some(pending) = sim.pending.remove(&result.request_id) else {
-                    continue;
-                };
-                let reply = match ActionStatus::from_u8(result.status) {
-                    Some(ActionStatus::Applied) => JobReply::Applied,
-                    Some(status) => JobReply::Err(action_status_error(status)),
-                    None => JobReply::Err(ApiError::internal(format!(
-                        "unknown action status {}",
-                        result.status
-                    ))),
-                };
-                let _ = pending.reply.send(reply);
+            Ok(Some(ActionUpstream::CatalogEnd)) => {
+                sim.action_catalog_ready = true;
             }
+            Ok(Some(ActionUpstream::Result(_))) => {}
             Ok(None) => break,
             Err(err) => {
                 eprintln!("cluster-server {}: action inbox: {err}", sim.id);
@@ -775,17 +758,6 @@ fn upsert_catalog(sim: &mut Simulation, body: crate::contract::AdvertisedAction)
         *existing = body;
     } else {
         sim.catalog.push(body);
-    }
-}
-
-fn action_status_error(status: ActionStatus) -> ApiError {
-    match status {
-        ActionStatus::Applied => ApiError::internal("applied is not an error"),
-        ActionStatus::Stopped => ApiError::new(409, "stopped", "simulation is stopped"),
-        ActionStatus::Busy => ApiError::new(409, "busy", "device has an action in progress"),
-        ActionStatus::NotFoundDevice => ApiError::not_found("unknown device"),
-        ActionStatus::NotFoundAction => ApiError::not_found("unknown action"),
-        ActionStatus::BadParam => ApiError::bad_request("bad_param", "invalid action parameter"),
     }
 }
 
@@ -1167,6 +1139,7 @@ fn poll_simulation(sim: &mut Simulation) {
             Ok(Some(status)) => {
                 sim.state = status.state;
                 sim.virtual_time_ns = status.virtual_time_ns;
+                sim.stop_reason = status.stop_reason;
                 sim.nodes = status.nodes;
             }
             Ok(None) => break,
@@ -1202,17 +1175,10 @@ fn poll_simulation(sim: &mut Simulation) {
                     &format!("arbiter exited ({code})"),
                 );
                 sim.child = None;
-                fail_pending(sim, ApiError::conflict("arbiter has exited"));
             }
             Ok(None) => {}
             Err(err) => eprintln!("cluster-server {}: wait arbiter: {err}", sim.id),
         }
-    }
-}
-
-fn fail_pending(sim: &mut Simulation, err: ApiError) {
-    for (_, pending) in sim.pending.drain() {
-        let _ = pending.reply.send(JobReply::Err(err.clone()));
     }
 }
 
@@ -1274,11 +1240,6 @@ fn temp_path(prefix: &str, ext: &str) -> PathBuf {
 
 impl Drop for Simulation {
     fn drop(&mut self) {
-        for (_, pending) in self.pending.drain() {
-            let _ = pending
-                .reply
-                .send(JobReply::Err(ApiError::not_found("unknown simulation")));
-        }
         let _ = send_cmd(self, HostCommand::Shutdown);
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
@@ -1376,6 +1337,46 @@ emit(t)
         .unwrap_err();
         assert_eq!(err.status, 400);
         assert_eq!(err.code, "invalid_topology");
+    }
+
+    fn invoke_request(board_id: &str, device: &str, action: &str) -> InvokeActionRequest {
+        InvokeActionRequest {
+            board_id: board_id.into(),
+            device: device.into(),
+            action: action.into(),
+            params: Default::default(),
+        }
+    }
+
+    fn advertised(board_id: &str, device: &str, action: &str) -> AdvertisedAction {
+        AdvertisedAction {
+            board_id: board_id.into(),
+            device: device.into(),
+            action: action.into(),
+            description: String::new(),
+            params: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn catalog_mismatch_is_unknown_device_when_board_has_no_rows() {
+        let err = catalog_invoke_error(&[], &invoke_request("a", "sw1", "hold")).unwrap();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.message, "unknown device");
+    }
+
+    #[test]
+    fn catalog_mismatch_is_unknown_action_when_device_exists() {
+        let catalog = [advertised("a", "sw1", "hold")];
+        let err = catalog_invoke_error(&catalog, &invoke_request("a", "sw1", "missing")).unwrap();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.message, "unknown action");
+    }
+
+    #[test]
+    fn catalog_mismatch_accepts_known_device_and_action() {
+        let catalog = [advertised("a", "sw1", "hold")];
+        assert!(catalog_invoke_error(&catalog, &invoke_request("a", "sw1", "hold")).is_none());
     }
 
     #[test]

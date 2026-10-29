@@ -16,7 +16,7 @@ use crate::topology::LogicalTopology;
 /// Control-plane operations shared by HTTP adapters.
 pub trait SimulationBackend: Send + Sync {
     fn create(&self, topology: LogicalTopology) -> Result<String, ApiError>;
-    fn start(&self, id: &str) -> Result<(), ApiError>;
+    fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError>;
     fn stop(&self, id: &str) -> Result<(), ApiError>;
     fn reset(&self, id: &str) -> Result<(), ApiError>;
     fn delete(&self, id: &str) -> Result<(), ApiError>;
@@ -108,8 +108,8 @@ impl SimulationBackend for LocalBackend {
         }
     }
 
-    fn start(&self, id: &str) -> Result<(), ApiError> {
-        self.command(id, HostCommand::Start)
+    fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError> {
+        self.command(id, HostCommand::Start { until_ns })
     }
 
     fn stop(&self, id: &str) -> Result<(), ApiError> {
@@ -184,14 +184,11 @@ impl SimulationBackend for LocalBackend {
     }
 
     fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError> {
-        match self.rpc_timeout(
-            JobKind::Invoke {
-                id: id.to_string(),
-                request,
-            },
-            Duration::from_secs(6),
-        )? {
-            JobReply::Applied => Ok(()),
+        match self.rpc(JobKind::Invoke {
+            id: id.to_string(),
+            request,
+        })? {
+            JobReply::Accepted => Ok(()),
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for invoke: {other:?}"

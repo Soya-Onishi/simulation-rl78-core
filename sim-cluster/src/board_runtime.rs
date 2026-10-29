@@ -3,18 +3,20 @@
 //! Board binaries supply a machine factory; this module owns CLI parsing, IPC,
 //! topology lookup, firmware loading, and the same-thread guest loop.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
 use sim_kernel::{
-    ActionFailure, BoardPorts, Command, Cpu, Entity, FirmwareError, Machine, ProbePoint, Response,
-    SimConfig, SimState, Simulator, StopReason, Tick,
+    ActionFailure, BoardPorts, Command, Entity, FirmwareError, ProbePoint, Response, SimConfig,
+    SimState, Simulator, StopReason, Tick,
 };
 
 use crate::action::{
-    ACTION_RECV_CAP, ActionAdvertise, ActionPackError, ActionResult, ActionStatus, ActionUpstream,
+    ACTION_RECV_CAP, ActionAdvertise, ActionPackError, ActionRequest, ActionResult, ActionStatus,
+    ActionUpstream,
 };
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
@@ -212,6 +214,7 @@ pub fn run_node<E: Entity>(
     let mut probe_ads = Some(probes.advertisements().to_vec());
     let mut actions_advertised = false;
     let mut has_actions = false;
+    let mut pending_actions: VecDeque<ActionRequest> = VecDeque::new();
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
@@ -268,6 +271,7 @@ pub fn run_node<E: Entity>(
                     }
                     NodeEffect::Reset => {
                         last_time_report = None;
+                        pending_actions.clear();
                         sim.entity_mut().reset();
                         log::info!("simulator Reset");
                         for plane in &mut data_planes {
@@ -302,7 +306,7 @@ pub fn run_node<E: Entity>(
         }
 
         if has_actions {
-            service_actions(&actions, &mut sim, state, board_hash)?;
+            service_actions(&actions, &mut sim, state, board_hash, &mut pending_actions)?;
         }
         probes.service_queries()?;
         probes.service_csv()?;
@@ -372,35 +376,32 @@ pub fn run_node<E: Entity>(
     }
 }
 
-/// Drain the request inbox and answer every sample addressed to this board.
+/// Drain the request inbox. Stopped nodes queue; Running nodes apply FIFO
+/// (queued first) before the guest poll of this iteration.
 ///
-/// Every drained request is executed. [`ACTION_RECV_CAP`] is only how many
-/// samples the subscriber can hold; anything past that is dropped by the
-/// transport.
+/// [`ACTION_RECV_CAP`] is only how many samples the subscriber can hold;
+/// anything past that is dropped by the transport.
 fn service_actions<E: Entity>(
     actions: &NodeActions,
     sim: &mut Simulator<E>,
     state: NodeState,
     board_hash: u64,
+    pending: &mut VecDeque<ActionRequest>,
 ) -> Result<(), BoardError> {
-    let mut mine = Vec::new();
     for _ in 0..ACTION_RECV_CAP {
         match actions.try_request()? {
-            Some(req) if req.board_hash == board_hash => mine.push(req),
+            Some(req) if req.board_hash == board_hash => pending.push_back(req),
             Some(_) => {}
             None => break,
         }
     }
     if state != NodeState::Running {
-        for req in mine {
-            reply(actions, req.request_id, ActionStatus::Stopped)?;
-        }
         return Ok(());
     }
     let now = sim.entity().now();
     sim.entity_mut().poll_actions(now);
 
-    for req in mine {
+    while let Some(req) = pending.pop_front() {
         let now = sim.entity().now();
         let status = match sim.entity_mut().apply_action(
             req.device_hash,
@@ -457,8 +458,8 @@ fn maybe_time_report(
 mod tests {
     use super::*;
     use sim_kernel::{
-        Addr, Breakpoint, Core, EventCtl, HasMemoryMap, MapError, MemoryBus, MemoryMapBuilder,
-        Quantum, RegId, Resettable, Rom, SimError, Tick,
+        Addr, Breakpoint, Core, Cpu, EventCtl, HasMemoryMap, Machine, MapError, MemoryBus,
+        MemoryMapBuilder, Quantum, RegId, Resettable, Rom, SimError, Tick,
     };
 
     #[test]

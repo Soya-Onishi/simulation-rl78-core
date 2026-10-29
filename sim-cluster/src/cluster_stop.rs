@@ -7,7 +7,7 @@ pub fn is_cluster_relevant_reason(reason: &str) -> bool {
     matches!(
         reason,
         // Wire labels (snake_case). Display strings like "external" are also accepted.
-        "breakpoint" | "external_stop" | "external" | "step" | "unmapped"
+        "breakpoint" | "external_stop" | "external" | "step" | "unmapped" | "until"
     )
 }
 
@@ -23,5 +23,6 @@ mod tests {
         assert!(is_cluster_relevant_reason("external"));
         assert!(is_cluster_relevant_reason("step"));
         assert!(is_cluster_relevant_reason("unmapped"));
+        assert!(is_cluster_relevant_reason("until"));
     }
 }

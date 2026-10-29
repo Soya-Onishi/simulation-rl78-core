@@ -44,6 +44,15 @@ impl TimeCeiling {
         self.virtual_time_ns().saturating_add(self.margin_ns)
     }
 
+    /// Natural ceiling, optionally hard-capped at `until_ns`.
+    #[must_use]
+    pub fn allowed_ns_until(&self, until_ns: Option<u64>) -> u64 {
+        match until_ns {
+            Some(until) => self.allowed_ns().min(until),
+            None => self.allowed_ns(),
+        }
+    }
+
     /// Minimum reported virtual time across boards (`0` before any report).
     #[must_use]
     pub fn virtual_time_ns(&self) -> u64 {
@@ -91,5 +100,14 @@ mod tests {
         ceil.report("b", 4000);
         assert_eq!(ceil.virtual_time_ns(), 4000);
         assert_eq!(ceil.allowed_ns(), 5000);
+    }
+
+    #[test]
+    fn allowed_ns_until_caps_natural_ceiling() {
+        let mut ceil = TimeCeiling::new(["a".into()], 1000);
+        ceil.report("a", 100);
+        assert_eq!(ceil.allowed_ns_until(None), 1100);
+        assert_eq!(ceil.allowed_ns_until(Some(500)), 500);
+        assert_eq!(ceil.allowed_ns_until(Some(5000)), 1100);
     }
 }

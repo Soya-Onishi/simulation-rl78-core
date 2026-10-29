@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::action::{ActionResult, ActionStatus, ActionUpstream};
+use crate::action::ActionUpstream;
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
@@ -100,7 +100,7 @@ fn ready_barrier_and_start(
 ) -> Result<(), ArbiterError> {
     let mut probes = ArbiterProbeHub::new("test");
     let mut peers = await_ready(topo, control, &mut probes, None, None)?;
-    control.publish(&ControlToNode::Start)?;
+    control.publish(&ControlToNode::Start { allowed_ns: 0 })?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
@@ -202,6 +202,9 @@ fn await_ready(
     // that observes Ready. Drain once more before later advertisements are
     // discarded.
     forward_catalog(actions, server)?;
+    if let Some(server) = server {
+        server.publish_upstream(&ActionUpstream::CatalogEnd)?;
+    }
 
     log::info!(
         "Ready barrier complete ({} nodes, {} probes)",
@@ -277,14 +280,15 @@ fn run_time_sync(
 
 enum SyncStep {
     Continue,
-    Stopped,
+    Stopped(HostStopReason),
 }
 
 /// Forward catalog advertisements that arrived before this iteration's control read.
 ///
 /// Nodes `send_copy` every advertisement before `Ready`, so the samples are already
 /// in the action subscriber when `Ready` becomes visible. Draining here before the
-/// control receive keeps that order without a catalog-end sample.
+/// control receive keeps that order. The arbiter then publishes `CatalogEnd` on the
+/// server action channel so the HTTP layer can tell the catalog is complete.
 fn forward_catalog(
     actions: Option<&ArbiterNodeActions>,
     server: Option<&ArbiterServerActions>,
@@ -302,22 +306,14 @@ fn forward_catalog(
     Ok(())
 }
 
-/// After the ready barrier, advertisements are discarded. Requests are forwarded
-/// only while the session is running; otherwise the arbiter answers `Stopped`.
+/// After the ready barrier, advertisements are discarded. Requests are always
+/// forwarded; nodes queue them while Stopped and apply on Start.
 fn forward_invokes(
     actions: &ArbiterNodeActions,
     server: &ArbiterServerActions,
-    running: bool,
 ) -> Result<(), ArbiterError> {
     while let Some(req) = server.try_request()? {
-        if running {
-            actions.publish_request(&req)?;
-        } else {
-            server.publish_upstream(&ActionUpstream::Result(ActionResult {
-                request_id: req.request_id,
-                status: ActionStatus::Stopped as u8,
-            }))?;
-        }
+        actions.publish_request(&req)?;
     }
     while let Some(msg) = actions.try_upstream()? {
         if let ActionUpstream::Result(result) = msg {
@@ -394,10 +390,20 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
     let mut allowed = ceiling.allowed_ns();
     let mut running = false;
+    let mut until_cap: Option<u64> = None;
+    let mut last_stop_reason: Option<HostStopReason> = None;
     let mut last_status = Instant::now();
-    write_status(&host, running, ceiling.virtual_time_ns(), topo, &peers)?;
+    write_status(
+        &host,
+        running,
+        ceiling.virtual_time_ns(),
+        None,
+        topo,
+        &peers,
+    )?;
     let mut reported_vt = ceiling.virtual_time_ns();
     let mut reported_running = running;
+    let mut reported_stop_reason = last_stop_reason;
 
     let result = loop {
         let mut shutdown = false;
@@ -407,9 +413,17 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     shutdown = true;
                     break;
                 }
-                Some(HostCommand::Start) if !running => {
-                    begin_running(&control, &mut peers, allowed)?;
-                    running = true;
+                Some(HostCommand::Start { until_ns }) => {
+                    apply_start(
+                        &control,
+                        &mut peers,
+                        &ceiling,
+                        &mut allowed,
+                        &mut until_cap,
+                        &mut last_stop_reason,
+                        &mut running,
+                        until_ns,
+                    )?;
                 }
                 Some(HostCommand::Stop) if running => {
                     log::info!("host Stop");
@@ -420,9 +434,12 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                         HostStopReason::ExternalStop,
                     )?;
                     running = false;
+                    until_cap = None;
+                    last_stop_reason = Some(HostStopReason::ExternalStop);
                 }
                 Some(HostCommand::Reset) => {
                     log::info!("host Reset");
+                    until_cap = None;
                     broadcast_cluster_stop(
                         &control,
                         &mut peers,
@@ -434,9 +451,10 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     allowed = allowed_after_reset(&mut ceiling, allowed);
                     begin_running(&control, &mut peers, allowed)?;
                     running = true;
+                    last_stop_reason = None;
                     log::info!("host Reset: Start");
                 }
-                Some(HostCommand::Start) | Some(HostCommand::Stop) => {}
+                Some(HostCommand::Stop) => {}
                 None => break,
             }
         }
@@ -445,7 +463,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             break Ok(());
         }
 
-        forward_invokes(&node_actions, &server_actions, running)?;
+        forward_invokes(&node_actions, &server_actions)?;
         if let Err(err) = forward_probe_ctrl(&control, &probe_ctrl) {
             log::warn!("probe control forward: {err}");
         }
@@ -453,21 +471,26 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             log::warn!("probe forward: {err}");
         }
 
-        match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed)? {
+        match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed, until_cap)? {
             SyncStep::Continue => {}
-            SyncStep::Stopped => {
+            SyncStep::Stopped(reason) => {
                 running = false;
+                until_cap = None;
+                last_stop_reason = Some(reason);
             }
         }
 
         let vt = ceiling.virtual_time_ns();
+        let published_reason = if running { None } else { last_stop_reason };
         if running != reported_running
             || vt != reported_vt
+            || published_reason != reported_stop_reason
             || last_status.elapsed() >= Duration::from_millis(100)
         {
-            write_status(&host, running, vt, topo, &peers)?;
+            write_status(&host, running, vt, published_reason, topo, &peers)?;
             reported_running = running;
             reported_vt = vt;
+            reported_stop_reason = published_reason;
             last_status = Instant::now();
         }
     };
@@ -535,10 +558,59 @@ fn begin_running(
     peers: &mut HashMap<String, PeerState>,
     allowed: u64,
 ) -> Result<(), ArbiterError> {
-    broadcast_start(control, peers)?;
+    broadcast_start(control, peers, allowed)
+}
+
+/// `until_ns` is already at or behind `now`: do not resume.
+#[must_use]
+fn should_stay_stopped(until_ns: Option<u64>, now_ns: u64) -> bool {
+    until_ns.is_some_and(|until| until <= now_ns)
+}
+
+#[must_use]
+fn reached_until(until_ns: Option<u64>, now_ns: u64) -> bool {
+    until_ns.is_some_and(|until| now_ns >= until)
+}
+
+fn publish_allowed(control: &ArbiterControl, allowed: u64) -> Result<(), ArbiterError> {
     control.publish(&ControlToNode::Allowed {
         allowed_ns: allowed,
     })?;
+    Ok(())
+}
+
+/// Apply a host Start: stay/stop if `until_ns` is not ahead of now, otherwise
+/// broadcast Start with the run ceiling (Stopped resumes; Running retargets).
+#[allow(clippy::too_many_arguments)]
+fn apply_start(
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
+    ceiling: &TimeCeiling,
+    allowed: &mut u64,
+    until_cap: &mut Option<u64>,
+    last_stop_reason: &mut Option<HostStopReason>,
+    running: &mut bool,
+    until_ns: Option<u64>,
+) -> Result<(), ArbiterError> {
+    let now = ceiling.virtual_time_ns();
+    if should_stay_stopped(until_ns, now) {
+        if *running {
+            log::info!("start until_ns={until_ns:?} <= now={now}; Host Stop");
+            broadcast_cluster_stop(control, peers, "server", HostStopReason::Until)?;
+            *running = false;
+        } else {
+            log::info!("start until_ns={until_ns:?} <= now={now}; stay stopped");
+        }
+        *until_cap = None;
+        last_stop_reason.get_or_insert(HostStopReason::Until);
+        return Ok(());
+    }
+
+    *until_cap = until_ns;
+    *allowed = ceiling.allowed_ns_until(*until_cap);
+    broadcast_start(control, peers, *allowed)?;
+    *running = true;
+    *last_stop_reason = None;
     Ok(())
 }
 
@@ -553,12 +625,13 @@ fn allowed_after_reset(ceiling: &mut TimeCeiling, last_allowed: u64) -> u64 {
 fn broadcast_start(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
+    allowed_ns: u64,
 ) -> Result<(), ArbiterError> {
-    control.publish(&ControlToNode::Start)?;
+    control.publish(&ControlToNode::Start { allowed_ns })?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
-    log::info!("Start broadcast");
+    log::info!("Start broadcast allowed_ns={allowed_ns}");
     Ok(())
 }
 
@@ -567,6 +640,7 @@ fn step_time_sync(
     peers: &mut HashMap<String, PeerState>,
     ceiling: &mut TimeCeiling,
     allowed: &mut u64,
+    until_ns: Option<u64>,
 ) -> Result<SyncStep, ArbiterError> {
     let mut changed = false;
     let mut cluster_stop: Option<(String, HostStopReason)> = None;
@@ -597,16 +671,22 @@ fn step_time_sync(
     if let Some((source, reason)) = cluster_stop {
         log::info!("HostStop from '{source}' ({reason}); broadcasting ClusterStop");
         broadcast_cluster_stop(control, peers, &source, reason)?;
-        return Ok(SyncStep::Stopped);
+        return Ok(SyncStep::Stopped(reason));
     }
     if changed {
-        let next_allowed = ceiling.allowed_ns();
+        let next_allowed = ceiling.allowed_ns_until(until_ns);
         if next_allowed != *allowed {
             *allowed = next_allowed;
-            control.publish(&ControlToNode::Allowed {
-                allowed_ns: *allowed,
-            })?;
+            publish_allowed(control, *allowed)?;
         }
+    }
+    if reached_until(until_ns, ceiling.virtual_time_ns()) {
+        log::info!(
+            "until_ns reached at vt={}; broadcasting ClusterStop",
+            ceiling.virtual_time_ns()
+        );
+        broadcast_cluster_stop(control, peers, "server", HostStopReason::Until)?;
+        return Ok(SyncStep::Stopped(HostStopReason::Until));
     }
 
     Ok(SyncStep::Continue)
@@ -689,6 +769,7 @@ fn write_status(
     host: &ArbiterHostPort,
     running: bool,
     virtual_time_ns: u64,
+    stop_reason: Option<HostStopReason>,
     topo: &LogicalTopology,
     peers: &HashMap<String, PeerState>,
 ) -> Result<(), ArbiterError> {
@@ -708,6 +789,11 @@ fn write_status(
     let status = SessionStatus {
         state: if running { "running" } else { "stopped" }.to_string(),
         virtual_time_ns,
+        stop_reason: if running {
+            None
+        } else {
+            stop_reason.map(|reason| reason.as_str().to_string())
+        },
         nodes,
     };
     host.publish_status(&status)?;
@@ -776,6 +862,33 @@ mod tests {
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[test]
+    fn start_from_stopped_uses_run_ceiling_not_now() {
+        let mut ceiling = TimeCeiling::new(["a".into()], 1000);
+        ceiling.report("a", 500);
+        assert_eq!(ceiling.virtual_time_ns(), 500);
+        assert_eq!(ceiling.allowed_ns_until(None), 1500);
+        assert_eq!(ceiling.allowed_ns_until(Some(800)), 800);
+        assert_eq!(ceiling.allowed_ns_until(Some(10_000)), 1500);
+    }
+
+    #[test]
+    fn stay_stopped_when_until_is_not_ahead_of_now() {
+        assert!(should_stay_stopped(Some(0), 0));
+        assert!(should_stay_stopped(Some(1000), 5000));
+        assert!(!should_stay_stopped(Some(1000), 999));
+        assert!(!should_stay_stopped(None, 0));
+        assert!(!should_stay_stopped(None, 5000));
+    }
+
+    #[test]
+    fn reached_until_is_inclusive() {
+        assert!(reached_until(Some(1000), 1000));
+        assert!(reached_until(Some(1000), 1001));
+        assert!(!reached_until(Some(1000), 999));
+        assert!(!reached_until(None, 10_000));
+    }
 
     #[test]
     fn binary_for_kind_selects_rl78_and_plant() {
@@ -892,7 +1005,7 @@ mod tests {
                             let _ = control.publish(&ControlToArbiter::Ready { from: my_hash });
                         }
                     }
-                    ControlToNode::Start => {
+                    ControlToNode::Start { .. } => {
                         got_start = true;
                         if inject_host_stop {
                             let _ = control.publish(&ControlToArbiter::HostStop {

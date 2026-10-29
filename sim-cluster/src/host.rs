@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Host command delivered to a live arbiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostCommand {
-    /// Leave Stopped and broadcast [`crate::control::ControlToNode::Start`].
-    Start,
+    /// Leave Stopped and broadcast [`crate::control::ControlToNode::Start`]
+    /// (the Start sample carries the run ceiling).
+    ///
+    /// `until_ns` caps virtual time for this start. `None` means unlimited.
+    Start { until_ns: Option<u64> },
     /// Broadcast cluster stop and stay in Stopped (process keeps running).
     Stop,
     /// Stop, [`sim_kernel::Resettable`] reset, raise the ceiling to
@@ -21,6 +24,8 @@ pub enum HostCommand {
 #[derive(Deserialize)]
 struct CmdLine {
     cmd: String,
+    #[serde(default)]
+    until_ns: Option<u64>,
 }
 
 impl HostCommand {
@@ -31,12 +36,19 @@ impl HostCommand {
         if line.is_empty() {
             return None;
         }
-        let cmd = match serde_json::from_str::<CmdLine>(line) {
-            Ok(parsed) => parsed.cmd,
-            Err(_) => line.to_string(),
-        };
-        match cmd.as_str() {
-            "start" => Some(Self::Start),
+        if let Ok(parsed) = serde_json::from_str::<CmdLine>(line) {
+            return match parsed.cmd.as_str() {
+                "start" => Some(Self::Start {
+                    until_ns: parsed.until_ns,
+                }),
+                "stop" => Some(Self::Stop),
+                "reset" => Some(Self::Reset),
+                "shutdown" => Some(Self::Shutdown),
+                _ => None,
+            };
+        }
+        match line {
+            "start" => Some(Self::Start { until_ns: None }),
             "stop" => Some(Self::Stop),
             "reset" => Some(Self::Reset),
             "shutdown" => Some(Self::Shutdown),
@@ -47,13 +59,15 @@ impl HostCommand {
     /// One command as a single JSON line, including the trailing newline.
     #[must_use]
     pub fn to_line(self) -> String {
-        let name = match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Reset => "reset",
-            Self::Shutdown => "shutdown",
-        };
-        format!("{{\"cmd\":\"{name}\"}}\n")
+        match self {
+            Self::Start {
+                until_ns: Some(until_ns),
+            } => format!("{{\"cmd\":\"start\",\"until_ns\":{until_ns}}}\n"),
+            Self::Start { until_ns: None } => "{\"cmd\":\"start\"}\n".to_string(),
+            Self::Stop => "{\"cmd\":\"stop\"}\n".to_string(),
+            Self::Reset => "{\"cmd\":\"reset\"}\n".to_string(),
+            Self::Shutdown => "{\"cmd\":\"shutdown\"}\n".to_string(),
+        }
     }
 }
 
@@ -70,6 +84,8 @@ pub struct SessionNode {
 pub struct SessionStatus {
     pub state: String,
     pub virtual_time_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
     pub nodes: Vec<SessionNode>,
 }
 
@@ -81,7 +97,13 @@ mod tests {
     fn parses_json_and_bare_words() {
         assert_eq!(
             HostCommand::parse("{\"cmd\":\"start\"}\n"),
-            Some(HostCommand::Start)
+            Some(HostCommand::Start { until_ns: None })
+        );
+        assert_eq!(
+            HostCommand::parse("{\"cmd\":\"start\",\"until_ns\":1000}\n"),
+            Some(HostCommand::Start {
+                until_ns: Some(1000)
+            })
         );
         assert_eq!(HostCommand::parse("stop"), Some(HostCommand::Stop));
         assert_eq!(HostCommand::parse("  "), None);
@@ -91,7 +113,8 @@ mod tests {
     #[test]
     fn line_round_trips() {
         for cmd in [
-            HostCommand::Start,
+            HostCommand::Start { until_ns: None },
+            HostCommand::Start { until_ns: Some(42) },
             HostCommand::Stop,
             HostCommand::Reset,
             HostCommand::Shutdown,

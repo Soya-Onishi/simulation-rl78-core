@@ -18,6 +18,8 @@ pub enum HostStopReason {
     ExternalStop = 2,
     Step = 3,
     Unmapped = 4,
+    /// Virtual-time cap from host `start` was reached (or already passed).
+    Until = 5,
 }
 
 impl HostStopReason {
@@ -28,6 +30,7 @@ impl HostStopReason {
             Self::ExternalStop => "external_stop",
             Self::Step => "step",
             Self::Unmapped => "unmapped",
+            Self::Until => "until",
         }
     }
 
@@ -39,8 +42,27 @@ impl HostStopReason {
             "external_stop" | "external" => Some(Self::ExternalStop),
             "step" => Some(Self::Step),
             "unmapped" => Some(Self::Unmapped),
+            "until" => Some(Self::Until),
             _ => None,
         }
+    }
+
+    #[must_use]
+    pub fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => None,
+            1 => Some(Self::Breakpoint),
+            2 => Some(Self::ExternalStop),
+            3 => Some(Self::Step),
+            4 => Some(Self::Unmapped),
+            5 => Some(Self::Until),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn to_wire(self) -> u8 {
+        self as u8
     }
 }
 
@@ -63,15 +85,20 @@ pub enum ControlToNode {
         headroom_threshold_ns: u64,
     },
     /// Simulation may enter Running (always broadcast).
-    Start,
+    ///
+    /// `allowed_ns` is the current run ceiling: `min(now + margin, until_ns)`
+    /// when capped, otherwise `now + margin`. The node applies queued actions
+    /// at the current virtual time, then may advance up to this value. Later
+    /// [`Self::Allowed`] samples raise the ceiling as peers report.
+    Start { allowed_ns: u64 },
     /// New virtual-time ceiling (always broadcast).
     Allowed { allowed_ns: u64 },
     /// Host-initiated cluster stop (always broadcast; no ack on same host).
     ClusterStop { reason: HostStopReason },
     /// Hold-reset devices and the CPU via [`sim_kernel::Resettable`].
     ///
-    /// The arbiter sends this only after [`Self::ClusterStop`], then republishes
-    /// [`Self::Allowed`] and [`Self::Start`].
+    /// The arbiter sends this only after [`Self::ClusterStop`], then
+    /// [`Self::Start`] (which carries the new ceiling).
     Reset,
     /// Replace the emit set for one board (always broadcast; nodes ignore others).
     ProbeWatch {

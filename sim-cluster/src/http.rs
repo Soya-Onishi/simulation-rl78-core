@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
@@ -18,6 +18,7 @@ use futures_util::stream::{self, Stream};
 use crate::backend::{SimulationBackend, prepare_topology};
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
+    StartSimulationRequest,
 };
 use crate::probe_log::{self, ProbeRange, ProbeRef};
 use crate::web::PAGE_HTML;
@@ -134,9 +135,11 @@ async fn start_simulation(
     Path(id): Path<String>,
     headers: HeaderMap,
     Query(query): Query<ViewerParam>,
+    body: Bytes,
 ) -> Result<StatusCode, ApiError> {
     require_viewer(&state, &id, &headers, &query).await?;
-    run_command(state, id, |b, id| b.start(id)).await
+    let until_ns = StartSimulationRequest::from_body(&body)?.until_ns;
+    run_command(state, id, move |b, id| b.start(id, until_ns)).await
 }
 
 async fn stop_simulation(
@@ -187,7 +190,7 @@ async fn invoke_action(
     tokio::task::spawn_blocking(move || backend.invoke_action(&id, request))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
-    Ok(StatusCode::OK)
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn run_command<F>(state: AppState, id: String, f: F) -> Result<StatusCode, ApiError>
