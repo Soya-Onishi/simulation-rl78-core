@@ -6,7 +6,7 @@ This is not a product system test. Real cases live in the development project.
 
 from __future__ import annotations
 
-from systemtest import Duration, Topology, connect, sim_case
+from systemtest import Duration, Topology, connect, sim_case, Simulation
 
 
 def plant_topo() -> Topology:
@@ -21,7 +21,7 @@ def plant_topo() -> Topology:
 
 
 @sim_case(topology=plant_topo)
-def test_plant_wait_and_analog_latest(sim) -> None:
+def test_plant_wait_and_analog_latest(sim: Simulation) -> None:
     sim.wait(Duration.ms(1))
     sim.analog("a", "dac0").latest()
     sim.analog("p", "vout").latest()
