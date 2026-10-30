@@ -16,8 +16,8 @@ from systemtest.sse import iter_sse
 
 DEFAULT_URL = "http://127.0.0.1:8090"
 URL_ENV = "SYSTEMTEST_URL"
-NOT_READY_TIMEOUT_S = 15.0
-NOT_READY_INTERVAL_S = 0.2
+RETRY_TIMEOUT_S = 15.0
+RETRY_INTERVAL_S = 0.2
 
 T = TypeVar("T")
 
@@ -99,9 +99,10 @@ class ClusterClient:
         base_url: str | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
-        not_ready_timeout_s: float = NOT_READY_TIMEOUT_S,
-        not_ready_interval_s: float = NOT_READY_INTERVAL_S,
+        retry_timeout_s: float = RETRY_TIMEOUT_S,
+        retry_interval_s: float = RETRY_INTERVAL_S,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.base_url = (base_url or default_base_url()).rstrip("/")
         client_kwargs: dict[str, Any] = {"base_url": self.base_url, "timeout": 60.0}
@@ -109,9 +110,10 @@ class ClusterClient:
             client_kwargs["transport"] = transport
         self._http = httpx.Client(**client_kwargs)
         self._token: str | None = None
-        self._not_ready_timeout_s = not_ready_timeout_s
-        self._not_ready_interval_s = not_ready_interval_s
+        self._retry_timeout_s = retry_timeout_s
+        self._retry_interval_s = retry_interval_s
         self._sleep = sleep
+        self._clock = clock
 
     def close(self) -> None:
         self._http.close()
@@ -124,17 +126,15 @@ class ClusterClient:
             return {}
         return {"x-viewer-token": self._token}
 
-    def _retry_not_ready(self, op: Callable[[], T]) -> T:
-        deadline = time.monotonic() + self._not_ready_timeout_s
+    def _retry(self, op: Callable[[], T]) -> T:
+        deadline = self._clock() + self._retry_timeout_s
         while True:
             try:
                 return op()
-            except ApiError as exc:
-                if not exc.is_catalog_not_ready():
+            except Exception:
+                if self._clock() >= deadline:
                     raise
-                if time.monotonic() >= deadline:
-                    raise
-                self._sleep(self._not_ready_interval_s)
+                self._sleep(self._retry_interval_s)
 
     def create(self, topology: dict[str, Any]) -> str:
         response = self._http.post("/api/simulation", json={"topology": topology})
@@ -175,7 +175,7 @@ class ClusterClient:
             )
             raise_for_api(response)
 
-        self._retry_not_ready(op)
+        self._retry(op)
 
     def catalog(self, sim_id: str) -> list[dict[str, Any]]:
         def op() -> list[dict[str, Any]]:
@@ -189,7 +189,7 @@ class ClusterClient:
                 raise ApiError(response.status_code, "bad_response", "catalog was not a list")
             return payload
 
-        return self._retry_not_ready(op)
+        return self._retry(op)
 
     def samples(
         self,
@@ -216,7 +216,7 @@ class ClusterClient:
                 raise ApiError(response.status_code, "bad_response", "samples was not an object")
             return payload
 
-        return self._retry_not_ready(op)
+        return self._retry(op)
 
     def csv(self, sim_id: str) -> bytes:
         def op() -> bytes:
@@ -227,7 +227,7 @@ class ClusterClient:
             raise_for_api(response)
             return response.content
 
-        return self._retry_not_ready(op)
+        return self._retry(op)
 
     def delete(self, sim_id: str) -> None:
         response = self._http.delete(

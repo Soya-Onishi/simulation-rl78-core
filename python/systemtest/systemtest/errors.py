@@ -14,14 +14,6 @@ class ApiError(SystemTestError):
         self.code = code
         self.message = message
 
-    def is_catalog_not_ready(self) -> bool:
-        """Probe catalog is 503 ``not_ready``; action catalog is 409 ``conflict``."""
-        if self.code == "viewer_busy":
-            return False
-        if self.status == 503 and self.code == "not_ready":
-            return True
-        return self.status == 409 and "catalog is not ready" in self.message.lower()
-
 
 class TruncatedError(SystemTestError):
     """Probe log overflowed; samples are missing."""

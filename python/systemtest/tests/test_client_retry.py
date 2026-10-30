@@ -6,17 +6,30 @@ from systemtest.client import ClusterClient
 from systemtest.errors import ApiError
 
 
-def _client(handler) -> ClusterClient:
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def _client(handler, clock: _Clock | None = None) -> ClusterClient:
+    clock = clock or _Clock()
     return ClusterClient(
         "http://test",
         transport=httpx.MockTransport(handler),
-        not_ready_timeout_s=1.0,
-        not_ready_interval_s=0.0,
-        sleep=lambda _seconds: None,
+        retry_timeout_s=1.0,
+        retry_interval_s=0.2,
+        sleep=clock.sleep,
+        clock=clock.monotonic,
     )
 
 
-def test_catalog_retries_503_then_succeeds() -> None:
+def test_catalog_retries_error_then_succeeds() -> None:
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -38,20 +51,15 @@ def test_catalog_retries_503_then_succeeds() -> None:
     client.close()
 
 
-def test_invoke_retries_action_catalog_409() -> None:
+def test_retries_any_http_error() -> None:
     calls = {"n": 0}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         if calls["n"] == 1:
             return httpx.Response(
                 409,
-                json={
-                    "error": {
-                        "code": "conflict",
-                        "message": "action catalog is not ready",
-                    }
-                },
+                json={"error": {"code": "viewer_busy", "message": "simulation is busy"}},
             )
         return httpx.Response(202)
 
@@ -61,19 +69,17 @@ def test_invoke_retries_action_catalog_409() -> None:
     client.close()
 
 
-def test_viewer_busy_is_not_retried() -> None:
-    calls = {"n": 0}
+def test_gives_up_after_retry_timeout() -> None:
+    clock = _Clock()
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
         return httpx.Response(
-            409,
-            json={"error": {"code": "viewer_busy", "message": "simulation is busy"}},
+            404, json={"error": {"code": "not_found", "message": "unknown probe"}}
         )
 
-    client = _client(handler)
+    client = _client(handler, clock=clock)
     with pytest.raises(ApiError) as err:
         client.catalog("sim1")
-    assert err.value.code == "viewer_busy"
-    assert calls["n"] == 1
+    assert err.value.status == 404
+    assert clock.t >= 1.0
     client.close()
