@@ -14,11 +14,10 @@ from topology_dsl import Topology
 
 from systemtest.client import ClusterClient, ViewerHold, default_base_url
 from systemtest.duration import Duration
-from systemtest.errors import ApiError, ProbeKindError, TruncatedError, WaitError
+from systemtest.errors import ProbeKindError, TruncatedError, WaitError
 from systemtest.uart import UartStream
 
 OUT_ENV = "SYSTEMTEST_OUT"
-CATALOG_TIMEOUT_S = 15.0
 WAIT_TIMEOUT_S = 120.0
 
 
@@ -169,19 +168,7 @@ class Simulation:
             raise csv_error
 
     def _wait_catalog(self) -> None:
-        deadline = time.monotonic() + CATALOG_TIMEOUT_S
-        last: BaseException | None = None
-        while time.monotonic() < deadline:
-            try:
-                self._client.catalog(self._id)
-                return
-            except Exception as exc:  # ApiError 503/409 while boards advertise
-                last = exc
-                if isinstance(exc, ApiError) and exc.status in {503, 409}:
-                    time.sleep(0.2)
-                    continue
-                raise
-        raise last if last is not None else WaitError("probe catalog is not ready")
+        self._client.catalog(self._id)
 
     def _latest(self, board: str, probe: str, kind: str) -> dict[str, Any] | None:
         payload = self._client.samples(self._id, board, probe)

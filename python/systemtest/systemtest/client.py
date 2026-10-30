@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import threading
-from typing import Any
+import time
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import httpx
 
@@ -14,6 +16,10 @@ from systemtest.sse import iter_sse
 
 DEFAULT_URL = "http://127.0.0.1:8090"
 URL_ENV = "SYSTEMTEST_URL"
+NOT_READY_TIMEOUT_S = 15.0
+NOT_READY_INTERVAL_S = 0.2
+
+T = TypeVar("T")
 
 
 def default_base_url() -> str:
@@ -88,10 +94,24 @@ class ViewerHold:
 
 
 class ClusterClient:
-    def __init__(self, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        not_ready_timeout_s: float = NOT_READY_TIMEOUT_S,
+        not_ready_interval_s: float = NOT_READY_INTERVAL_S,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.base_url = (base_url or default_base_url()).rstrip("/")
-        self._http = httpx.Client(base_url=self.base_url, timeout=60.0)
+        client_kwargs: dict[str, Any] = {"base_url": self.base_url, "timeout": 60.0}
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        self._http = httpx.Client(**client_kwargs)
         self._token: str | None = None
+        self._not_ready_timeout_s = not_ready_timeout_s
+        self._not_ready_interval_s = not_ready_interval_s
+        self._sleep = sleep
 
     def close(self) -> None:
         self._http.close()
@@ -103,6 +123,18 @@ class ClusterClient:
         if self._token is None:
             return {}
         return {"x-viewer-token": self._token}
+
+    def _retry_not_ready(self, op: Callable[[], T]) -> T:
+        deadline = time.monotonic() + self._not_ready_timeout_s
+        while True:
+            try:
+                return op()
+            except ApiError as exc:
+                if not exc.is_catalog_not_ready():
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                self._sleep(self._not_ready_interval_s)
 
     def create(self, topology: dict[str, Any]) -> str:
         response = self._http.post("/api/simulation", json={"topology": topology})
@@ -130,28 +162,34 @@ class ClusterClient:
         action: str,
         params: dict[str, float],
     ) -> None:
-        response = self._http.post(
-            f"/api/simulation/{sim_id}/actions",
-            headers=self._headers(),
-            json={
-                "board_id": board_id,
-                "device": device,
-                "action": action,
-                "params": params,
-            },
-        )
-        raise_for_api(response)
+        def op() -> None:
+            response = self._http.post(
+                f"/api/simulation/{sim_id}/actions",
+                headers=self._headers(),
+                json={
+                    "board_id": board_id,
+                    "device": device,
+                    "action": action,
+                    "params": params,
+                },
+            )
+            raise_for_api(response)
+
+        self._retry_not_ready(op)
 
     def catalog(self, sim_id: str) -> list[dict[str, Any]]:
-        response = self._http.get(
-            f"/api/simulation/{sim_id}/probes/catalog",
-            headers=self._headers(),
-        )
-        raise_for_api(response)
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise ApiError(response.status_code, "bad_response", "catalog was not a list")
-        return payload
+        def op() -> list[dict[str, Any]]:
+            response = self._http.get(
+                f"/api/simulation/{sim_id}/probes/catalog",
+                headers=self._headers(),
+            )
+            raise_for_api(response)
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ApiError(response.status_code, "bad_response", "catalog was not a list")
+            return payload
+
+        return self._retry_not_ready(op)
 
     def samples(
         self,
@@ -161,29 +199,35 @@ class ClusterClient:
         from_ns: int | None = None,
         to_ns: int | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, str | int] = {"board": board, "probe": probe}
-        if from_ns is not None:
-            params["from_ns"] = from_ns
-        if to_ns is not None:
-            params["to_ns"] = to_ns
-        response = self._http.get(
-            f"/api/simulation/{sim_id}/probes/samples",
-            headers=self._headers(),
-            params=params,
-        )
-        raise_for_api(response)
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ApiError(response.status_code, "bad_response", "samples was not an object")
-        return payload
+        def op() -> dict[str, Any]:
+            params: dict[str, str | int] = {"board": board, "probe": probe}
+            if from_ns is not None:
+                params["from_ns"] = from_ns
+            if to_ns is not None:
+                params["to_ns"] = to_ns
+            response = self._http.get(
+                f"/api/simulation/{sim_id}/probes/samples",
+                headers=self._headers(),
+                params=params,
+            )
+            raise_for_api(response)
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ApiError(response.status_code, "bad_response", "samples was not an object")
+            return payload
+
+        return self._retry_not_ready(op)
 
     def csv(self, sim_id: str) -> bytes:
-        response = self._http.get(
-            f"/api/simulation/{sim_id}/probes.csv",
-            headers=self._headers(),
-        )
-        raise_for_api(response)
-        return response.content
+        def op() -> bytes:
+            response = self._http.get(
+                f"/api/simulation/{sim_id}/probes.csv",
+                headers=self._headers(),
+            )
+            raise_for_api(response)
+            return response.content
+
+        return self._retry_not_ready(op)
 
     def delete(self, sim_id: str) -> None:
         response = self._http.delete(
