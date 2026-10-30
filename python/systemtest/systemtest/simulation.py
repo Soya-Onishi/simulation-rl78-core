@@ -99,14 +99,24 @@ class Simulation:
         self._testname = safe_testname(testname)
         self._client = ClusterClient(base_url)
         self._viewer: ViewerHold | None = None
-        self._id = self._client.create(topology.to_dict())
-        self._viewer = ViewerHold(self._client.base_url, self._id)
-        self._client.set_token(self._viewer.start())
-        self._wait_catalog()
+        self._id: str | None = None
         self._uarts: dict[tuple[str, str], UartStream] = {}
+        try:
+            self._id = self._client.create(topology.to_dict())
+            self._viewer = ViewerHold(self._client.base_url, self._id)
+            self._client.set_token(self._viewer.start())
+            self._wait_catalog()
+        except BaseException:
+            try:
+                self._release()
+            except Exception:
+                pass
+            raise
 
     @property
     def id(self) -> str:
+        if self._id is None:
+            raise RuntimeError("simulation was not created")
         return self._id
 
     def action(
@@ -158,14 +168,19 @@ class Simulation:
                 self._write_csv()
             except BaseException as exc:
                 csv_error = exc
+        self._release()
+        if csv_error is not None:
+            raise csv_error
+
+    def _release(self) -> None:
         try:
-            self._client.delete(self._id)
+            if self._id is not None:
+                self._client.delete(self._id)
         finally:
             if self._viewer is not None:
                 self._viewer.close()
+                self._viewer = None
             self._client.close()
-        if csv_error is not None:
-            raise csv_error
 
     def _wait_catalog(self) -> None:
         self._client.catalog(self._id)
@@ -227,7 +242,7 @@ class Simulation:
         directory = out_dir() / self._testname
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{self._testname}-{stamp}.csv"
-        path.write_bytes(self._client.csv(self._id))
+        path.write_bytes(self._client.csv(self.id))
 
 
 def open_simulation(
