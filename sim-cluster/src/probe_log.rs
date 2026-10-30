@@ -426,6 +426,25 @@ pub fn json_value(kind: ProbeKind, value: u16) -> serde_json::Value {
     }
 }
 
+/// One `/probes/samples` row. Names come from the catalog; uart/analog values stay numbers.
+#[must_use]
+pub fn json_view(
+    catalog: &HashMap<u64, ProbePointName>,
+    record: &ProbeRecord,
+) -> crate::contract::ProbeSampleJson {
+    let (board, probe) = match catalog.get(&record.probe_id) {
+        Some(point) => (point.board_id.clone(), point.name.clone()),
+        None => (String::new(), format!("{:016x}", record.probe_id)),
+    };
+    crate::contract::ProbeSampleJson {
+        virtual_time_ns: record.virtual_time_ns,
+        board,
+        probe,
+        kind: record.kind.as_str().to_string(),
+        value: json_value(record.kind, record.value),
+    }
+}
+
 /// Read spilled records up to `file_len`, then the in-memory snapshot.
 pub fn load_export(export: &ProbeExport) -> io::Result<Vec<ProbeRecord>> {
     let mut records = read_spill(&export.path, export.file_len)?;
@@ -614,5 +633,21 @@ mod tests {
         assert_eq!(json_value(ProbeKind::Digital, 1), serde_json::json!("High"));
         assert_eq!(json_value(ProbeKind::Uart, 65), serde_json::json!(65));
         assert_eq!(json_value(ProbeKind::Analog, 3300), serde_json::json!(3300));
+    }
+
+    #[test]
+    fn json_view_uses_catalog_names_and_typed_values() {
+        let mut catalog = HashMap::new();
+        catalog.insert(1, point(1, ProbeKind::Analog));
+        let sample = json_view(&catalog, &rec(1, 9, ProbeKind::Analog, 3300));
+        assert_eq!(sample.virtual_time_ns, 9);
+        assert_eq!(sample.board, "board");
+        assert_eq!(sample.probe, "p1");
+        assert_eq!(sample.kind, "analog");
+        assert_eq!(sample.value, serde_json::json!(3300));
+        let missing = json_view(&catalog, &rec(2, 1, ProbeKind::Digital, 1));
+        assert_eq!(missing.board, "");
+        assert_eq!(missing.probe, format!("{:016x}", 2u64));
+        assert_eq!(missing.value, serde_json::json!("High"));
     }
 }

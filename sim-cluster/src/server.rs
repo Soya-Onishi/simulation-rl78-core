@@ -18,8 +18,8 @@ use iceoryx2::prelude::{Node, ipc};
 use crate::action::{ActionRequest, ActionUpstream};
 use crate::backend::{LocalBackend, SimulationBackend};
 use crate::contract::{
-    ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSampleJson,
-    ProbeSamplesResponse, StatusEvent,
+    ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
+    StatusEvent,
 };
 use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
@@ -31,7 +31,7 @@ use crate::ipc::{
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
     CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
-    ProbeView, ProbeWatchView, json_value, record_view,
+    ProbeView, ProbeWatchView, json_view, record_view,
 };
 use crate::topology::{LogicalTopology, TopologyError};
 
@@ -1066,16 +1066,7 @@ fn query_samples(
         truncated,
         samples: records
             .iter()
-            .map(|record| {
-                let view = record_view(&sim.probe_catalog, record);
-                ProbeSampleJson {
-                    virtual_time_ns: view.virtual_time_ns,
-                    board: view.board,
-                    probe: view.probe,
-                    kind: view.kind,
-                    value: json_value(record.kind, record.value),
-                }
-            })
+            .map(|record| json_view(&sim.probe_catalog, record))
             .collect(),
     })
 }
