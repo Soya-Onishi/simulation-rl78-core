@@ -380,12 +380,16 @@ impl ProbeLog {
     }
 }
 
+fn probe_names(catalog: &HashMap<u64, ProbePointName>, probe_id: u64) -> (String, String) {
+    catalog
+        .get(&probe_id)
+        .map(|point| (point.board_id.clone(), point.name.clone()))
+        .unwrap_or_else(|| (String::new(), format!("{:016x}", probe_id)))
+}
+
 #[must_use]
 pub fn record_view(catalog: &HashMap<u64, ProbePointName>, record: &ProbeRecord) -> ProbeView {
-    let (board, probe) = catalog
-        .get(&record.probe_id)
-        .map(|point| (point.board_id.clone(), point.name.clone()))
-        .unwrap_or_else(|| (String::new(), format!("{:016x}", record.probe_id)));
+    let (board, probe) = probe_names(catalog, record.probe_id);
     ProbeView {
         virtual_time_ns: record.virtual_time_ns,
         board,
@@ -432,10 +436,7 @@ pub fn json_view(
     catalog: &HashMap<u64, ProbePointName>,
     record: &ProbeRecord,
 ) -> crate::contract::ProbeSampleJson {
-    let (board, probe) = match catalog.get(&record.probe_id) {
-        Some(point) => (point.board_id.clone(), point.name.clone()),
-        None => (String::new(), format!("{:016x}", record.probe_id)),
-    };
+    let (board, probe) = probe_names(catalog, record.probe_id);
     crate::contract::ProbeSampleJson {
         virtual_time_ns: record.virtual_time_ns,
         board,
