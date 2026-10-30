@@ -449,6 +449,7 @@ impl NodeProbeRuntime {
         records: &[ProbeRecord],
         truncated: bool,
     ) -> Result<(), IpcError> {
+        // One record per message so a full query-reply buffer blocks instead of dropping a chunk.
         if records.is_empty() {
             return self.query.publish_reply(ProbeQueryReplyWire::chunk(
                 request_id,
@@ -458,18 +459,15 @@ impl NodeProbeRuntime {
                 truncated,
             ));
         }
-        let mut offset = 0;
-        while offset < records.len() {
-            let end = (offset + QUERY_CHUNK).min(records.len());
-            let last = end == records.len();
+        let last_i = records.len() - 1;
+        for (i, record) in records.iter().enumerate() {
             self.query.publish_reply(ProbeQueryReplyWire::chunk(
                 request_id,
                 self.board_hash,
-                &records[offset..end],
-                last,
+                std::slice::from_ref(record),
+                i == last_i,
                 truncated,
             ))?;
-            offset = end;
         }
         Ok(())
     }
