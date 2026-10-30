@@ -11,14 +11,14 @@ use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 
 use crate::backend::{SimulationBackend, prepare_topology};
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
-    ProbeSamplesResponse, StartSimulationRequest,
+    ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
 };
 use crate::probe_log::{self, ProbeRange, ProbeRef};
 use crate::web::PAGE_HTML;
@@ -51,7 +51,10 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
             "/api/simulation/{id}/actions",
             get(list_actions).post(invoke_action),
         )
-        .route("/api/simulation/{id}", delete(delete_simulation))
+        .route(
+            "/api/simulation/{id}",
+            get(simulation_status).delete(delete_simulation),
+        )
         .route("/api/simulation/{id}/status", get(status_sse))
         .route("/api/simulation/{id}/viewer", get(viewer_sse))
         .route("/api/simulation/{id}/log", get(log_sse))
@@ -203,6 +206,20 @@ where
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn simulation_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ViewerParam>,
+) -> Result<Json<StatusEvent>, ApiError> {
+    require_viewer(&state, &id, &headers, &query).await?;
+    let backend = state.backend.clone();
+    let status = tokio::task::spawn_blocking(move || backend.status(&id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(status))
 }
 
 async fn delete_simulation(

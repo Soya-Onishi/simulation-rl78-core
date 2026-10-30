@@ -59,7 +59,7 @@ fn usage() -> &'static str {
      \n\
      Serves the create page (/) and per-simulation pages (/{id}).\n\
      Control API: POST /api/simulation, POST .../{id}/start|stop|reset,\n\
-     DELETE .../{id}, GET .../{id}/status and .../{id}/log (SSE).\n\
+     DELETE .../{id}, GET .../{id} (status snapshot), GET .../{id}/status and .../{id}/log (SSE).\n\
      With --topology, that simulation is created stopped (CLI convenience;\n\
      HTTP create accepts topology JSON only).\n\
      Default listen address is 127.0.0.1:8090.\n\

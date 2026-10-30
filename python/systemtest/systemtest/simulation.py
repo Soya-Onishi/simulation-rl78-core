@@ -18,7 +18,8 @@ from systemtest.errors import ProbeKindError, TruncatedError, WaitError
 from systemtest.uart import UartStream
 
 OUT_ENV = "SYSTEMTEST_OUT"
-WAIT_TIMEOUT_S = 120.0
+WAIT_STALL_S = 3.0
+WAIT_POLL_S = 0.1
 
 
 def out_dir() -> Path:
@@ -137,20 +138,32 @@ class Simulation:
     def wait(self, duration: Duration) -> None:
         until_ns = self.virtual_time_ns + duration.nanoseconds
         self._client.start(self._id, until_ns)
-        deadline = time.monotonic() + WAIT_TIMEOUT_S
-        for status in self._client.iter_status(self._id):
-            self.virtual_time_ns = int(status.get("virtual_time_ns") or 0)
+        last_vt: int | None = None
+        stall_since: float | None = None
+        while True:
+            status = self._client.status(self._id)
+            vt = int(status.get("virtual_time_ns") or 0)
+            self.virtual_time_ns = vt
             state = status.get("state")
             reason = status.get("stop_reason")
             if state == "exited":
                 raise WaitError(f"simulation exited during wait (stop_reason={reason!r})")
-            if state == "stopped":
-                if self.virtual_time_ns >= until_ns or reason == "until":
-                    return
-                raise WaitError(f"wait stopped for {reason!r}")
-            if time.monotonic() > deadline:
-                raise WaitError("wait timed out before until_ns")
-        raise WaitError("status stream ended before until_ns")
+            if state == "stopped" and vt >= until_ns:
+                return
+            stalled = last_vt is not None and vt == last_vt
+            overdue = vt >= until_ns and state != "stopped"
+            now = time.monotonic()
+            if stalled or overdue:
+                if stall_since is None:
+                    stall_since = now
+                elif now - stall_since >= WAIT_STALL_S:
+                    if overdue:
+                        raise WaitError("wait did not stop after until_ns")
+                    raise WaitError("virtual time did not advance")
+            else:
+                stall_since = None
+            last_vt = vt
+            time.sleep(WAIT_POLL_S)
 
     def uart(self, board: str, probe: str) -> UartHandle:
         return UartHandle(self, board, probe)

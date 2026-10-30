@@ -141,6 +141,17 @@ class ClusterClient:
         raise_for_api(response)
         return str(response.json()["id"])
 
+    def status(self, sim_id: str) -> dict[str, Any]:
+        response = self._http.get(
+            f"/api/simulation/{sim_id}",
+            headers=self._headers(),
+        )
+        raise_for_api(response)
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ApiError(response.status_code, "bad_response", "status was not an object")
+        return payload
+
     def start(self, sim_id: str, until_ns: int | None) -> None:
         kwargs: dict[str, Any]
         if until_ns is None:

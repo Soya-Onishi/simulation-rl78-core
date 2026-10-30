@@ -83,3 +83,23 @@ def test_gives_up_after_retry_timeout() -> None:
     assert err.value.status == 404
     assert clock.t >= 1.0
     client.close()
+
+
+def test_status_reads_snapshot_json() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/simulation/sim1"
+        return httpx.Response(
+            200,
+            json={
+                "id": "sim1",
+                "state": "stopped",
+                "virtual_time_ns": 12,
+                "nodes": [],
+            },
+        )
+
+    client = _client(handler)
+    payload = client.status("sim1")
+    assert payload["state"] == "stopped"
+    assert payload["virtual_time_ns"] == 12
+    client.close()

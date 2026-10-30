@@ -20,7 +20,7 @@ pub struct CreateSimulationResponse {
     pub id: String,
 }
 
-/// SSE `status` event payload (and internal status snapshots).
+/// Snapshot for `GET /api/simulation/{id}` and SSE `status` events.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatusEvent {
     pub id: String,
