@@ -20,6 +20,16 @@ def default_base_url() -> str:
     return os.environ.get(URL_ENV, DEFAULT_URL).rstrip("/")
 
 
+def cluster_available(base_url: str | None = None) -> bool:
+    """True when cluster-server accepts a TCP connection at the harness URL."""
+    url = (base_url or default_base_url()).rstrip("/")
+    try:
+        httpx.get(url, timeout=0.5)
+    except httpx.RequestError:
+        return False
+    return True
+
+
 def raise_for_api(response: httpx.Response) -> None:
     if response.is_success:
         return
