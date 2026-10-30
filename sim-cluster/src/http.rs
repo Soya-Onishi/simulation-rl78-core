@@ -18,7 +18,7 @@ use futures_util::stream::{self, Stream};
 use crate::backend::{SimulationBackend, prepare_topology};
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
-    StartSimulationRequest,
+    ProbeSamplesResponse, StartSimulationRequest,
 };
 use crate::probe_log::{self, ProbeRange, ProbeRef};
 use crate::web::PAGE_HTML;
@@ -56,6 +56,7 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
         .route("/api/simulation/{id}/viewer", get(viewer_sse))
         .route("/api/simulation/{id}/log", get(log_sse))
         .route("/api/simulation/{id}/probes/catalog", get(probe_catalog))
+        .route("/api/simulation/{id}/probes/samples", get(probe_samples))
         .route(
             "/api/simulation/{id}/probes/watch",
             get(probe_watch_get)
@@ -379,6 +380,56 @@ async fn probe_catalog(
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(Json(items))
+}
+
+#[derive(serde::Deserialize)]
+struct ProbeSamplesQuery {
+    board: String,
+    probe: String,
+    from_ns: Option<String>,
+    to_ns: Option<String>,
+    viewer: Option<String>,
+}
+
+async fn probe_samples(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ProbeSamplesQuery>,
+) -> Result<Json<ProbeSamplesResponse>, ApiError> {
+    require_viewer(
+        &state,
+        &id,
+        &headers,
+        &ViewerParam {
+            viewer: query.viewer.clone(),
+        },
+    )
+    .await?;
+    if query.board.is_empty() || query.probe.is_empty() {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "board and probe are required",
+        ));
+    }
+    let from_ns = query.from_ns.as_deref();
+    let to_ns = query.to_ns.as_deref();
+    let range = ProbeRange::parse(from_ns, to_ns)
+        .map_err(|message| ApiError::bad_request("bad_param", message))?;
+    let latest = range.from_ns.is_none() && range.to_ns.is_none();
+    let backend = state.backend.clone();
+    let body = tokio::task::spawn_blocking(move || {
+        backend.probe_samples(
+            &id,
+            &query.board,
+            &query.probe,
+            if latest { None } else { range.from_ns },
+            if latest { None } else { range.to_ns },
+        )
+    })
+    .await
+    .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(body))
 }
 
 #[derive(serde::Deserialize)]

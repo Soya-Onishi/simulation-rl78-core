@@ -10,8 +10,9 @@ use sim_kernel::{AnalogVoltage, DigitalLevel, ProbePoint, ProbeTap, UartFrame};
 use crate::ipc::{
     CSV_CHUNKS_PER_TICK, IpcError, NodeProbeCsv, NodeProbeQuery, ProbeAnalogPub, ProbeAnalogSample,
     ProbeDigitalPub, ProbeDigitalSample, ProbeQueryReplyWire, ProbeUartPub, ProbeUartSample,
-    QUERY_CHUNK, QUERY_KIND_LATEST, board_id_hash, open_analog_publisher, open_digital_publisher,
-    open_uart_publisher, probe_id_hash, probe_name_hash, send_analog, send_digital, send_uart,
+    QUERY_CHUNK, QUERY_KIND_LATEST, QUERY_KIND_RANGE, board_id_hash, open_analog_publisher,
+    open_digital_publisher, open_uart_publisher, probe_id_hash, probe_name_hash, send_analog,
+    send_digital, send_uart,
 };
 use crate::probe_log::{ProbeKind, ProbeLog, ProbePointName, ProbeRange, ProbeRecord, load_export};
 
@@ -399,7 +400,7 @@ impl NodeProbeRuntime {
     pub fn service_queries(&mut self) -> Result<(), IpcError> {
         for _ in 0..8 {
             match self.query.try_query()? {
-                Some(query) => self.answer_latest(query)?,
+                Some(query) => self.answer_query(query)?,
                 None => break,
             }
         }
@@ -425,25 +426,36 @@ impl NodeProbeRuntime {
         }
     }
 
-    fn answer_latest(&mut self, query: crate::ipc::ProbeQueryWire) -> Result<(), IpcError> {
+    fn answer_query(&mut self, query: crate::ipc::ProbeQueryWire) -> Result<(), IpcError> {
         if query.board_hash != 0 && query.board_hash != self.board_hash {
             return Ok(());
         }
-        if query.kind != QUERY_KIND_LATEST {
-            return Ok(());
+        match query.kind {
+            QUERY_KIND_LATEST => {
+                let records = self.log.latest_of(query.probe_ids());
+                self.send_query_reply(query.request_id, &records, false)
+            }
+            QUERY_KIND_RANGE => {
+                let (records, truncated) = self.range_records(&query);
+                self.send_query_reply(query.request_id, &records, truncated)
+            }
+            _ => Ok(()),
         }
-        let records = self.log.latest_of(query.probe_ids());
-        self.send_latest_reply(query.request_id, &records)
     }
 
-    fn send_latest_reply(&self, request_id: u64, records: &[ProbeRecord]) -> Result<(), IpcError> {
+    fn send_query_reply(
+        &self,
+        request_id: u64,
+        records: &[ProbeRecord],
+        truncated: bool,
+    ) -> Result<(), IpcError> {
         if records.is_empty() {
             return self.query.publish_reply(ProbeQueryReplyWire::chunk(
                 request_id,
                 self.board_hash,
                 &[],
                 true,
-                false,
+                truncated,
             ));
         }
         let mut offset = 0;
@@ -455,23 +467,20 @@ impl NodeProbeRuntime {
                 self.board_hash,
                 &records[offset..end],
                 last,
-                false,
+                truncated,
             ))?;
             offset = end;
         }
         Ok(())
     }
 
-    fn begin_csv(&mut self, query: crate::ipc::ProbeQueryWire) -> Result<(), IpcError> {
-        if query.board_hash != 0 && query.board_hash != self.board_hash {
-            return Ok(());
-        }
+    fn range_records(&mut self, query: &crate::ipc::ProbeQueryWire) -> (Vec<ProbeRecord>, bool) {
         let range = ProbeRange {
             from_ns: (query.has_from != 0).then_some(query.from_ns),
             to_ns: (query.has_to != 0).then_some(query.to_ns),
         };
         let wanted: std::collections::HashSet<u64> = query.probe_ids().iter().copied().collect();
-        let (records, truncated) = match self.log.export() {
+        match self.log.export() {
             Ok(export) => {
                 let truncated = export.truncated;
                 match load_export(&export) {
@@ -486,7 +495,14 @@ impl NodeProbeRuntime {
                 }
             }
             Err(_) => (Vec::new(), true),
-        };
+        }
+    }
+
+    fn begin_csv(&mut self, query: crate::ipc::ProbeQueryWire) -> Result<(), IpcError> {
+        if query.board_hash != 0 && query.board_hash != self.board_hash {
+            return Ok(());
+        }
+        let (records, truncated) = self.range_records(&query);
         self.csv_out = Some(CsvSend {
             request_id: query.request_id,
             records,

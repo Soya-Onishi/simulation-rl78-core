@@ -93,6 +93,18 @@ impl ProbeQueryWire {
         }
     }
 
+    /// Range query on the query channel (JSON samples) or the CSV channel.
+    #[must_use]
+    pub fn range(
+        request_id: u64,
+        board_hash: u64,
+        ids: &[u64],
+        from_ns: Option<u64>,
+        to_ns: Option<u64>,
+    ) -> Self {
+        Self::csv(request_id, board_hash, ids, from_ns, to_ns)
+    }
+
     #[must_use]
     pub fn csv(
         request_id: u64,

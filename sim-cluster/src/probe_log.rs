@@ -417,6 +417,15 @@ pub fn display_value(kind: ProbeKind, value: u16) -> String {
     }
 }
 
+/// JSON `value` for `/probes/samples`: digital is a level name, uart/analog are numbers.
+#[must_use]
+pub fn json_value(kind: ProbeKind, value: u16) -> serde_json::Value {
+    match kind {
+        ProbeKind::Digital => serde_json::Value::String(display_value(kind, value)),
+        ProbeKind::Uart | ProbeKind::Analog => value.into(),
+    }
+}
+
 /// Read spilled records up to `file_len`, then the in-memory snapshot.
 pub fn load_export(export: &ProbeExport) -> io::Result<Vec<ProbeRecord>> {
     let mut records = read_spill(&export.path, export.file_len)?;
@@ -598,5 +607,12 @@ mod tests {
         let export = log.export().unwrap();
         assert_eq!(export.memory.len(), 1);
         assert_eq!(export.memory[0].virtual_time_ns, 1);
+    }
+
+    #[test]
+    fn json_value_types_match_kind() {
+        assert_eq!(json_value(ProbeKind::Digital, 1), serde_json::json!("High"));
+        assert_eq!(json_value(ProbeKind::Uart, 65), serde_json::json!(65));
+        assert_eq!(json_value(ProbeKind::Analog, 3300), serde_json::json!(3300));
     }
 }

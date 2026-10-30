@@ -101,6 +101,23 @@ pub struct InvokeActionRequest {
     pub params: std::collections::BTreeMap<String, f64>,
 }
 
+/// One row of `GET /api/simulation/{id}/probes/samples`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProbeSampleJson {
+    pub virtual_time_ns: u64,
+    pub board: String,
+    pub probe: String,
+    pub kind: String,
+    pub value: serde_json::Value,
+}
+
+/// Body for `GET /api/simulation/{id}/probes/samples`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProbeSamplesResponse {
+    pub truncated: bool,
+    pub samples: Vec<ProbeSampleJson>,
+}
+
 /// Uniform API error envelope: `{"error":{"code","message"}}`.
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
@@ -177,7 +194,33 @@ impl std::error::Error for ApiError {}
 
 #[cfg(test)]
 mod tests {
-    use super::StartSimulationRequest;
+    use super::{ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest};
+
+    #[test]
+    fn samples_body_uses_typed_values() {
+        let body = ProbeSamplesResponse {
+            truncated: false,
+            samples: vec![
+                ProbeSampleJson {
+                    virtual_time_ns: 1,
+                    board: "a".into(),
+                    probe: "p01".into(),
+                    kind: "digital".into(),
+                    value: serde_json::json!("High"),
+                },
+                ProbeSampleJson {
+                    virtual_time_ns: 2,
+                    board: "a".into(),
+                    probe: "uart0".into(),
+                    kind: "uart".into(),
+                    value: serde_json::json!(65),
+                },
+            ],
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["samples"][0]["value"], "High");
+        assert_eq!(json["samples"][1]["value"], 65);
+    }
 
     #[test]
     fn start_body_empty_is_unlimited() {
