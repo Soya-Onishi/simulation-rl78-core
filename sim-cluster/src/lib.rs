@@ -15,8 +15,10 @@ pub mod contract;
 pub mod control;
 pub mod data_plane;
 pub mod elf_source;
+pub mod gdb;
 pub mod host;
 pub mod http;
+pub mod inspect;
 pub mod ipc;
 pub mod lifecycle;
 pub mod log_msg;
@@ -37,9 +39,10 @@ pub use board_runtime::{
 };
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
-    ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, CreateSimulationRequest,
-    CreateSimulationResponse, InvokeActionRequest, LogEvent, ProbeSampleJson, ProbeSamplesResponse,
-    StartSimulationRequest, StatusEvent, prepare_create_topology,
+    ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, AttachGdbRequest,
+    CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, InvokeActionRequest,
+    LogEvent, ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
+    prepare_create_topology,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;

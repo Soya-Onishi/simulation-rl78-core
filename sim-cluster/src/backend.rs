@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
-use crate::contract::{ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent};
+use crate::contract::{
+    ActionList, ApiError, GdbSessionInfo, InvokeActionRequest, LogEvent, StatusEvent,
+};
 use crate::host::HostCommand;
 use crate::server::{Job, JobKind, JobReply};
 use crate::topology::LogicalTopology;
@@ -60,6 +62,9 @@ pub trait SimulationBackend: Send + Sync {
     fn viewer_attach(&self, id: &str) -> Result<String, ApiError>;
     fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError>;
     fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError>;
+    fn gdb_attach(&self, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError>;
+    fn gdb_detach(&self, id: &str) -> Result<(), ApiError>;
+    fn gdb_get(&self, id: &str) -> Result<Option<GdbSessionInfo>, ApiError>;
 }
 
 /// In-process backend over the cluster-server worker queue.
@@ -368,6 +373,40 @@ impl SimulationBackend for LocalBackend {
             JobReply::Accepted | JobReply::Err(_) => Ok(()),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for viewer detach: {other:?}"
+            ))),
+        }
+    }
+
+    fn gdb_attach(&self, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError> {
+        match self.rpc(JobKind::GdbAttach {
+            id: id.to_string(),
+            board_id: board_id.to_string(),
+        })? {
+            JobReply::Gdb(Some(info)) => Ok(info),
+            JobReply::Gdb(None) => Err(ApiError::internal("gdb attach returned empty")),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for gdb attach: {other:?}"
+            ))),
+        }
+    }
+
+    fn gdb_detach(&self, id: &str) -> Result<(), ApiError> {
+        match self.rpc(JobKind::GdbDetach { id: id.to_string() })? {
+            JobReply::Accepted => Ok(()),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for gdb detach: {other:?}"
+            ))),
+        }
+    }
+
+    fn gdb_get(&self, id: &str) -> Result<Option<GdbSessionInfo>, ApiError> {
+        match self.rpc(JobKind::GdbGet { id: id.to_string() })? {
+            JobReply::Gdb(info) => Ok(info),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for gdb get: {other:?}"
             ))),
         }
     }

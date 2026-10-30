@@ -274,6 +274,16 @@ impl<C: Cpu> Machine<C> {
                 self.sync_breakpoints();
                 Response::Inspect(InspectResult::Ok)
             }
+            Command::ReadGdbRegs => match self.cpu.core().read_gdb_registers() {
+                Ok(data) => Response::Inspect(InspectResult::GdbRegs { data }),
+                Err(err) => Response::Error(err),
+            },
+            Command::WriteGdbRegs { data } => {
+                match self.cpu.core_mut().write_gdb_registers(&data) {
+                    Ok(()) => Response::Inspect(InspectResult::Ok),
+                    Err(err) => Response::Error(err),
+                }
+            }
             Command::Start
             | Command::Step
             | Command::Stop

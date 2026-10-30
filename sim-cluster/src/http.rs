@@ -17,8 +17,9 @@ use futures_util::stream::{self, Stream};
 
 use crate::backend::SimulationBackend;
 use crate::contract::{
-    ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
-    ProbeSamplesResponse, StartSimulationRequest, StatusEvent, prepare_create_topology,
+    ActionList, ApiError, AttachGdbRequest, CreateSimulationRequest, CreateSimulationResponse,
+    GdbSessionInfo, InvokeActionRequest, ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
+    prepare_create_topology,
 };
 use crate::probe_log::{self, ProbeRange, ProbeRef};
 use crate::web::PAGE_HTML;
@@ -53,6 +54,10 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
         .route(
             "/api/simulation/{id}",
             get(simulation_status).delete(delete_simulation),
+        )
+        .route(
+            "/api/simulation/{id}/gdb",
+            get(gdb_get).post(gdb_attach).delete(gdb_detach),
         )
         .route("/api/simulation/{id}/status", get(status_sse))
         .route("/api/simulation/{id}/viewer", get(viewer_sse))
@@ -214,6 +219,45 @@ async fn simulation_status(
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(Json(status))
+}
+
+async fn gdb_attach(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Result<Json<AttachGdbRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<GdbSessionInfo>), ApiError> {
+    let Json(request) =
+        body.map_err(|_| ApiError::bad_request("bad_param", "invalid gdb attach body"))?;
+    if request.board_id.is_empty() {
+        return Err(ApiError::bad_request("bad_param", "board_id is required"));
+    }
+    let backend = state.backend.clone();
+    let info = tokio::task::spawn_blocking(move || backend.gdb_attach(&id, &request.board_id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok((StatusCode::CREATED, Json(info)))
+}
+
+async fn gdb_detach(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let backend = state.backend.clone();
+    tokio::task::spawn_blocking(move || backend.gdb_detach(&id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(StatusCode::OK)
+}
+
+async fn gdb_get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<GdbSessionInfo>>, ApiError> {
+    let backend = state.backend.clone();
+    let info = tokio::task::spawn_blocking(move || backend.gdb_get(&id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(info))
 }
 
 async fn delete_simulation(

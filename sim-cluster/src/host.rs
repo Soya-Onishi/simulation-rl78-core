@@ -19,6 +19,8 @@ pub enum HostCommand {
     Reset,
     /// Leave the session and exit the arbiter process.
     Shutdown,
+    /// One gdb step on `board_hash`, then catch peers up to that virtual time.
+    Step { board_hash: u64 },
 }
 
 #[derive(Deserialize)]
@@ -26,6 +28,8 @@ struct CmdLine {
     cmd: String,
     #[serde(default)]
     until_ns: Option<u64>,
+    #[serde(default)]
+    board_hash: Option<u64>,
 }
 
 impl HostCommand {
@@ -44,6 +48,9 @@ impl HostCommand {
                 "stop" => Some(Self::Stop),
                 "reset" => Some(Self::Reset),
                 "shutdown" => Some(Self::Shutdown),
+                "step" => parsed
+                    .board_hash
+                    .map(|board_hash| Self::Step { board_hash }),
                 _ => None,
             };
         }
@@ -67,6 +74,9 @@ impl HostCommand {
             Self::Stop => "{\"cmd\":\"stop\"}\n".to_string(),
             Self::Reset => "{\"cmd\":\"reset\"}\n".to_string(),
             Self::Shutdown => "{\"cmd\":\"shutdown\"}\n".to_string(),
+            Self::Step { board_hash } => {
+                format!("{{\"cmd\":\"step\",\"board_hash\":{board_hash}}}\n")
+            }
         }
     }
 }
@@ -118,6 +128,7 @@ mod tests {
             HostCommand::Stop,
             HostCommand::Reset,
             HostCommand::Shutdown,
+            HostCommand::Step { board_hash: 1 },
         ] {
             assert_eq!(HostCommand::parse(&cmd.to_line()), Some(cmd));
         }

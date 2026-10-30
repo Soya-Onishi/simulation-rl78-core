@@ -213,6 +213,17 @@ pub trait Core: Send + Resettable {
 
     /// Push the kernel breakpoint table into the backend (`tlib_add_breakpoint`).
     fn sync_breakpoints(&mut self, _breakpoints: &[Breakpoint]) {}
+
+    /// Architecture GDB `g` packet (raw bytes). Default: not supported.
+    fn read_gdb_registers(&self) -> Result<Vec<u8>, SimError> {
+        Err(SimError::Unsupported)
+    }
+
+    /// Write a GDB `G` packet. Default: not supported.
+    fn write_gdb_registers(&mut self, data: &[u8]) -> Result<(), SimError> {
+        let _ = data;
+        Err(SimError::Unsupported)
+    }
 }
 
 /// SoC placed in [`crate::Machine::cpu`].

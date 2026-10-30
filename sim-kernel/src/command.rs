@@ -40,6 +40,12 @@ pub enum Command {
     },
     /// Drop every software breakpoint (e.g. new GDB session).
     ClearBreakpoints,
+    /// Architecture GDB `g` packet (opaque bytes assembled by the CPU crate).
+    ReadGdbRegs,
+    /// Architecture GDB `G` packet.
+    WriteGdbRegs {
+        data: Vec<u8>,
+    },
     /// Multi-board virtual-time ceiling: do not advance past `tick`.
     SetAllowed {
         tick: Tick,
@@ -64,6 +70,7 @@ pub enum InspectResult {
     Reg { id: RegId, value: u64 },
     Mem { addr: Addr, data: Vec<u8> },
     Breakpoint { id: BreakpointId },
+    GdbRegs { data: Vec<u8> },
 }
 
 /// Recoverable control-plane error.
@@ -118,6 +125,7 @@ impl fmt::Display for InspectResult {
                 Ok(())
             }
             Self::Breakpoint { id } => write!(f, "breakpoint {}", id.0),
+            Self::GdbRegs { data } => write!(f, "gdb-regs {} bytes", data.len()),
         }
     }
 }

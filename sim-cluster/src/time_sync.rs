@@ -26,6 +26,12 @@ impl TimeCeiling {
         }
     }
 
+    /// Last TimeReport for `board_id`.
+    #[must_use]
+    pub fn last_report(&self, board_id: &str) -> Option<u64> {
+        self.reports.get(board_id).copied()
+    }
+
     /// Raise every board's report to at least `now_ns`.
     ///
     /// Host Reset uses this so the next [`Self::allowed_ns`] is `now + margin`
@@ -72,6 +78,7 @@ mod tests {
     #[test]
     fn allowed_is_min_plus_margin() {
         let mut ceil = TimeCeiling::new(["a".into(), "b".into()], 1000);
+        assert_eq!(ceil.last_report("a"), Some(0));
         ceil.report("a", 50);
         ceil.report("b", 200);
         assert_eq!(ceil.allowed_ns(), 1050);

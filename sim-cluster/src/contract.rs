@@ -48,6 +48,25 @@ pub struct StatusEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     pub nodes: Vec<SessionNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gdb: Option<GdbSessionInfo>,
+}
+
+/// Body for `POST /api/simulation/{id}/gdb`.
+#[derive(Debug, Deserialize)]
+pub struct AttachGdbRequest {
+    pub board_id: String,
+}
+
+/// Live gdbserver slot advertised by cluster-server.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GdbSessionInfo {
+    pub board_id: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub ssh_command: String,
+    pub connected: bool,
 }
 
 /// Body for `POST /api/simulation/{id}/start`. Empty / omitted `until_ns` is unlimited.
