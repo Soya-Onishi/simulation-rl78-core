@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from systemtest.client import cluster_available
 from systemtest.plugin import pytest_runtest_setup
@@ -13,20 +14,11 @@ def test_cluster_available_false_on_connect_error(monkeypatch) -> None:
 
 
 def test_sim_case_setup_skips_when_server_is_down(monkeypatch) -> None:
-    import pytest
-
     monkeypatch.setattr("systemtest.plugin.cluster_available", lambda: False)
-    import systemtest.plugin as plugin
 
-    previous = plugin._SERVER_UP
-    plugin._SERVER_UP = None
-    try:
+    class _Item:
+        def get_closest_marker(self, name: str):
+            return object() if name == "sim_case" else None
 
-        class _Item:
-            def get_closest_marker(self, name: str):
-                return object() if name == "sim_case" else None
-
-        with pytest.raises(pytest.skip.Exception, match="cluster-server is not running"):
-            pytest_runtest_setup(_Item())  # type: ignore[arg-type]
-    finally:
-        plugin._SERVER_UP = previous
+    with pytest.raises(pytest.skip.Exception, match="cluster-server is not running"):
+        pytest_runtest_setup(_Item())  # type: ignore[arg-type]

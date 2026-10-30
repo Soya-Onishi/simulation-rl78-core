@@ -9,8 +9,6 @@ import pytest
 from systemtest.client import cluster_available
 from systemtest.simulation import Simulation, open_simulation
 
-_SERVER_UP: bool | None = None
-
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "sim_case(topology, csv=False): cluster simulation case")
@@ -18,12 +16,9 @@ def pytest_configure(config: pytest.Config) -> None:
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Skip @sim_case tests when cluster-server is not listening."""
-    global _SERVER_UP
     if item.get_closest_marker("sim_case") is None:
         return
-    if _SERVER_UP is None:
-        _SERVER_UP = cluster_available()
-    if not _SERVER_UP:
+    if not cluster_available():
         pytest.skip("cluster-server is not running")
 
 
