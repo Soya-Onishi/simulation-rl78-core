@@ -947,7 +947,7 @@ fn snapshot_watch(sim: &mut Simulation) -> Result<CoarseBatch, ApiError> {
             samples: Vec::new(),
         });
     }
-    let records = query_latest(sim, &probe_ids)?;
+    let (records, _) = query_latest(sim, &probe_ids)?;
     Ok(CoarseBatch {
         seq,
         samples: records
@@ -979,7 +979,10 @@ fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn query_latest(sim: &mut Simulation, probe_ids: &[u64]) -> Result<Vec<ProbeRecord>, ApiError> {
+fn query_latest(
+    sim: &mut Simulation,
+    probe_ids: &[u64],
+) -> Result<(Vec<ProbeRecord>, bool), ApiError> {
     let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
     for id in probe_ids {
         if let Some(point) = sim.probe_catalog.get(id) {
@@ -991,7 +994,7 @@ fn query_latest(sim: &mut Simulation, probe_ids: &[u64]) -> Result<Vec<ProbeReco
     }
     let expected: HashSet<u64> = by_board.keys().copied().collect();
     if expected.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let request_id = next_probe_request(sim);
     for (board_hash, ids) in by_board {
@@ -999,7 +1002,7 @@ fn query_latest(sim: &mut Simulation, probe_ids: &[u64]) -> Result<Vec<ProbeReco
             .publish_query(ProbeQueryWire::latest(request_id, board_hash, &ids))
             .map_err(|err| ApiError::internal(err.to_string()))?;
     }
-    Ok(collect_query(sim, request_id, expected, Duration::from_secs(5))?.0)
+    collect_query(sim, request_id, expected, Duration::from_secs(5))
 }
 
 fn query_range(
@@ -1057,7 +1060,7 @@ fn query_samples(
         }],
     )?;
     let (records, truncated) = if from_ns.is_none() && to_ns.is_none() {
-        (query_latest(sim, &ids)?, false)
+        query_latest(sim, &ids)?
     } else {
         let range = ProbeRange { from_ns, to_ns };
         query_range(sim, &ids, range)?

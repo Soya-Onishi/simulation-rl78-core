@@ -433,7 +433,7 @@ impl NodeProbeRuntime {
         match query.kind {
             QUERY_KIND_LATEST => {
                 let records = self.log.latest_of(query.probe_ids());
-                self.send_query_reply(query.request_id, &records, false)
+                self.send_query_reply(query.request_id, &records, self.log.truncated())
             }
             QUERY_KIND_RANGE => {
                 let (records, truncated) = self.range_records(&query);

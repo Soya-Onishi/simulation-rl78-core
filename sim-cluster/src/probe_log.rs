@@ -622,7 +622,8 @@ mod tests {
         log.spill_path = PathBuf::from("/dev/null/sim-cluster-probes-fail.bin");
         log.push(rec(1, 1, ProbeKind::Digital, 1));
         log.push(rec(1, 2, ProbeKind::Digital, 2));
-        assert!(log.truncated);
+        assert!(log.truncated());
+        assert_eq!(log.latest_of(&[1])[0].virtual_time_ns, 1);
         let export = log.export().unwrap();
         assert_eq!(export.memory.len(), 1);
         assert_eq!(export.memory[0].virtual_time_ns, 1);
