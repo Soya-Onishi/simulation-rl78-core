@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
 from topology_dsl import embed_local_elfs, main, resolve_server
 
 
@@ -129,6 +131,36 @@ class CreateCliTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+class CreateSimScriptTests(unittest.TestCase):
+    def _script(self) -> Path:
+        return Path(__file__).resolve().parents[2] / "scripts" / "create-sim.sh"
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(self._script()), *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_empty_args_is_shell_error(self) -> None:
+        result = self._run()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("missing topology script", result.stderr)
+        self.assertNotIn("topology_dsl", result.stderr)
+
+    def test_non_python_path_is_shell_error(self) -> None:
+        result = self._run("topology.json")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be a .py path", result.stderr)
+        self.assertNotIn("topology_dsl", result.stderr)
+
+    def test_flags_without_script_is_shell_error(self) -> None:
+        result = self._run("--open")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("missing topology script", result.stderr)
+        self.assertNotIn("topology_dsl", result.stderr)
 
 
 if __name__ == "__main__":
