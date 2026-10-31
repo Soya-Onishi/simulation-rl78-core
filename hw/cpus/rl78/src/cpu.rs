@@ -395,12 +395,6 @@ impl Core for Rl78Cpu {
         self.set_reg32(Rl78Reg::Pc, pc as u32);
     }
 
-    /// Push the kernel breakpoint table into tlib.
-    ///
-    /// TODO: production call site is `Simulator` after `Command::AddBreakpoint`
-    /// / `RemoveBreakpoint` (inspect path, stopped). M1 CLI does not expose
-    /// those commands yet; GDB RSP will send the same `Command`s. Until then
-    /// only unit tests call this directly.
     fn read_gdb_registers(&self) -> Result<Vec<u8>, SimError> {
         let mut values = [0u32; 18];
         for (i, slot) in values.iter_mut().enumerate() {
@@ -421,6 +415,12 @@ impl Core for Rl78Cpu {
         Ok(())
     }
 
+    /// Push the kernel breakpoint table into tlib.
+    ///
+    /// TODO: production call site is `Simulator` after `Command::AddBreakpoint`
+    /// / `RemoveBreakpoint` (inspect path, stopped). M1 CLI does not expose
+    /// those commands yet; GDB RSP will send the same `Command`s. Until then
+    /// only unit tests call this directly.
     fn sync_breakpoints(&mut self, breakpoints: &[Breakpoint]) {
         self.breakpoints = breakpoints.to_vec();
         let desired: Vec<Addr> = breakpoints
