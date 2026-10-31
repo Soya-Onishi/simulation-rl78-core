@@ -18,7 +18,7 @@ from systemtest.errors import ProbeKindError, TruncatedError, WaitError
 from systemtest.uart import UartStream
 
 OUT_ENV = "SYSTEMTEST_OUT"
-WAIT_STALL_S = 3.0
+WAIT_STALL_S = 10.0
 WAIT_POLL_S = 0.1
 
 
@@ -140,6 +140,7 @@ class Simulation:
         self._client.start(self._id, until_ns)
         last_vt: int | None = None
         stall_since: float | None = None
+        overdue_since: float | None = None
         while True:
             status = self._client.status(self._id)
             vt = int(status.get("virtual_time_ns") or 0)
@@ -153,15 +154,20 @@ class Simulation:
             stalled = last_vt is not None and vt == last_vt
             overdue = vt >= until_ns and state != "stopped"
             now = time.monotonic()
-            if stalled or overdue:
+            if stalled:
                 if stall_since is None:
                     stall_since = now
                 elif now - stall_since >= WAIT_STALL_S:
-                    if overdue:
-                        raise WaitError("wait did not stop after until_ns")
                     raise WaitError("virtual time did not advance")
             else:
                 stall_since = None
+            if overdue:
+                if overdue_since is None:
+                    overdue_since = now
+                elif now - overdue_since >= WAIT_STALL_S:
+                    raise WaitError("wait did not stop after until_ns")
+            else:
+                overdue_since = None
             last_vt = vt
             time.sleep(WAIT_POLL_S)
 

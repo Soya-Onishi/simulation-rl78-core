@@ -73,7 +73,7 @@ def test_frozen_virtual_time_raises_after_stall(monkeypatch) -> None:
     sim = _sim(client)
     with pytest.raises(WaitError, match="virtual time did not advance"):
         sim.wait(Duration.ns(1000))
-    assert clock.t >= 3.0
+    assert clock.t >= 10.0
 
 
 def test_overdue_running_raises_after_stall(monkeypatch) -> None:
@@ -83,7 +83,7 @@ def test_overdue_running_raises_after_stall(monkeypatch) -> None:
     sim = _sim(client)
     with pytest.raises(WaitError, match="did not stop after until_ns"):
         sim.wait(Duration.ns(1000))
-    assert clock.t >= 3.0
+    assert clock.t >= 10.0
 
 
 def test_long_wait_does_not_false_timeout(monkeypatch) -> None:
@@ -106,6 +106,19 @@ def test_long_wait_does_not_false_timeout(monkeypatch) -> None:
     sim.wait(Duration.ns(2000))
     assert clock.t > 120.0
     assert sim.virtual_time_ns >= 2000
+
+
+def test_stall_timer_does_not_count_as_overdue(monkeypatch) -> None:
+    clock = _Clock()
+    _patch_clock(monkeypatch, clock)
+    client = _StatusClient(
+        [{"state": "running", "virtual_time_ns": 0}] * 99
+        + [{"state": "running", "virtual_time_ns": 1000}] * 4
+        + [{"state": "stopped", "virtual_time_ns": 1000, "stop_reason": "until"}]
+    )
+    sim = _sim(client)
+    sim.wait(Duration.ns(1000))
+    assert sim.virtual_time_ns == 1000
 
 
 def test_exited_raises(monkeypatch) -> None:
