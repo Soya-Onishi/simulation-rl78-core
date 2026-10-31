@@ -24,6 +24,7 @@ use sim_kernel::{
 
 use crate::callbacks::{self, TLIB_PAGE_SIZE, clear_io_bus, set_io_bus, take_callback_stop};
 use crate::ffi::{self, Rl78Reg};
+use crate::gdb_regs::{pack_gdb_g, unpack_gdb_g};
 
 static SEAT: Mutex<bool> = Mutex::new(false);
 static TLIB_INIT: Once = Once::new();
@@ -394,6 +395,26 @@ impl Core for Rl78Cpu {
         self.set_reg32(Rl78Reg::Pc, pc as u32);
     }
 
+    fn read_gdb_registers(&self) -> Result<Vec<u8>, SimError> {
+        let mut values = [0u32; 18];
+        for (i, slot) in values.iter_mut().enumerate() {
+            let reg = Self::map_reg_id(RegId(i as u32))
+                .ok_or(SimError::UnknownRegister(RegId(i as u32)))?;
+            *slot = self.reg32(reg);
+        }
+        Ok(pack_gdb_g(values).to_vec())
+    }
+
+    fn write_gdb_registers(&mut self, data: &[u8]) -> Result<(), SimError> {
+        let values = unpack_gdb_g(data).map_err(|()| SimError::Unsupported)?;
+        for (i, value) in values.iter().enumerate() {
+            let reg = Self::map_reg_id(RegId(i as u32))
+                .ok_or(SimError::UnknownRegister(RegId(i as u32)))?;
+            self.set_reg32(reg, *value);
+        }
+        Ok(())
+    }
+
     /// Push the kernel breakpoint table into tlib.
     ///
     /// TODO: production call site is `Simulator` after `Command::AddBreakpoint`
@@ -425,7 +446,7 @@ impl Core for Rl78Cpu {
     fn load_firmware(&mut self, bus: &mut MemoryBus, image: &[u8]) -> Result<(), FirmwareError> {
         sim_kernel::elf::load_elf(image, bus)?;
         // Same TB flush as [`load_elf_firmware`] when the host map is already bound.
-        unsafe { crate::ffi::tlib_invalidate_translation_cache() }; 
+        unsafe { crate::ffi::tlib_invalidate_translation_cache() };
 
         Ok(())
     }

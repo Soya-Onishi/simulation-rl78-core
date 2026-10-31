@@ -7,6 +7,7 @@
 mod callbacks;
 mod cpu;
 mod ffi;
+mod gdb_regs;
 mod magic;
 mod map;
 mod peripherals;
@@ -17,6 +18,7 @@ pub use callbacks::{
 };
 pub use cpu::Rl78Cpu;
 pub use ffi::{Rl78Reg, excp};
+pub use gdb_regs::{GDB_G_PACKET_LEN, pack_gdb_g, unpack_gdb_g};
 pub use magic::{MagicProbe, ProbeSink, StdoutSink};
 pub use map::{MAGIC_PROBE_BASE, MAGIC_PROBE_SIZE, MemoryLayout, Rl78Device};
 pub use peripherals::{

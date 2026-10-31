@@ -18,4 +18,11 @@ mod tests {
         assert!(!PAGE_HTML.contains("新規作成"));
         assert!(!PAGE_HTML.contains("topoform"));
     }
+
+    #[test]
+    fn page_attaches_gdb() {
+        assert!(PAGE_HTML.contains("id=\"gdb-panel\""));
+        assert!(PAGE_HTML.contains("/gdb"));
+        assert!(PAGE_HTML.contains("ssh_command"));
+    }
 }

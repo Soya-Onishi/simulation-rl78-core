@@ -37,13 +37,13 @@ cargo run
 
 `rl78-core` の `build.rs` が [tlib](https://github.com/Soya-Onishi/tlib)（`rl78` ブランチ）を CMake でビルドし、`libtlib.a` を静的リンクする。要: `cmake`、C コンパイラ、`pthread`。
 
-CLI は標準入力から `start` / `stop` / `quit` を受け付ける。起動直後は仮想時間は止まっており、`start` または GDB `continue` まで進まない。任意でゲスト ELF と QEMU 互換の GDB フラグを渡せる:
+CLI は標準入力から `start` / `stop` / `quit` を受け付ける。起動直後は仮想時間は止まっており、`start` まで進まない。任意でゲスト ELF を渡せる:
 
 ```bash
 cargo run -- path/to/guest.elf
-cargo run -- -s -S path/to/guest.elf          # GDB on tcp::1234、REPL も表示
-cargo run -- -gdb tcp::2159 path/to/guest.elf
 ```
+
+GDB RSP は `cluster-server` が `127.0.0.1` で待ち受ける。WebUI でボードを選んで接続し、表示されたポートへ `rl78-elf-gdb` / VS Code からつなぐ。詳細は [`docs/gdb.md`](docs/gdb.md)。
 
 Magic probe はゲスト物理 `0xF0000`（`MOV !addr16, #imm` が `addr16 | 0xF0000` に到達）。
 

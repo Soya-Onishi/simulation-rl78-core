@@ -143,7 +143,7 @@ impl<E: Entity> Simulator<E> {
                 // TODO(multi-board): when wired from the kernel stop path, forward
                 // debugger/cluster-relevant stops over IPC and wait for cluster
                 // ack. Do not cluster-halt on guest-local [`StopReason::Halt`]
-                // (RL78 STOP / WFI). GDB must not own this hook.
+                // (RL78 STOP / WFI). The cluster GDB stub must not own this hook.
                 Response::Inspect(InspectResult::Ok)
             }
             other => {
@@ -205,7 +205,7 @@ impl<E: Entity> Simulator<E> {
     /// Commit a stop reason from CPU or an event.
     ///
     /// [`StopReason::Halt`] is guest-local idle (WFI / STOP): keep
-    /// [`SimState::Running`] and do **not** emit [`Response::Stopped`] (so CLI/GDB
+    /// [`SimState::Running`] and do **not** emit [`Response::Stopped`] (so CLI/cluster GDB
     /// do not treat idle as a debugger stop). A pending [`Command::Step`] still
     /// completes as [`StopReason::Step`]. Other reasons clear Running.
     fn commit_stop(&mut self, stop: StopReason) -> Option<Response> {
@@ -239,7 +239,7 @@ impl<C: Cpu> Simulator<Machine<C>> {
     }
 }
 
-/// Send side used by CLI / GDB. Cheap to clone; only the original from
+/// Send side used by CLI. Cheap to clone; only the original from
 /// [`spawn`] sends [`Command::Quit`] on drop.
 pub struct SimControl {
     tx: mpsc::Sender<Command>,

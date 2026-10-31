@@ -37,6 +37,8 @@ pub enum NodeEffect {
         board_hash: u64,
         probe_ids: Vec<u64>,
     },
+    /// Execute one kernel [`sim_kernel::Command::Step`] if `board_hash` matches.
+    GdbStep { board_hash: u64 },
     /// Log-only; state is unchanged aside from the warning.
     Warn(String),
 }
@@ -91,6 +93,9 @@ impl NodeState {
                     probe_ids: probe_ids.iter().copied().take(usize::from(count)).collect(),
                 }),
             ),
+            (NodeState::Stopped | NodeState::Running, ControlToNode::GdbStep { board_hash }) => {
+                (NodeState::Stopped, Some(NodeEffect::GdbStep { board_hash }))
+            }
             // Duplicate / late / early messages: warn and stay.
             (state, msg) => (
                 state,
@@ -139,19 +144,22 @@ impl PeerState {
                 ))),
             ),
             (
-                PeerState::Running,
+                state @ (PeerState::Running | PeerState::Stopped),
                 ControlToArbiter::TimeReport {
                     from,
                     virtual_time_ns,
                 },
             ) => (
-                PeerState::Running,
+                state,
                 Some(PeerEffect::TimeReport {
                     from,
                     virtual_time_ns,
                 }),
             ),
-            (PeerState::Running, ControlToArbiter::HostStop { from, reason }) => (
+            (
+                PeerState::Running | PeerState::Stopped,
+                ControlToArbiter::HostStop { from, reason },
+            ) => (
                 PeerState::Stopped,
                 Some(PeerEffect::HostStop { from, reason }),
             ),
@@ -293,6 +301,30 @@ mod tests {
         });
         assert_eq!(n, NodeState::Stopped);
         assert!(matches!(eff, Some(NodeEffect::Warn(_))));
+    }
+
+    #[test]
+    fn node_gdb_step_from_stopped() {
+        let (n, eff) = NodeState::Stopped.on_message(ControlToNode::GdbStep { board_hash: 7 });
+        assert_eq!(n, NodeState::Stopped);
+        assert_eq!(eff, Some(NodeEffect::GdbStep { board_hash: 7 }));
+    }
+
+    #[test]
+    fn peer_time_report_while_stopped() {
+        let hash_a = board_id_hash("a");
+        let (n, eff) = PeerState::Stopped.on_message(ControlToArbiter::TimeReport {
+            from: hash_a,
+            virtual_time_ns: 50,
+        });
+        assert_eq!(n, PeerState::Stopped);
+        assert_eq!(
+            eff,
+            Some(PeerEffect::TimeReport {
+                from: hash_a,
+                virtual_time_ns: 50,
+            })
+        );
     }
 
     #[test]
