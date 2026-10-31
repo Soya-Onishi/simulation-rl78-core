@@ -4,7 +4,7 @@ mod arch;
 mod target;
 
 use std::io;
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -71,20 +71,6 @@ pub fn ssh_command(user: &str, host: Ipv4Addr, port: u16) -> String {
 }
 
 #[must_use]
-pub fn advertise_ip() -> Ipv4Addr {
-    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0")
-        && sock.connect("8.8.8.8:80").is_ok()
-        && let Ok(SocketAddr::V4(addr)) = sock.local_addr()
-    {
-        let ip = *addr.ip();
-        if !ip.is_loopback() && !ip.is_unspecified() {
-            return ip;
-        }
-    }
-    Ipv4Addr::LOCALHOST
-}
-
-#[must_use]
 pub fn process_user() -> String {
     std::env::var("USER").unwrap_or_else(|_| "user".into())
 }
@@ -94,6 +80,7 @@ pub fn spawn_slot(
     sim_id: String,
     iox_root: PathBuf,
     board_id: String,
+    host: Ipv4Addr,
 ) -> io::Result<GdbSlot> {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
     listener.set_nonblocking(true)?;
@@ -123,7 +110,7 @@ pub fn spawn_slot(
     Ok(GdbSlot {
         board_id,
         port,
-        host: advertise_ip(),
+        host,
         user: process_user(),
         connected,
         shutdown,

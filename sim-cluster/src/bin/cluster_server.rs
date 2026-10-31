@@ -51,6 +51,7 @@ fn usage() -> &'static str {
      Control API: POST /api/simulation, POST .../{id}/start|stop|reset,\n\
      DELETE .../{id}, GET .../{id} (status snapshot), GET .../{id}/status and .../{id}/log (SSE).\n\
      Default listen address is 127.0.0.1:8090.\n\
+     The GDB ssh command uses this host (0.0.0.0 becomes 127.0.0.1).\n\
      \n\
      HTTP create accepts topology JSON only. Each board elf must be http(s)://\n\
      or base64: (embed local files on the client). Logs stream over SSE.\n"
