@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from topology_dsl import Topology
+from topology_dsl import Topology, embed_local_elfs
 
 from systemtest.client import ClusterClient, ViewerHold, default_base_url
 from systemtest.duration import Duration
@@ -103,7 +103,7 @@ class Simulation:
         self._id: str | None = None
         self._uarts: dict[tuple[str, str], UartStream] = {}
         try:
-            self._id = self._client.create(topology.to_dict())
+            self._id = self._client.create(embed_local_elfs(topology.to_dict()))
             self._viewer = ViewerHold(self._client.base_url, self._id)
             self._client.set_token(self._viewer.start())
             self._wait_catalog()

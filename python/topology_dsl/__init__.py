@@ -1,18 +1,28 @@
 """Thin Python DSL for logical multi-board topologies.
 
-Scripts are executed by ``cluster-server`` via ``python -m topology_dsl run``.
-The resulting JSON is validated by Rust (``sim_cluster::topology``) and passed
-to ``cluster-arbiter``. This is a runtime handoff, not a checked-in product
-config.
+``python -m topology_dsl run <script.py>`` prints logical JSON (elf strings
+unchanged). ``python -m topology_dsl create <script.py>`` embeds local ELF
+files as ``base64:``, POSTs ``/api/simulation`` on a running cluster-server,
+and prints the simulation URL. The server validates JSON
+(``sim_cluster::topology``) and starts the arbiter. This is a runtime
+handoff, not a checked-in product config.
 """
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import runpy
 import sys
+import urllib.error
+import urllib.request
+import webbrowser
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Optional
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 Payload = Literal["uart", "digital", "analog"]
 Direction = Literal["in", "out"]
@@ -173,31 +183,186 @@ def emit(topo: Topology) -> None:
     _EMITTED.append(topo)
 
 
-def _run_script(path: str) -> None:
+DEFAULT_SERVER = "http://127.0.0.1:8090"
+_USAGE = (
+    "Usage:\n"
+    "  python -m topology_dsl run <script.py>\n"
+    "  python -m topology_dsl create <script.py> [--server URL] [--open]\n"
+)
+
+
+def _usage(code: int) -> None:
+    print(_USAGE, end="", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def _load_emitted(path: str) -> dict[str, Any]:
     _OWNER.clear()
     _EMITTED.clear()
     runpy.run_path(path, run_name="__main__")
     if not _EMITTED:
         raise SystemExit(
             "topology script did not call emit(topology); "
-            "cluster-server requires emit() so logical JSON can be captured"
+            "the runner requires emit() so logical JSON can be captured"
         )
-    print(json.dumps(_EMITTED[0].to_dict(), indent=2, sort_keys=False))
+    return _EMITTED[0].to_dict()
+
+
+def _elf_kind(elf: str) -> str:
+    lower = elf.lower()
+    if lower.startswith("base64:"):
+        return "base64"
+    if lower.startswith("http://") or lower.startswith("https://"):
+        return "http"
+    if lower.startswith("file://"):
+        return "file"
+    return "path"
+
+
+def _local_elf_path(elf: str) -> Path:
+    if _elf_kind(elf) == "file":
+        parsed = urlparse(elf)
+        return Path(url2pathname(unquote(parsed.path)))
+    return Path(elf)
+
+
+def embed_local_elfs(topo: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite filesystem / ``file://`` elf strings to ``base64:`` (cwd-relative)."""
+    for board in topo.get("boards", []):
+        elf = board.get("elf")
+        if not elf:
+            continue
+        kind = _elf_kind(elf)
+        if kind in ("base64", "http"):
+            continue
+        path = _local_elf_path(elf)
+        try:
+            data = path.read_bytes()
+        except OSError as err:
+            board_id = board.get("id", "?")
+            print(
+                f"topology_dsl: elf file not found for board {board_id}: {path}: {err}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from err
+        board["elf"] = "base64:" + base64.b64encode(data).decode("ascii")
+    return topo
+
+
+def resolve_server(cli_server: str | None, env: dict[str, str] | None = None) -> str:
+    values = os.environ if env is None else env
+    raw = cli_server or values.get("SIMULATION_SERVER") or DEFAULT_SERVER
+    return raw.rstrip("/")
+
+
+def post_simulation(server: str, topology: dict[str, Any]) -> str:
+    url = f"{server}/api/simulation"
+    payload = json.dumps({"topology": topology}).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode("utf-8", errors="replace")
+        print(
+            f"topology_dsl: POST {url} failed: HTTP {err.code}: {detail}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from err
+    except urllib.error.URLError as err:
+        print(f"topology_dsl: POST {url} failed: {err.reason}", file=sys.stderr)
+        raise SystemExit(1) from err
+    except json.JSONDecodeError as err:
+        print(f"topology_dsl: invalid create response: {err}", file=sys.stderr)
+        raise SystemExit(1) from err
+    sim_id = body.get("id")
+    if not sim_id:
+        print("topology_dsl: create response missing id", file=sys.stderr)
+        raise SystemExit(1)
+    return str(sim_id)
+
+
+def _require_script(path: str) -> str:
+    script = Path(path)
+    if not path or path.startswith("-"):
+        _usage(2)
+    if script.suffix != ".py":
+        print("topology_dsl: create/run require a .py topology script", file=sys.stderr)
+        raise SystemExit(2)
+    if not script.is_file():
+        print(f"topology_dsl: script not found: {path}", file=sys.stderr)
+        raise SystemExit(2)
+    return path
+
+
+def _cmd_run(argv: list[str]) -> None:
+    if len(argv) != 1 or argv[0] in ("-h", "--help"):
+        _usage(0 if argv and argv[0] in ("-h", "--help") else 2)
+    path = _require_script(argv[0])
+    print(json.dumps(_load_emitted(path), indent=2, sort_keys=False))
+
+
+def _parse_create(argv: list[str]) -> tuple[str, str | None, bool]:
+    server: str | None = None
+    open_browser = False
+    script: str | None = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-h", "--help"):
+            _usage(0)
+        if arg == "--server":
+            i += 1
+            if i >= len(argv):
+                print("topology_dsl: --server requires a URL", file=sys.stderr)
+                _usage(2)
+            server = argv[i]
+        elif arg == "--open":
+            open_browser = True
+        elif arg.startswith("-"):
+            print(f"topology_dsl: unknown argument {arg}", file=sys.stderr)
+            _usage(2)
+        elif script is not None:
+            print("topology_dsl: unexpected extra argument", file=sys.stderr)
+            _usage(2)
+        else:
+            script = arg
+        i += 1
+    if script is None:
+        _usage(2)
+    return script, server, open_browser
+
+
+def _cmd_create(argv: list[str]) -> None:
+    path, cli_server, open_browser = _parse_create(argv)
+    path = _require_script(path)
+    topology = embed_local_elfs(_load_emitted(path))
+    server = resolve_server(cli_server)
+    sim_id = post_simulation(server, topology)
+    page = f"{server}/{sim_id}"
+    print(page)
+    if open_browser:
+        webbrowser.open(page)
 
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print(
-            "Usage: python -m topology_dsl run <script.py>\n"
-            "Executed by cluster-server; prints logical topology JSON to stdout.",
-            file=sys.stderr,
-        )
-        raise SystemExit(0 if argv and argv[0] in ("-h", "--help") else 2)
-    if argv[0] != "run" or len(argv) != 2:
-        print("Usage: python -m topology_dsl run <script.py>", file=sys.stderr)
-        raise SystemExit(2)
-    _run_script(argv[1])
+        _usage(0 if argv and argv[0] in ("-h", "--help") else 2)
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "run":
+        _cmd_run(rest)
+        return
+    if cmd == "create":
+        _cmd_create(rest)
+        return
+    print(f"topology_dsl: unknown command {cmd}", file=sys.stderr)
+    _usage(2)
 
 
 if __name__ == "__main__":

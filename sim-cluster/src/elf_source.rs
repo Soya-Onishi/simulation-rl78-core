@@ -52,6 +52,16 @@ fn too_large(label: &str, limit: usize) -> ElfSourceError {
     invalid(format!("firmware from {label} exceeds {limit} bytes"))
 }
 
+/// Create contract: only remote URLs and inline bytes.
+pub(crate) fn check_http_create_spec(spec: &str) -> Result<(), ElfSourceError> {
+    match classify(spec)? {
+        Kind::Http(_) | Kind::Base64(_) => check_spec(spec),
+        Kind::Path(_) | Kind::File(_) => Err(invalid(
+            "elf must be http(s):// or base64: (embed local files on the client)",
+        )),
+    }
+}
+
 /// Check the string without fetching a remote image or opening a local path.
 pub(crate) fn check_spec(spec: &str) -> Result<(), ElfSourceError> {
     match classify(spec)? {
@@ -318,6 +328,14 @@ mod tests {
 
         let err = load_with_limit("base64:MTIzNDU=", 4).unwrap_err();
         assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn http_create_rejects_local_sources() {
+        assert!(check_http_create_spec("a.elf").is_err());
+        assert!(check_http_create_spec("file:///tmp/a.elf").is_err());
+        assert!(check_http_create_spec("https://example.test/fw.elf").is_ok());
+        assert!(check_http_create_spec("base64:AQI=").is_ok());
     }
 
     #[test]

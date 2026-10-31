@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::contract::{ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent};
 use crate::host::HostCommand;
-use crate::server::{self, Job, JobKind, JobReply};
+use crate::server::{Job, JobKind, JobReply};
 use crate::topology::LogicalTopology;
 
 /// Control-plane operations shared by HTTP adapters.
@@ -371,12 +371,4 @@ impl SimulationBackend for LocalBackend {
             ))),
         }
     }
-}
-
-/// Validate topology and embed local ELF paths before enqueueing create.
-pub fn prepare_topology(
-    topology: LogicalTopology,
-    base_dir: &std::path::Path,
-) -> Result<LogicalTopology, ApiError> {
-    server::prepare_topology(topology, base_dir)
 }

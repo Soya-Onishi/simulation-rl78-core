@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from topology_dsl import Topology
+
 from systemtest.simulation import Simulation
 
 
@@ -22,13 +24,15 @@ class _FakeClient:
     def __init__(self, *_args, **_kwargs) -> None:
         self.base_url = "http://test"
         self.created: list[str] = []
+        self.topologies: list[dict] = []
         self.deleted: list[str] = []
         self.closed = False
         self.csv_calls = 0
         self.fail_catalog = False
         self.fail_delete = False
 
-    def create(self, _topology: dict) -> str:
+    def create(self, topology: dict) -> str:
+        self.topologies.append(topology)
         self.created.append("s1")
         return "s1"
 
@@ -60,6 +64,19 @@ def _topology():
 def _patch_harness(monkeypatch, client: _FakeClient, viewer_cls=None) -> None:
     monkeypatch.setattr("systemtest.simulation.ClusterClient", lambda *_a, **_k: client)
     monkeypatch.setattr("systemtest.simulation.ViewerHold", viewer_cls or _FakeViewer)
+
+
+def test_create_embeds_local_elf_as_base64(monkeypatch, tmp_path) -> None:
+    elf = tmp_path / "fw.bin"
+    elf.write_bytes(b"ABC")
+    client = _FakeClient()
+    _patch_harness(monkeypatch, client)
+
+    topology = Topology(margin_ns=1, headroom_threshold_ns=1)
+    topology.board("a", elf=str(elf))
+    Simulation(topology=topology, csv=False, testname="t")
+
+    assert client.topologies[0]["boards"][0]["elf"] == "base64:QUJD"
 
 
 def test_catalog_failure_deletes_created_simulation(monkeypatch) -> None:

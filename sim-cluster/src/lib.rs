@@ -39,7 +39,7 @@ pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
     ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, CreateSimulationRequest,
     CreateSimulationResponse, InvokeActionRequest, LogEvent, ProbeSampleJson, ProbeSamplesResponse,
-    StartSimulationRequest, StatusEvent,
+    StartSimulationRequest, StatusEvent, prepare_create_topology,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;
@@ -54,9 +54,7 @@ pub use probe_hub::{
     ArbiterProbeError, ArbiterProbeHub, ProbeCatalogEntry, ProbeSample, pack_probe_name,
     unpack_probe_name,
 };
-pub use server::{
-    ServerError, ServerOptions, execute_python_script, execute_python_source, run_server,
-};
+pub use server::{ServerError, ServerOptions, run_server};
 pub use sim_kernel::{ProbePoint, ProbePolicy, ProbeTap, UartFrame};
 pub use time_sync::TimeCeiling;
 pub use topology::{

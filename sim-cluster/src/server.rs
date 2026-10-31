@@ -5,23 +5,20 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use iceoryx2::prelude::{Node, ipc};
 
 use crate::action::{ActionRequest, ActionUpstream};
-use crate::backend::{LocalBackend, SimulationBackend};
+use crate::backend::LocalBackend;
 use crate::contract::{
     ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
-    StatusEvent,
+    StatusEvent, prepare_create_topology,
 };
-use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
@@ -49,16 +46,10 @@ pub struct ServerOptions {
     pub listen: String,
     /// Path to the `cluster-arbiter` executable.
     pub arbiter_bin: PathBuf,
-    /// Directory containing `topology_dsl` (added to `PYTHONPATH`).
-    pub python_path: PathBuf,
-    /// Python interpreter (default `python3`).
-    pub python_bin: PathBuf,
-    /// Topology applied as soon as the listener is up (CLI convenience).
-    pub topology: Option<PathBuf>,
 }
 
 impl ServerOptions {
-    /// Sibling `cluster-arbiter` and the in-tree `python/` package.
+    /// Sibling `cluster-arbiter` next to this process.
     pub fn new(listen: impl Into<String>) -> Result<Self, ServerError> {
         let exe = std::env::current_exe().map_err(ServerError::Io)?;
         let exe_dir = exe
@@ -67,9 +58,6 @@ impl ServerOptions {
         Ok(Self {
             listen: listen.into(),
             arbiter_bin: exe_dir.join("cluster-arbiter"),
-            python_path: discover_python_package_root()?,
-            python_bin: PathBuf::from("python3"),
-            topology: None,
         })
     }
 }
@@ -81,8 +69,6 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("topology error: {0}")]
     Topology(#[from] TopologyError),
-    #[error("python exited with status {status}: {stderr}")]
-    PythonFailed { status: String, stderr: String },
     #[error("ipc error: {0}")]
     Ipc(#[from] IpcError),
     #[error("{0}")]
@@ -302,106 +288,12 @@ pub fn run_server(opts: &ServerOptions) -> Result<(), ServerError> {
     thread::spawn(move || worker_loop(rx, worker_opts));
 
     let backend = LocalBackend::new(tx);
-    if let Some(path) = opts.topology.clone() {
-        match topology_from_file(&path, &opts.python_bin, &opts.python_path) {
-            Ok(topo) => match backend.create(topo) {
-                Ok(id) => eprintln!("loaded topology as simulation {id} (stopped)"),
-                Err(err) => eprintln!("cluster-server: failed to create simulation: {err}"),
-            },
-            Err(err) => eprintln!("cluster-server: failed to load --topology: {err}"),
-        }
-    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(crate::http::serve(&opts.listen, backend))?;
     Ok(())
-}
-
-/// Run a topology script and return its logical JSON.
-pub fn execute_python_script(
-    python_bin: &Path,
-    python_path: &Path,
-    script: &Path,
-) -> Result<String, ServerError> {
-    let output = Command::new(python_bin)
-        .env(
-            "PYTHONPATH",
-            prepend_pythonpath(python_path, std::env::var_os("PYTHONPATH")),
-        )
-        .arg("-m")
-        .arg("topology_dsl")
-        .arg("run")
-        .arg(script)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-    if !output.status.success() {
-        return Err(ServerError::PythonFailed {
-            status: output.status.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return Err(ServerError::Message(
-            "python topology script produced empty stdout".into(),
-        ));
-    }
-    Ok(trimmed.to_string())
-}
-
-/// Write `source` to a temp file and run it as a topology script.
-pub fn execute_python_source(
-    python_bin: &Path,
-    python_path: &Path,
-    source: &str,
-) -> Result<String, ServerError> {
-    let path = temp_path("sim-cluster-topology", "py");
-    fs::write(&path, source)?;
-    let result = execute_python_script(python_bin, python_path, &path);
-    let _ = fs::remove_file(&path);
-    result
-}
-
-/// Locate `python/topology_dsl` from the manifest or the executable path.
-pub fn discover_python_package_root() -> Result<PathBuf, ServerError> {
-    let mut candidates = Vec::new();
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        candidates.push(PathBuf::from(manifest_dir).join("../python"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(Path::to_path_buf);
-        for _ in 0..6 {
-            if let Some(d) = dir {
-                candidates.push(d.join("python"));
-                dir = d.parent().map(Path::to_path_buf);
-            }
-        }
-    }
-    for candidate in candidates {
-        if candidate.join("topology_dsl").is_dir() {
-            return Ok(candidate.canonicalize().unwrap_or(candidate));
-        }
-    }
-    Err(ServerError::Message(
-        "could not locate python/topology_dsl; set ServerOptions.python_path".into(),
-    ))
-}
-
-/// Validate topology JSON and embed local ELF paths for create.
-pub fn prepare_topology(
-    mut topology: LogicalTopology,
-    base_dir: &Path,
-) -> Result<LogicalTopology, ApiError> {
-    topology
-        .validate()
-        .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
-    embed_local_elfs(&mut topology, base_dir)
-        .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
-    Ok(topology)
 }
 
 fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
@@ -422,13 +314,16 @@ fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
 
 fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
     let reply = match job.kind {
-        JobKind::Create(topo) => match create_simulation(topo, opts) {
-            Ok(sim) => {
-                let id = sim.id.clone();
-                world.sims.insert(id.clone(), sim);
-                JobReply::Created { id }
-            }
-            Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+        JobKind::Create(topo) => match prepare_create_topology(topo) {
+            Err(err) => JobReply::Err(err),
+            Ok(topo) => match create_simulation(topo, opts) {
+                Ok(sim) => {
+                    let id = sim.id.clone();
+                    world.sims.insert(id.clone(), sim);
+                    JobReply::Created { id }
+                }
+                Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+            },
         },
         JobKind::Command { id, cmd } => match world.sims.get_mut(&id) {
             Some(sim) => match command_simulation(sim, cmd) {
@@ -577,27 +472,6 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         },
     };
     let _ = job.reply.send(reply);
-}
-
-fn topology_from_file(
-    path: &Path,
-    python_bin: &Path,
-    python_path: &Path,
-) -> Result<LogicalTopology, String> {
-    let base = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut topo = if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-        let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
-        LogicalTopology::from_json_str(&text).map_err(|err| err.to_string())?
-    } else {
-        let json =
-            execute_python_script(python_bin, python_path, path).map_err(|err| err.to_string())?;
-        LogicalTopology::from_json_str(&json).map_err(|err| err.to_string())?
-    };
-    embed_local_elfs(&mut topo, base).map_err(|err| err.to_string())?;
-    Ok(topo)
 }
 
 fn create_simulation(
@@ -1313,15 +1187,6 @@ fn append_log(sim: &mut Simulation, level: &str, origin: &str, board: Option<Str
     }
 }
 
-fn prepend_pythonpath(extra: &Path, existing: Option<std::ffi::OsString>) -> std::ffi::OsString {
-    let mut out = extra.as_os_str().to_os_string();
-    if let Some(prev) = existing {
-        out.push(":");
-        out.push(prev);
-    }
-    out
-}
-
 fn write_temp_topology(topo: &LogicalTopology) -> Result<PathBuf, ServerError> {
     let path = temp_path("sim-cluster-topology", "json");
     fs::write(&path, topo.to_json_string()?)?;
@@ -1343,94 +1208,21 @@ impl Drop for Simulation {
     }
 }
 
-fn embed_local_elfs(topo: &mut LogicalTopology, base_dir: &Path) -> Result<(), ServerError> {
-    for board in &mut topo.boards {
-        let Some(elf) = board.elf.clone() else {
-            continue;
-        };
-        if elf.starts_with("base64:") || elf.starts_with("http://") || elf.starts_with("https://") {
-            elf_source::check_spec(&elf)
-                .map_err(|err| ServerError::Message(format!("board {}: {err}", board.id)))?;
-            continue;
-        }
-        let path = if elf.starts_with("file://") {
-            let url = url::Url::parse(&elf)
-                .map_err(|err| ServerError::Message(format!("invalid file elf URL: {err}")))?;
-            url.to_file_path()
-                .map_err(|()| ServerError::Message("elf file URL is not a local path".into()))?
-        } else {
-            let path = PathBuf::from(&elf);
-            if path.is_absolute() {
-                path
-            } else {
-                base_dir.join(path)
-            }
-        };
-        if !path.is_file() {
-            return Err(ServerError::Message(format!(
-                "elf file not found for board {}: {}",
-                board.id,
-                path.display()
-            )));
-        }
-        let bytes = fs::read(&path)?;
-        board.elf = Some(format!("base64:{}", STANDARD.encode(bytes)));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
-    fn python_round_trip_via_module() {
+    fn topology_dsl_unittests() {
         let python_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../python");
         let python_root = python_root.canonicalize().expect("python dir");
-        let mut script = tempfile::NamedTempFile::new().unwrap();
-        write!(
-            script,
-            r#"
-from topology_dsl import Topology, connect, emit
-
-t = Topology(margin_ns=1000, headroom_threshold_ns=200)
-a = t.board("a", kind="rl78", elf="a.elf")
-b = t.board("b", kind="rl78")
-a.endpoint("uart0_tx", direction="out", payload="uart")
-a.endpoint("uart0_rx", direction="in", payload="uart")
-b.endpoint("uart0_tx", direction="out", payload="uart")
-b.endpoint("uart0_rx", direction="in", payload="uart")
-connect(a.port("uart0_tx"), b.port("uart0_rx"))
-connect(b.port("uart0_tx"), a.port("uart0_rx"), uart_ring_len=128)
-emit(t)
-"#
-        )
-        .unwrap();
-
-        let json = execute_python_script(&PathBuf::from("python3"), &python_root, script.path())
-            .expect("python run");
-        let topo = LogicalTopology::from_json_str(&json).expect("parse");
-        assert_eq!(topo.boards.len(), 2);
-        assert_eq!(topo.edges.len(), 2);
-        assert_eq!(topo.margin_ns, 1000);
-    }
-
-    #[test]
-    fn prepare_topology_requires_boards() {
-        let err = prepare_topology(
-            LogicalTopology {
-                boards: vec![],
-                edges: vec![],
-                margin_ns: 1000,
-                headroom_threshold_ns: 200,
-                ready_timeout_ms: 10_000,
-            },
-            Path::new("."),
-        )
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-        assert_eq!(err.code, "invalid_topology");
+        let status = std::process::Command::new("python3")
+            .env("PYTHONPATH", &python_root)
+            .args(["-m", "unittest", "discover", "-s"])
+            .arg(python_root.join("tests"))
+            .status()
+            .expect("python3");
+        assert!(status.success(), "python topology_dsl tests failed");
     }
 
     fn invoke_request(board_id: &str, device: &str, action: &str) -> InvokeActionRequest {

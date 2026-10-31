@@ -1,8 +1,7 @@
 //! Logical topology JSON schema (runtime handoff from the Python DSL).
 //!
-//! This is not a checked-in product config. The singleton [`crate::server`]
-//! executes Python, validates the result against these types, then starts the
-//! arbiter.
+//! This is not a checked-in product config. The client emits JSON; the
+//! singleton [`crate::server`] validates it and starts the arbiter.
 
 use std::collections::HashSet;
 
