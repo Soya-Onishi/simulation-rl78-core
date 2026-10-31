@@ -10,7 +10,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
@@ -38,11 +38,10 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// Build the application router (API under `/api`, UI at `/` and `/{id}`).
+/// Build the application router (API under `/api`, UI at `/{id}`).
 pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
     let state = AppState { backend };
     Router::new()
-        .route("/", get(create_page))
         .route("/api/simulation", post(create_simulation))
         .route("/api/simulation/{id}/start", post(start_simulation))
         .route("/api/simulation/{id}/stop", post(stop_simulation))
@@ -77,14 +76,10 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
         .with_state(state)
 }
 
-async fn create_page() -> Html<&'static str> {
-    Html(PAGE_HTML)
-}
-
 async fn simulation_page(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match ensure_exists(&state, &id).await {
         Ok(()) => Html(PAGE_HTML).into_response(),
-        Err(_) => Redirect::to("/").into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -92,8 +87,7 @@ async fn create_simulation(
     State(state): State<AppState>,
     Json(body): Json<CreateSimulationRequest>,
 ) -> Result<(StatusCode, Json<CreateSimulationResponse>), ApiError> {
-    let base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let topology = prepare_topology(body.topology, &base)?;
+    let topology = prepare_topology(body.topology)?;
     let backend = state.backend.clone();
     let id = tokio::task::spawn_blocking(move || backend.create(topology))
         .await
@@ -746,6 +740,6 @@ pub async fn serve(
     let app = router(backend);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
-    eprintln!("cluster-server listening on http://{addr}/");
+    eprintln!("cluster-server listening on http://{addr}");
     axum::serve(listener, app).await
 }

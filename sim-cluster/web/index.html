@@ -41,20 +41,13 @@
   .time strong { font-size: 20px; font-variant-numeric: tabular-nums; }
   .time span, .meta { color: #5c6570; font-size: 12px; }
   #command-error, #status-error { width: 100%; color: #9b2c2c; font-size: 13px; }
-  #create, #busy {
+  #busy {
     max-width: 720px;
     margin: 24px auto;
     padding: 0 16px;
     display: flex;
     flex-direction: column;
     gap: 12px;
-  }
-  #create form { display: flex; flex-direction: column; gap: 8px; }
-  textarea {
-    width: 100%;
-    min-height: 220px;
-    font-family: ui-monospace, monospace;
-    font-size: 12px;
   }
   #sim { display: none; flex: 1; flex-direction: column; min-height: 0; }
   #workspace {
@@ -216,21 +209,9 @@
 </style>
 </head>
 <body>
-<section id="create">
-  <h1>シミュレーションを作成</h1>
-  <p class="meta">論理トポロジ JSON を POST します。Python DSL はクライアント側で JSON に変換してから貼り付けてください（例: <code>python -m topology_dsl run file.py</code>）。作成後は停止状態です。</p>
-  <form id="topoform">
-    <input id="topofile" type="file" accept=".json,application/json">
-    <textarea id="topotext" placeholder='{"boards":[...],"edges":[...],"margin_ns":...,"headroom_threshold_ns":...}'></textarea>
-    <button class="primary" type="submit">作成して開く</button>
-  </form>
-  <div id="create-error" class="meta" style="color:#9b2c2c"></div>
-</section>
-
 <section id="busy" class="hidden">
   <h1>使用中です</h1>
   <p class="meta">このシミュレーションは別のブラウザで表示されています。</p>
-  <p><a href="/">戻る</a></p>
 </section>
 
 <section id="sim">
@@ -241,7 +222,6 @@
     <button id="start" class="primary" type="button">スタート</button>
     <button id="stop" class="danger" type="button">ストップ</button>
     <button id="reset" type="button">リセット</button>
-    <a href="/" class="meta" style="align-self:center">新規作成</a>
   </div>
   <div class="time">
     <div class="meta">仮想時間</div>
@@ -802,12 +782,6 @@ window.addEventListener("pagehide", () => {
   }
 });
 
-function showCreate() {
-  document.getElementById("create").classList.remove("hidden");
-  document.getElementById("busy").classList.add("hidden");
-  document.getElementById("sim").style.display = "none";
-}
-
 function showBusy() {
   stopActionPoll();
   if (viewerSource) {
@@ -827,14 +801,12 @@ function showBusy() {
     probeSource = null;
   }
   viewerToken = null;
-  document.getElementById("create").classList.add("hidden");
   document.getElementById("busy").classList.remove("hidden");
   document.getElementById("sim").style.display = "none";
 }
 
 function showSim(id) {
   simId = id;
-  document.getElementById("create").classList.add("hidden");
   document.getElementById("busy").classList.add("hidden");
   if (viewerSource) {
     viewerSource.close();
@@ -930,41 +902,9 @@ document.getElementById("logview").onscroll = (ev) => {
   const el = ev.target;
   stick = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
 };
-document.getElementById("topofile").onchange = async (ev) => {
-  const file = ev.target.files && ev.target.files[0];
-  if (!file) return;
-  document.getElementById("topotext").value = await file.text();
-};
-document.getElementById("topoform").onsubmit = async (ev) => {
-  ev.preventDefault();
-  const text = document.getElementById("topotext").value;
-  const errEl = document.getElementById("create-error");
-  errEl.textContent = "";
-  let topology;
-  try {
-    topology = JSON.parse(text);
-  } catch (err) {
-    errEl.textContent = "JSON を解釈できません: " + err.message;
-    return;
-  }
-  const res = await fetch("/api/simulation", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ topology }),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    errEl.textContent = apiError(body, res.statusText);
-    return;
-  }
-  location.href = "/" + encodeURIComponent(body.id);
-};
-
 const id = pathId();
 if (id) {
   showSim(id);
-} else {
-  showCreate();
 }
 </script>
 </body>

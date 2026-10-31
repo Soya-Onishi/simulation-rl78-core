@@ -373,10 +373,7 @@ impl SimulationBackend for LocalBackend {
     }
 }
 
-/// Validate topology and embed local ELF paths before enqueueing create.
-pub fn prepare_topology(
-    topology: LogicalTopology,
-    base_dir: &std::path::Path,
-) -> Result<LogicalTopology, ApiError> {
-    server::prepare_topology(topology, base_dir)
+/// Validate topology for HTTP create. Local ELF paths are rejected.
+pub fn prepare_topology(topology: LogicalTopology) -> Result<LogicalTopology, ApiError> {
+    server::prepare_topology(topology)
 }

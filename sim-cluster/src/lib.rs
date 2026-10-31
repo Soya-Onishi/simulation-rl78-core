@@ -54,9 +54,7 @@ pub use probe_hub::{
     ArbiterProbeError, ArbiterProbeHub, ProbeCatalogEntry, ProbeSample, pack_probe_name,
     unpack_probe_name,
 };
-pub use server::{
-    ServerError, ServerOptions, execute_python_script, execute_python_source, run_server,
-};
+pub use server::{ServerError, ServerOptions, run_server};
 pub use sim_kernel::{ProbePoint, ProbePolicy, ProbeTap, UartFrame};
 pub use time_sync::TimeCeiling;
 pub use topology::{

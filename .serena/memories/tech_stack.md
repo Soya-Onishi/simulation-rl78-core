@@ -5,6 +5,6 @@
 - Native: CMake + C compiler; `rl78-core/build.rs` builds tlib (`TARGET_ARCH=rl78`, `TARGET_WORD_SIZE=32`) → `libtlib.a`, links `pthread`, plus `cc` for `host_callbacks.c` → `rl78_tlib_callbacks`.
 - Crates of note: `object` 0.40 (ELF), `typenum` 1.17 (`Wire` counts), build-deps `cc`/`cmake`, rl78-core dev-dep `serial_test` 3.5.
 - `sim-cluster` IPC: `iceoryx2` 0.9 pub/sub (control a2n/n2a + per-edge UART), `xxhash-rust` (board_id → u64), `iceoryx2-bb-system-types` (isolated root_path). No UDS/SHM ring/`raw_sync`.
-- `sim-cluster` HTTP: `axum` 0.8 + `tokio` (multi-thread). Contract types in `contract`, backend trait + `LocalBackend` in `backend`, routes in `http`, UI HTML in `web`. Old custom `http_util` removed. External clients always hit this process (future web↔sim uses the same HTTP shapes).
+- `sim-cluster` HTTP: `axum` 0.8 + `tokio` (multi-thread). Contract types in `contract`, backend trait + `LocalBackend` in `backend`, routes in `http`, UI HTML in `web` (`/{id}` only; create is `python -m topology_dsl create`). Old custom `http_util` removed. External clients always hit this process (future web↔sim uses the same HTTP shapes).
 - Submodule: `rl78-core/tlib` → https://github.com/Soya-Onishi/tlib.git branch `rl78`.
 - Devcontainer present (clangd + rust-analyzer); no separate package manager beyond Cargo.

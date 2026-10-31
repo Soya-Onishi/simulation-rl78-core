@@ -10,7 +10,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test -p sim-cluster
 cargo build -p sim-cluster --bins -p rl78-minimal-board
 cargo run -p sim-cluster --bin cluster-server -- --listen 127.0.0.1:8090
-cargo run -p sim-cluster --bin cluster-server -- --topology python/examples/two_board_uart.py
+scripts/create-sim.sh python/examples/two_board_uart.py
+# or: python -m topology_dsl create python/examples/two_board_uart.py
+# PYTHONPATH=python; override server with --server or SIMULATION_SERVER
 ```
 
 Prereqs: `cmake`, C toolchain, `pthread`. tlib rebuild is driven by `rl78-core/build.rs` (`cargo:rerun-if-changed` on whole `tlib/` tree).
