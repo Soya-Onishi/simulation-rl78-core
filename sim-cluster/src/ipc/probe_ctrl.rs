@@ -21,6 +21,8 @@ pub const QUERY_KIND_RANGE: u8 = 2;
 pub const QUERY_REPLY_LAST: u8 = 1;
 pub const QUERY_REPLY_TRUNCATED: u8 = 2;
 
+/// Subscriber buffer for query/CSV reply channels.
+/// Query replies disable safe overflow and block when this is full.
 const QUERY_BUFFER: usize = 1024;
 const WATCH_BUFFER: usize = 32;
 
@@ -91,6 +93,18 @@ impl ProbeQueryWire {
             _pad: [0; 4],
             probe_ids,
         }
+    }
+
+    /// Range query on the query channel (JSON samples) or the CSV channel.
+    #[must_use]
+    pub fn range(
+        request_id: u64,
+        board_hash: u64,
+        ids: &[u64],
+        from_ns: Option<u64>,
+        to_ns: Option<u64>,
+    ) -> Self {
+        Self::csv(request_id, board_hash, ids, from_ns, to_ns)
     }
 
     #[must_use]
@@ -247,6 +261,7 @@ fn qos<T: ZeroCopySend + std::fmt::Debug>(
     subscribers: usize,
     nodes: usize,
     buffer: usize,
+    overflow: bool,
     create: bool,
 ) -> Result<
     iceoryx2::service::port_factory::publish_subscribe::PortFactory<ipc::Service, T, ()>,
@@ -260,7 +275,7 @@ fn qos<T: ZeroCopySend + std::fmt::Debug>(
         .max_nodes(nodes.max(1))
         .subscriber_max_buffer_size(buffer.max(1))
         .history_size(0)
-        .enable_safe_overflow(true);
+        .enable_safe_overflow(overflow);
     if create {
         builder
             .create()
@@ -278,6 +293,17 @@ fn publisher<T: ZeroCopySend + std::fmt::Debug>(
 ) -> Result<Publisher<ipc::Service, T, ()>, IpcError> {
     factory
         .publisher_builder()
+        .create()
+        .map_err(|e| IpcError::Message(format!("publisher {name}: {e:?}")))
+}
+
+fn blocking_publisher<T: ZeroCopySend + std::fmt::Debug>(
+    factory: iceoryx2::service::port_factory::publish_subscribe::PortFactory<ipc::Service, T, ()>,
+    name: &str,
+) -> Result<Publisher<ipc::Service, T, ()>, IpcError> {
+    factory
+        .publisher_builder()
+        .backpressure_strategy(BackpressureStrategy::RetryUntilDelivered)
         .create()
         .map_err(|e| IpcError::Message(format!("publisher {name}: {e:?}")))
 }
@@ -329,8 +355,8 @@ impl ServerProbeCtrl {
         let reply_name = names::probe_query_a2s(cluster_key);
         let csv_name = names::probe_csv_s2a(cluster_key);
         let csv_reply_name = names::probe_csv_a2s(cluster_key);
-        let watch = qos::<ProbeWatchWire>(node, &watch_name, 1, 1, 4, WATCH_BUFFER, true)?;
-        let query = qos::<ProbeQueryWire>(node, &query_name, 1, 1, 4, WATCH_BUFFER, true)?;
+        let watch = qos::<ProbeWatchWire>(node, &watch_name, 1, 1, 4, WATCH_BUFFER, true, true)?;
+        let query = qos::<ProbeQueryWire>(node, &query_name, 1, 1, 4, WATCH_BUFFER, true, true)?;
         let reply = qos::<ProbeQueryReplyWire>(
             node,
             &reply_name,
@@ -338,9 +364,10 @@ impl ServerProbeCtrl {
             1,
             4,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
+            false,
             true,
         )?;
-        let csv = qos::<ProbeQueryWire>(node, &csv_name, 1, 1, 4, WATCH_BUFFER, true)?;
+        let csv = qos::<ProbeQueryWire>(node, &csv_name, 1, 1, 4, WATCH_BUFFER, true, true)?;
         let csv_reply = qos::<ProbeQueryReplyWire>(
             node,
             &csv_reply_name,
@@ -348,6 +375,7 @@ impl ServerProbeCtrl {
             1,
             4,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
+            true,
             true,
         )?;
         Ok(Self {
@@ -414,8 +442,9 @@ impl ArbiterProbeCtrl {
         let query_a2s_name = names::probe_query_a2s(cluster_key);
         let query_a2n_name = names::probe_query_a2n(cluster_key);
         let query_n2a_name = names::probe_query_n2a(cluster_key);
-        let watch = qos::<ProbeWatchWire>(node, &watch_name, 1, 1, 4, WATCH_BUFFER, false)?;
-        let query_s2a = qos::<ProbeQueryWire>(node, &query_s2a_name, 1, 1, 4, WATCH_BUFFER, false)?;
+        let watch = qos::<ProbeWatchWire>(node, &watch_name, 1, 1, 4, WATCH_BUFFER, true, false)?;
+        let query_s2a =
+            qos::<ProbeQueryWire>(node, &query_s2a_name, 1, 1, 4, WATCH_BUFFER, true, false)?;
         let query_a2s = qos::<ProbeQueryReplyWire>(
             node,
             &query_a2s_name,
@@ -423,6 +452,7 @@ impl ArbiterProbeCtrl {
             1,
             4,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
+            false,
             false,
         )?;
         let query_a2n = qos::<ProbeQueryWire>(
@@ -433,6 +463,7 @@ impl ArbiterProbeCtrl {
             slots,
             WATCH_BUFFER,
             true,
+            true,
         )?;
         let query_n2a = qos::<ProbeQueryReplyWire>(
             node,
@@ -441,13 +472,15 @@ impl ArbiterProbeCtrl {
             1,
             slots,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
+            false,
             true,
         )?;
         let csv_s2a_name = names::probe_csv_s2a(cluster_key);
         let csv_a2s_name = names::probe_csv_a2s(cluster_key);
         let csv_a2n_name = names::probe_csv_a2n(cluster_key);
         let csv_n2a_name = names::probe_csv_n2a(cluster_key);
-        let csv_s2a = qos::<ProbeQueryWire>(node, &csv_s2a_name, 1, 1, 4, WATCH_BUFFER, false)?;
+        let csv_s2a =
+            qos::<ProbeQueryWire>(node, &csv_s2a_name, 1, 1, 4, WATCH_BUFFER, true, false)?;
         let csv_a2s = qos::<ProbeQueryReplyWire>(
             node,
             &csv_a2s_name,
@@ -455,6 +488,7 @@ impl ArbiterProbeCtrl {
             1,
             4,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
+            true,
             false,
         )?;
         let csv_a2n = qos::<ProbeQueryWire>(
@@ -465,6 +499,7 @@ impl ArbiterProbeCtrl {
             slots,
             WATCH_BUFFER,
             true,
+            true,
         )?;
         let csv_n2a = qos::<ProbeQueryReplyWire>(
             node,
@@ -474,11 +509,12 @@ impl ArbiterProbeCtrl {
             slots,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
             true,
+            true,
         )?;
         Ok(Self {
             watch_s2a: subscriber(watch, &watch_name)?,
             query_s2a: subscriber(query_s2a, &query_s2a_name)?,
-            query_a2s: publisher(query_a2s, &query_a2s_name)?,
+            query_a2s: blocking_publisher(query_a2s, &query_a2s_name)?,
             query_a2n: publisher(query_a2n, &query_a2n_name)?,
             query_n2a: subscriber(query_n2a, &query_n2a_name)?,
             csv_s2a: subscriber(csv_s2a, &csv_s2a_name)?,
@@ -559,6 +595,7 @@ impl NodeProbeQuery {
             board_count,
             slots,
             WATCH_BUFFER,
+            true,
             false,
         )?;
         let reply = qos::<ProbeQueryReplyWire>(
@@ -569,10 +606,11 @@ impl NodeProbeQuery {
             slots,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
             false,
+            false,
         )?;
         Ok(Self {
             query: subscriber(query, &query_name)?,
-            reply: publisher(reply, &reply_name)?,
+            reply: blocking_publisher(reply, &reply_name)?,
         })
     }
 
@@ -610,6 +648,7 @@ impl NodeProbeCsv {
             board_count,
             slots,
             WATCH_BUFFER,
+            true,
             false,
         )?;
         let reply = qos::<ProbeQueryReplyWire>(
@@ -619,6 +658,7 @@ impl NodeProbeCsv {
             1,
             slots,
             QUERY_BUFFER.saturating_mul(board_count.max(1)),
+            true,
             false,
         )?;
         Ok(Self {
@@ -670,26 +710,36 @@ mod tests {
         arb.publish_query_to_nodes(forwarded).unwrap();
         let at_node = node_q.try_query().unwrap().expect("query a2n");
         assert_eq!(at_node.request_id, 3);
+        let rec = |vt: u64, value: u16| ProbeRecord {
+            probe_id: 1,
+            virtual_time_ns: vt,
+            kind: ProbeKind::Digital,
+            value,
+        };
         node_q
             .publish_reply(ProbeQueryReplyWire::chunk(
                 3,
                 9,
-                &[ProbeRecord {
-                    probe_id: 1,
-                    virtual_time_ns: 10,
-                    kind: ProbeKind::Digital,
-                    value: 1,
-                }],
-                true,
+                &[rec(10, 1)],
+                false,
                 false,
             ))
             .unwrap();
-        let upstream = arb.try_node_reply().unwrap().expect("n2a");
-        arb.publish_reply_to_server(upstream).unwrap();
-        let reply = server.try_reply().unwrap().expect("a2s");
-        assert!(reply.is_last());
-        let records: Vec<_> = reply.records().collect();
-        assert_eq!(records[0].value, 1);
+        node_q
+            .publish_reply(ProbeQueryReplyWire::chunk(3, 9, &[rec(11, 2)], true, false))
+            .unwrap();
+        let first = arb.try_node_reply().unwrap().expect("n2a first");
+        arb.publish_reply_to_server(first).unwrap();
+        let second = arb.try_node_reply().unwrap().expect("n2a last");
+        arb.publish_reply_to_server(second).unwrap();
+        let reply = server.try_reply().unwrap().expect("a2s first");
+        assert!(!reply.is_last());
+        assert_eq!(reply.count, 1);
+        let last = server.try_reply().unwrap().expect("a2s last");
+        assert!(last.is_last());
+        assert_eq!(last.count, 1);
+        let records: Vec<_> = last.records().collect();
+        assert_eq!(records[0].value, 2);
 
         let node_csv = NodeProbeCsv::open(&node, &key, 1).unwrap();
         server

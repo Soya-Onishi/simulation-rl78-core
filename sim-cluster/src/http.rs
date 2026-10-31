@@ -11,14 +11,14 @@ use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 
 use crate::backend::{SimulationBackend, prepare_topology};
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
-    StartSimulationRequest,
+    ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
 };
 use crate::probe_log::{self, ProbeRange, ProbeRef};
 use crate::web::PAGE_HTML;
@@ -51,11 +51,15 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
             "/api/simulation/{id}/actions",
             get(list_actions).post(invoke_action),
         )
-        .route("/api/simulation/{id}", delete(delete_simulation))
+        .route(
+            "/api/simulation/{id}",
+            get(simulation_status).delete(delete_simulation),
+        )
         .route("/api/simulation/{id}/status", get(status_sse))
         .route("/api/simulation/{id}/viewer", get(viewer_sse))
         .route("/api/simulation/{id}/log", get(log_sse))
         .route("/api/simulation/{id}/probes/catalog", get(probe_catalog))
+        .route("/api/simulation/{id}/probes/samples", get(probe_samples))
         .route(
             "/api/simulation/{id}/probes/watch",
             get(probe_watch_get)
@@ -202,6 +206,20 @@ where
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn simulation_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ViewerParam>,
+) -> Result<Json<StatusEvent>, ApiError> {
+    require_viewer(&state, &id, &headers, &query).await?;
+    let backend = state.backend.clone();
+    let status = tokio::task::spawn_blocking(move || backend.status(&id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(status))
 }
 
 async fn delete_simulation(
@@ -379,6 +397,56 @@ async fn probe_catalog(
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(Json(items))
+}
+
+#[derive(serde::Deserialize)]
+struct ProbeSamplesQuery {
+    board: String,
+    probe: String,
+    from_ns: Option<String>,
+    to_ns: Option<String>,
+    viewer: Option<String>,
+}
+
+async fn probe_samples(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ProbeSamplesQuery>,
+) -> Result<Json<ProbeSamplesResponse>, ApiError> {
+    require_viewer(
+        &state,
+        &id,
+        &headers,
+        &ViewerParam {
+            viewer: query.viewer.clone(),
+        },
+    )
+    .await?;
+    if query.board.is_empty() || query.probe.is_empty() {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "board and probe are required",
+        ));
+    }
+    let from_ns = query.from_ns.as_deref();
+    let to_ns = query.to_ns.as_deref();
+    let range = ProbeRange::parse(from_ns, to_ns)
+        .map_err(|message| ApiError::bad_request("bad_param", message))?;
+    let latest = range.from_ns.is_none() && range.to_ns.is_none();
+    let backend = state.backend.clone();
+    let body = tokio::task::spawn_blocking(move || {
+        backend.probe_samples(
+            &id,
+            &query.board,
+            &query.probe,
+            if latest { None } else { range.from_ns },
+            if latest { None } else { range.to_ns },
+        )
+    })
+    .await
+    .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(body))
 }
 
 #[derive(serde::Deserialize)]

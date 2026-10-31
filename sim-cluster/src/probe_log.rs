@@ -380,12 +380,16 @@ impl ProbeLog {
     }
 }
 
+fn probe_names(catalog: &HashMap<u64, ProbePointName>, probe_id: u64) -> (String, String) {
+    catalog
+        .get(&probe_id)
+        .map(|point| (point.board_id.clone(), point.name.clone()))
+        .unwrap_or_else(|| (String::new(), format!("{:016x}", probe_id)))
+}
+
 #[must_use]
 pub fn record_view(catalog: &HashMap<u64, ProbePointName>, record: &ProbeRecord) -> ProbeView {
-    let (board, probe) = catalog
-        .get(&record.probe_id)
-        .map(|point| (point.board_id.clone(), point.name.clone()))
-        .unwrap_or_else(|| (String::new(), format!("{:016x}", record.probe_id)));
+    let (board, probe) = probe_names(catalog, record.probe_id);
     ProbeView {
         virtual_time_ns: record.virtual_time_ns,
         board,
@@ -414,6 +418,31 @@ pub fn display_value(kind: ProbeKind, value: u16) -> String {
         .to_string(),
         ProbeKind::Uart => value.to_string(),
         ProbeKind::Analog => value.to_string(),
+    }
+}
+
+/// JSON `value` for `/probes/samples`: digital is a level name, uart/analog are numbers.
+#[must_use]
+pub fn json_value(kind: ProbeKind, value: u16) -> serde_json::Value {
+    match kind {
+        ProbeKind::Digital => serde_json::Value::String(display_value(kind, value)),
+        ProbeKind::Uart | ProbeKind::Analog => value.into(),
+    }
+}
+
+/// One `/probes/samples` row. Names come from the catalog; uart/analog values stay numbers.
+#[must_use]
+pub fn json_view(
+    catalog: &HashMap<u64, ProbePointName>,
+    record: &ProbeRecord,
+) -> crate::contract::ProbeSampleJson {
+    let (board, probe) = probe_names(catalog, record.probe_id);
+    crate::contract::ProbeSampleJson {
+        virtual_time_ns: record.virtual_time_ns,
+        board,
+        probe,
+        kind: record.kind.as_str().to_string(),
+        value: json_value(record.kind, record.value),
     }
 }
 
@@ -594,9 +623,33 @@ mod tests {
         log.spill_path = PathBuf::from("/dev/null/sim-cluster-probes-fail.bin");
         log.push(rec(1, 1, ProbeKind::Digital, 1));
         log.push(rec(1, 2, ProbeKind::Digital, 2));
-        assert!(log.truncated);
+        assert!(log.truncated());
+        assert_eq!(log.latest_of(&[1])[0].virtual_time_ns, 1);
         let export = log.export().unwrap();
         assert_eq!(export.memory.len(), 1);
         assert_eq!(export.memory[0].virtual_time_ns, 1);
+    }
+
+    #[test]
+    fn json_value_types_match_kind() {
+        assert_eq!(json_value(ProbeKind::Digital, 1), serde_json::json!("High"));
+        assert_eq!(json_value(ProbeKind::Uart, 65), serde_json::json!(65));
+        assert_eq!(json_value(ProbeKind::Analog, 3300), serde_json::json!(3300));
+    }
+
+    #[test]
+    fn json_view_uses_catalog_names_and_typed_values() {
+        let mut catalog = HashMap::new();
+        catalog.insert(1, point(1, ProbeKind::Analog));
+        let sample = json_view(&catalog, &rec(1, 9, ProbeKind::Analog, 3300));
+        assert_eq!(sample.virtual_time_ns, 9);
+        assert_eq!(sample.board, "board");
+        assert_eq!(sample.probe, "p1");
+        assert_eq!(sample.kind, "analog");
+        assert_eq!(sample.value, serde_json::json!(3300));
+        let missing = json_view(&catalog, &rec(2, 1, ProbeKind::Digital, 1));
+        assert_eq!(missing.board, "");
+        assert_eq!(missing.probe, format!("{:016x}", 2u64));
+        assert_eq!(missing.value, serde_json::json!("High"));
     }
 }

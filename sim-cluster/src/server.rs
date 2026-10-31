@@ -18,7 +18,8 @@ use iceoryx2::prelude::{Node, ipc};
 use crate::action::{ActionRequest, ActionUpstream};
 use crate::backend::{LocalBackend, SimulationBackend};
 use crate::contract::{
-    ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, StatusEvent,
+    ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
+    StatusEvent,
 };
 use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
@@ -30,7 +31,7 @@ use crate::ipc::{
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
     CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
-    ProbeView, ProbeWatchView, record_view,
+    ProbeView, ProbeWatchView, json_view, record_view,
 };
 use crate::topology::{LogicalTopology, TopologyError};
 
@@ -175,6 +176,13 @@ pub enum JobKind {
         id: String,
         request_id: u64,
     },
+    ProbeSamples {
+        id: String,
+        board: String,
+        probe: String,
+        from_ns: Option<u64>,
+        to_ns: Option<u64>,
+    },
     ViewerAttach {
         id: String,
     },
@@ -209,6 +217,7 @@ pub enum JobReply {
         catalog: Vec<ProbePointName>,
     },
     ProbeCsvPoll(crate::probe_log::CsvPoll),
+    ProbeSamples(ProbeSamplesResponse),
     ViewerToken(String),
     Err(ApiError),
 }
@@ -518,6 +527,19 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         JobKind::ProbeCsvStatus { id, request_id } => match world.sims.get(&id) {
             Some(sim) => match csv_status(sim, request_id) {
                 Ok(poll) => JobReply::ProbeCsvPoll(poll),
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::ProbeSamples {
+            id,
+            board,
+            probe,
+            from_ns,
+            to_ns,
+        } => match world.sims.get_mut(&id) {
+            Some(sim) => match query_samples(sim, &board, &probe, from_ns, to_ns) {
+                Ok(body) => JobReply::ProbeSamples(body),
                 Err(err) => JobReply::Err(err),
             },
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
@@ -925,7 +947,7 @@ fn snapshot_watch(sim: &mut Simulation) -> Result<CoarseBatch, ApiError> {
             samples: Vec::new(),
         });
     }
-    let records = query_latest(sim, &probe_ids)?;
+    let (records, _) = query_latest(sim, &probe_ids)?;
     Ok(CoarseBatch {
         seq,
         samples: records
@@ -957,7 +979,10 @@ fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn query_latest(sim: &mut Simulation, probe_ids: &[u64]) -> Result<Vec<ProbeRecord>, ApiError> {
+fn query_latest(
+    sim: &mut Simulation,
+    probe_ids: &[u64],
+) -> Result<(Vec<ProbeRecord>, bool), ApiError> {
     let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
     for id in probe_ids {
         if let Some(point) = sim.probe_catalog.get(id) {
@@ -969,7 +994,7 @@ fn query_latest(sim: &mut Simulation, probe_ids: &[u64]) -> Result<Vec<ProbeReco
     }
     let expected: HashSet<u64> = by_board.keys().copied().collect();
     if expected.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
     let request_id = next_probe_request(sim);
     for (board_hash, ids) in by_board {
@@ -977,7 +1002,76 @@ fn query_latest(sim: &mut Simulation, probe_ids: &[u64]) -> Result<Vec<ProbeReco
             .publish_query(ProbeQueryWire::latest(request_id, board_hash, &ids))
             .map_err(|err| ApiError::internal(err.to_string()))?;
     }
-    Ok(collect_query(sim, request_id, expected, Duration::from_secs(5))?.0)
+    collect_query(sim, request_id, expected, Duration::from_secs(5))
+}
+
+fn query_range(
+    sim: &mut Simulation,
+    probe_ids: &[u64],
+    range: ProbeRange,
+) -> Result<(Vec<ProbeRecord>, bool), ApiError> {
+    let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
+    for id in probe_ids {
+        if let Some(point) = sim.probe_catalog.get(id) {
+            by_board
+                .entry(crate::ipc::board_id_hash(&point.board_id))
+                .or_default()
+                .push(*id);
+        }
+    }
+    let expected: HashSet<u64> = by_board.keys().copied().collect();
+    if expected.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let request_id = next_probe_request(sim);
+    for (board_hash, ids) in by_board {
+        sim.probe_ctrl
+            .publish_query(ProbeQueryWire::range(
+                request_id,
+                board_hash,
+                &ids,
+                range.from_ns,
+                range.to_ns,
+            ))
+            .map_err(|err| ApiError::internal(err.to_string()))?;
+    }
+    collect_query(sim, request_id, expected, Duration::from_secs(30))
+}
+
+fn query_samples(
+    sim: &mut Simulation,
+    board: &str,
+    probe: &str,
+    from_ns: Option<u64>,
+    to_ns: Option<u64>,
+) -> Result<ProbeSamplesResponse, ApiError> {
+    require_catalog(sim)?;
+    if board.is_empty() || probe.is_empty() {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "board and probe are required",
+        ));
+    }
+    let ids = resolve_probes(
+        sim,
+        &[ProbeRef {
+            board: board.to_string(),
+            name: probe.to_string(),
+        }],
+    )?;
+    let (records, truncated) = if from_ns.is_none() && to_ns.is_none() {
+        query_latest(sim, &ids)?
+    } else {
+        let range = ProbeRange { from_ns, to_ns };
+        query_range(sim, &ids, range)?
+    };
+    Ok(ProbeSamplesResponse {
+        truncated,
+        samples: records
+            .iter()
+            .map(|record| json_view(&sim.probe_catalog, record))
+            .collect(),
+    })
 }
 
 fn start_csv(

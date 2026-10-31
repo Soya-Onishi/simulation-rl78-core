@@ -49,6 +49,14 @@ pub trait SimulationBackend: Send + Sync {
     ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError>;
     fn csv_poll(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;
     fn csv_status(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;
+    fn probe_samples(
+        &self,
+        id: &str,
+        board: &str,
+        probe: &str,
+        from_ns: Option<u64>,
+        to_ns: Option<u64>,
+    ) -> Result<crate::contract::ProbeSamplesResponse, ApiError>;
     fn viewer_attach(&self, id: &str) -> Result<String, ApiError>;
     fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError>;
     fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError>;
@@ -302,6 +310,29 @@ impl SimulationBackend for LocalBackend {
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for csv status: {other:?}"
+            ))),
+        }
+    }
+
+    fn probe_samples(
+        &self,
+        id: &str,
+        board: &str,
+        probe: &str,
+        from_ns: Option<u64>,
+        to_ns: Option<u64>,
+    ) -> Result<crate::contract::ProbeSamplesResponse, ApiError> {
+        match self.rpc(JobKind::ProbeSamples {
+            id: id.to_string(),
+            board: board.to_string(),
+            probe: probe.to_string(),
+            from_ns,
+            to_ns,
+        })? {
+            JobReply::ProbeSamples(body) => Ok(body),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for probe samples: {other:?}"
             ))),
         }
     }
