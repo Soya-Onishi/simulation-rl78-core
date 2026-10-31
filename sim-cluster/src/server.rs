@@ -17,9 +17,8 @@ use crate::action::{ActionRequest, ActionUpstream};
 use crate::backend::LocalBackend;
 use crate::contract::{
     ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
-    StatusEvent,
+    StatusEvent, prepare_create_topology,
 };
-use crate::elf_source;
 use crate::host::{HostCommand, SessionNode};
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
@@ -297,21 +296,6 @@ pub fn run_server(opts: &ServerOptions) -> Result<(), ServerError> {
     Ok(())
 }
 
-/// Validate topology JSON for HTTP create. Local ELF paths are rejected.
-pub fn prepare_topology(topology: LogicalTopology) -> Result<LogicalTopology, ApiError> {
-    topology
-        .validate()
-        .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
-    for board in &topology.boards {
-        if let Some(elf) = &board.elf {
-            elf_source::check_http_create_spec(elf).map_err(|err| {
-                ApiError::bad_request("invalid_topology", format!("board {}: {err}", board.id))
-            })?;
-        }
-    }
-    Ok(topology)
-}
-
 fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
     let mut world = World {
         sims: HashMap::new(),
@@ -330,13 +314,16 @@ fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
 
 fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
     let reply = match job.kind {
-        JobKind::Create(topo) => match create_simulation(topo, opts) {
-            Ok(sim) => {
-                let id = sim.id.clone();
-                world.sims.insert(id.clone(), sim);
-                JobReply::Created { id }
-            }
-            Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+        JobKind::Create(topo) => match prepare_create_topology(topo) {
+            Err(err) => JobReply::Err(err),
+            Ok(topo) => match create_simulation(topo, opts) {
+                Ok(sim) => {
+                    let id = sim.id.clone();
+                    world.sims.insert(id.clone(), sim);
+                    JobReply::Created { id }
+                }
+                Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+            },
         },
         JobKind::Command { id, cmd } => match world.sims.get_mut(&id) {
             Some(sim) => match command_simulation(sim, cmd) {
@@ -1225,49 +1212,6 @@ impl Drop for Simulation {
 mod tests {
     use super::*;
 
-    fn one_board(elf: Option<&str>) -> LogicalTopology {
-        LogicalTopology {
-            boards: vec![crate::topology::BoardSpec {
-                id: "a".into(),
-                kind: "rl78".into(),
-                elf: elf.map(str::to_string),
-                endpoints: vec![],
-            }],
-            edges: vec![],
-            margin_ns: 1000,
-            headroom_threshold_ns: 200,
-            ready_timeout_ms: 10_000,
-        }
-    }
-
-    #[test]
-    fn prepare_topology_requires_boards() {
-        let err = prepare_topology(LogicalTopology {
-            boards: vec![],
-            edges: vec![],
-            margin_ns: 1000,
-            headroom_threshold_ns: 200,
-            ready_timeout_ms: 10_000,
-        })
-        .unwrap_err();
-        assert_eq!(err.status, 400);
-        assert_eq!(err.code, "invalid_topology");
-    }
-
-    #[test]
-    fn prepare_topology_rejects_local_elf_paths() {
-        for elf in ["a.elf", "/tmp/a.elf", "file:///tmp/a.elf"] {
-            let err = prepare_topology(one_board(Some(elf))).unwrap_err();
-            assert_eq!(err.status, 400);
-            assert_eq!(err.code, "invalid_topology");
-            assert!(
-                err.message.contains("http(s)") || err.message.contains("base64"),
-                "unexpected message: {}",
-                err.message
-            );
-        }
-    }
-
     #[test]
     fn topology_dsl_unittests() {
         let python_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../python");
@@ -1279,15 +1223,6 @@ mod tests {
             .status()
             .expect("python3");
         assert!(status.success(), "python topology_dsl tests failed");
-    }
-
-    #[test]
-    fn prepare_topology_accepts_remote_and_inline_elf() {
-        for elf in ["https://example.test/fw.elf", "base64:AQI="] {
-            let topo = prepare_topology(one_board(Some(elf))).expect(elf);
-            assert_eq!(topo.boards[0].elf.as_deref(), Some(elf));
-        }
-        assert!(prepare_topology(one_board(None)).is_ok());
     }
 
     fn invoke_request(board_id: &str, device: &str, action: &str) -> InvokeActionRequest {

@@ -15,10 +15,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 
-use crate::backend::{SimulationBackend, prepare_topology};
+use crate::backend::SimulationBackend;
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
-    ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
+    ProbeSamplesResponse, StartSimulationRequest, StatusEvent, prepare_create_topology,
 };
 use crate::probe_log::{self, ProbeRange, ProbeRef};
 use crate::web::PAGE_HTML;
@@ -87,7 +87,7 @@ async fn create_simulation(
     State(state): State<AppState>,
     Json(body): Json<CreateSimulationRequest>,
 ) -> Result<(StatusCode, Json<CreateSimulationResponse>), ApiError> {
-    let topology = prepare_topology(body.topology)?;
+    let topology = prepare_create_topology(body.topology)?;
     let backend = state.backend.clone();
     let id = tokio::task::spawn_blocking(move || backend.create(topology))
         .await

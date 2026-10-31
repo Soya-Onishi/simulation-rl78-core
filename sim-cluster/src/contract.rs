@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::elf_source;
 use crate::host::SessionNode;
 use crate::topology::LogicalTopology;
 
@@ -12,6 +13,24 @@ use crate::topology::LogicalTopology;
 #[derive(Debug, Deserialize)]
 pub struct CreateSimulationRequest {
     pub topology: LogicalTopology,
+}
+
+/// Topology accepted by create. Local paths and `file://` are rejected.
+///
+/// HTTP and the sim worker both call this so the check stays valid when those
+/// sides become separate processes.
+pub fn prepare_create_topology(topology: LogicalTopology) -> Result<LogicalTopology, ApiError> {
+    topology
+        .validate()
+        .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
+    for board in &topology.boards {
+        if let Some(elf) = &board.elf {
+            elf_source::check_http_create_spec(elf).map_err(|err| {
+                ApiError::bad_request("invalid_topology", format!("board {}: {err}", board.id))
+            })?;
+        }
+    }
+    Ok(topology)
 }
 
 /// Body for `201` create responses.
@@ -194,7 +213,62 @@ impl std::error::Error for ApiError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest};
+    use super::{
+        ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest, prepare_create_topology,
+    };
+    use crate::topology::LogicalTopology;
+
+    fn one_board(elf: Option<&str>) -> LogicalTopology {
+        LogicalTopology {
+            boards: vec![crate::topology::BoardSpec {
+                id: "a".into(),
+                kind: "rl78".into(),
+                elf: elf.map(str::to_string),
+                endpoints: vec![],
+            }],
+            edges: vec![],
+            margin_ns: 1000,
+            headroom_threshold_ns: 200,
+            ready_timeout_ms: 10_000,
+        }
+    }
+
+    #[test]
+    fn prepare_create_topology_requires_boards() {
+        let err = prepare_create_topology(LogicalTopology {
+            boards: vec![],
+            edges: vec![],
+            margin_ns: 1000,
+            headroom_threshold_ns: 200,
+            ready_timeout_ms: 10_000,
+        })
+        .unwrap_err();
+        assert_eq!(err.status, 400);
+        assert_eq!(err.code, "invalid_topology");
+    }
+
+    #[test]
+    fn prepare_create_topology_rejects_local_elf_paths() {
+        for elf in ["a.elf", "/tmp/a.elf", "file:///tmp/a.elf"] {
+            let err = prepare_create_topology(one_board(Some(elf))).unwrap_err();
+            assert_eq!(err.status, 400);
+            assert_eq!(err.code, "invalid_topology");
+            assert!(
+                err.message.contains("http(s)") || err.message.contains("base64"),
+                "unexpected message: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_create_topology_accepts_remote_and_inline_elf() {
+        for elf in ["https://example.test/fw.elf", "base64:AQI="] {
+            let topo = prepare_create_topology(one_board(Some(elf))).expect(elf);
+            assert_eq!(topo.boards[0].elf.as_deref(), Some(elf));
+        }
+        assert!(prepare_create_topology(one_board(None)).is_ok());
+    }
 
     #[test]
     fn samples_body_uses_typed_values() {

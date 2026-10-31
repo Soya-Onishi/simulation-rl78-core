@@ -52,7 +52,7 @@ fn too_large(label: &str, limit: usize) -> ElfSourceError {
     invalid(format!("firmware from {label} exceeds {limit} bytes"))
 }
 
-/// HTTP create accepts only remote URLs and inline bytes.
+/// Create contract: only remote URLs and inline bytes.
 pub(crate) fn check_http_create_spec(spec: &str) -> Result<(), ElfSourceError> {
     match classify(spec)? {
         Kind::Http(_) | Kind::Base64(_) => check_spec(spec),
