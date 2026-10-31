@@ -23,6 +23,7 @@ RL78 guest sim: Rust workspace + tlib (TCG) submodule. No config files — machi
 - tlib host arch support in build: x86 / x86_64 only (`HOST_ARCH=i386`).
 - First build needs `git submodule update --init --recursive`.
 - `sim-cluster` depends on `sim-kernel` only (not `rl78-core`).
+- Cluster gdbserver uses a generic `GdbArch` (opaque `g` bytes + PC, 32-bit RSP addresses). Packet layout lives in the CPU crate (`hw/cpus/rl78` via `Core::read_gdb_registers`).
 - Topology `elf` is one string. Exclusive forms: filesystem path, `file://`, `http(s)://`, or `base64:` payload. Loaded by `sim-cluster/src/elf_source.rs`. JSON validate checks the form only (no local stat, no fetch). HTTP `POST /api/simulation` accepts `http(s)://` and `base64:` only; the client embeds local files.
 
 ## Related

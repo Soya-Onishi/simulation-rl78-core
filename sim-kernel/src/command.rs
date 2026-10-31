@@ -70,7 +70,7 @@ pub enum InspectResult {
     Reg { id: RegId, value: u64 },
     Mem { addr: Addr, data: Vec<u8> },
     Breakpoint { id: BreakpointId },
-    GdbRegs { data: Vec<u8> },
+    GdbRegs { data: Vec<u8>, pc: Addr },
 }
 
 /// Recoverable control-plane error.
@@ -125,7 +125,7 @@ impl fmt::Display for InspectResult {
                 Ok(())
             }
             Self::Breakpoint { id } => write!(f, "breakpoint {}", id.0),
-            Self::GdbRegs { data } => write!(f, "gdb-regs {} bytes", data.len()),
+            Self::GdbRegs { data, pc } => write!(f, "gdb-regs {} bytes pc={pc:#x}", data.len()),
         }
     }
 }

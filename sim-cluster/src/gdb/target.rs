@@ -19,7 +19,7 @@ use crate::inspect::{InspectReply, InspectRequest, MEM_CHUNK, inspect_rpc};
 use crate::ipc::board_id_hash;
 use crate::server::{Job, JobKind, JobReply};
 
-use super::arch::{GDB_G_PACKET_LEN, Rl78Arch, Rl78GdbRegs};
+use super::arch::{GdbArch, GdbRegs};
 
 pub struct ClusterGdbTarget {
     tx: Sender<Job>,
@@ -118,7 +118,7 @@ impl ClusterGdbTarget {
 }
 
 impl Target for ClusterGdbTarget {
-    type Arch = Rl78Arch;
+    type Arch = GdbArch;
     type Error = String;
 
     fn base_ops(&mut self) -> BaseOps<'_, Self::Arch, Self::Error> {
@@ -135,21 +135,18 @@ impl Target for ClusterGdbTarget {
 }
 
 impl SingleThreadBase for ClusterGdbTarget {
-    fn read_registers(&mut self, regs: &mut Rl78GdbRegs) -> TargetResult<(), Self> {
+    fn read_registers(&mut self, regs: &mut GdbRegs) -> TargetResult<(), Self> {
         match self.rpc(InspectRequest::ReadRegs) {
-            Ok(InspectReply::Regs { data }) => {
-                let bytes = decode_hex(&data).map_err(|_| TargetError::NonFatal)?;
-                if bytes.len() != GDB_G_PACKET_LEN {
-                    return Err(TargetError::NonFatal);
-                }
-                regs.raw.copy_from_slice(&bytes);
+            Ok(InspectReply::Regs { data, pc }) => {
+                regs.raw = decode_hex(&data).map_err(|_| TargetError::NonFatal)?;
+                regs.pc = pc as u32;
                 Ok(())
             }
             Ok(_) | Err(_) => Err(TargetError::NonFatal),
         }
     }
 
-    fn write_registers(&mut self, regs: &Rl78GdbRegs) -> TargetResult<(), Self> {
+    fn write_registers(&mut self, regs: &GdbRegs) -> TargetResult<(), Self> {
         match self.rpc(InspectRequest::WriteRegs {
             data: encode_hex(&regs.raw),
         }) {

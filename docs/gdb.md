@@ -18,7 +18,7 @@ ssh -L 45231:127.0.0.1:45231 user@192.168.1.10
 
 WebUI のスタート / ストップ / リセット / `until_ns` は GDB 接続中は使えない。実行制御は GDB の continue / interrupt / step。ボードを切り替えるときは切断してから付け直す（ポートは変わり得る）。
 
-continue / stop / step は arbiter 経由。step は対象ノードが 1 命令進んだあと、他ノード（plant 含む）がその仮想時間までキャッチアップする。メモリ / レジスタ / ブレークポイントはノード上の inspect UDS。
+continue / stop / step は arbiter 経由。step は対象ノードが 1 命令進んだあと、他ノード（plant 含む）がその仮想時間までキャッチアップする。メモリ / レジスタ / ブレークポイントはノード上の inspect UDS。`g` パケットの並びは対象 CPU クレート（RL78 なら `hw/cpus/rl78`）が組み立て、cluster はバイト列と PC だけを転送する。
 
 ## VS Code
 

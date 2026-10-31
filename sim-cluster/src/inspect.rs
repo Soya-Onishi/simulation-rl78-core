@@ -36,7 +36,7 @@ pub enum InspectRequest {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum InspectReply {
     Ok,
-    Regs { data: String },
+    Regs { data: String, pc: u64 },
     Mem { data: String },
     Breakpoint { id: u64 },
     Error { message: String },
@@ -95,8 +95,9 @@ impl InspectServer {
     fn handle<E: Entity>(&mut self, sim: &mut Simulator<E>, req: InspectRequest) -> InspectReply {
         match req {
             InspectRequest::ReadRegs => match sim.command(Command::ReadGdbRegs) {
-                Response::Inspect(InspectResult::GdbRegs { data }) => InspectReply::Regs {
+                Response::Inspect(InspectResult::GdbRegs { data, pc }) => InspectReply::Regs {
                     data: encode_hex(&data),
+                    pc,
                 },
                 other => reply_from_response(other),
             },
@@ -171,8 +172,9 @@ pub fn inspect_rpc(path: &Path, req: &InspectRequest) -> Result<InspectReply, St
 fn reply_from_response(resp: Response) -> InspectReply {
     match resp {
         Response::Inspect(InspectResult::Ok) => InspectReply::Ok,
-        Response::Inspect(InspectResult::GdbRegs { data }) => InspectReply::Regs {
+        Response::Inspect(InspectResult::GdbRegs { data, pc }) => InspectReply::Regs {
             data: encode_hex(&data),
+            pc,
         },
         Response::Inspect(InspectResult::Mem { data, .. }) => InspectReply::Mem {
             data: encode_hex(&data),

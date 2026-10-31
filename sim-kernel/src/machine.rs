@@ -275,7 +275,10 @@ impl<C: Cpu> Machine<C> {
                 Response::Inspect(InspectResult::Ok)
             }
             Command::ReadGdbRegs => match self.cpu.core().read_gdb_registers() {
-                Ok(data) => Response::Inspect(InspectResult::GdbRegs { data }),
+                Ok(data) => Response::Inspect(InspectResult::GdbRegs {
+                    data,
+                    pc: self.cpu.core().pc(),
+                }),
                 Err(err) => Response::Error(err),
             },
             Command::WriteGdbRegs { data } => {

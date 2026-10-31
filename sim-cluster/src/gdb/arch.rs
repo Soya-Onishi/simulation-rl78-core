@@ -1,69 +1,82 @@
-//! GNU RL78 register blob for [`gdbstub`] (`g`/`G` packets).
+//! Architecture-neutral gdbstub [`Arch`]: an opaque `g` blob plus a PC.
+//!
+//! Packet layout, `target.xml`, and GNU register numbers belong in the CPU
+//! crate (`hw/cpus/<arch>`). This stub only forwards bytes and uses 32-bit
+//! RSP addresses (`Arch::Usize = u32`).
 
 use core::num::NonZeroUsize;
 
 use gdbstub::arch::{Arch, RegId, Registers};
 
-/// Matches GNU `rl78-tdep` raw `g` length.
-pub const GDB_G_PACKET_LEN: usize = 43;
+/// Remote protocol architecture used by [`crate::gdb::target::ClusterGdbTarget`].
+pub enum GdbArch {}
 
-pub enum Rl78Arch {}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Rl78GdbRegs {
-    pub raw: [u8; GDB_G_PACKET_LEN],
+/// Opaque GDB `g`/`G` payload. `pc` is supplied by inspect, not parsed from `raw`.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct GdbRegs {
+    pub raw: Vec<u8>,
+    pub pc: u32,
 }
 
-impl Default for Rl78GdbRegs {
-    fn default() -> Self {
-        Self {
-            raw: [0; GDB_G_PACKET_LEN],
-        }
-    }
-}
-
-impl Registers for Rl78GdbRegs {
+impl Registers for GdbRegs {
     type ProgramCounter = u32;
 
     fn pc(&self) -> Self::ProgramCounter {
-        u32::from_le_bytes(self.raw[35..39].try_into().unwrap_or([0; 4]))
+        self.pc
     }
 
     fn gdb_serialize(&self, mut write_byte: impl FnMut(Option<u8>)) {
-        for b in self.raw {
-            write_byte(Some(b));
+        for byte in &self.raw {
+            write_byte(Some(*byte));
         }
     }
 
     fn gdb_deserialize(&mut self, bytes: &[u8]) -> Result<(), ()> {
-        if bytes.len() != GDB_G_PACKET_LEN {
-            return Err(());
-        }
-        self.raw.copy_from_slice(bytes);
+        self.raw.clear();
+        self.raw.extend_from_slice(bytes);
         Ok(())
     }
 }
 
+/// Placeholder for a future `p`/`P` map (see issue #92). Unused while
+/// single-register access is not implemented.
 #[derive(Debug, Copy, Clone)]
-pub struct Rl78RegId(#[allow(dead_code)] pub usize);
+pub struct GdbRegId(#[allow(dead_code)] pub usize);
 
-impl RegId for Rl78RegId {
+impl RegId for GdbRegId {
     fn from_raw_id(id: usize) -> Option<(Self, Option<NonZeroUsize>)> {
-        if id < GDB_G_PACKET_LEN {
-            Some((Self(id), NonZeroUsize::new(1)))
-        } else {
-            None
-        }
+        Some((Self(id), None))
     }
 }
 
-impl Arch for Rl78Arch {
+impl Arch for GdbArch {
     type Usize = u32;
-    type Registers = Rl78GdbRegs;
-    type RegId = Rl78RegId;
+    type Registers = GdbRegs;
+    type RegId = GdbRegId;
     type BreakpointKind = ();
 
     fn target_description_xml() -> Option<&'static str> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_round_trips_any_length() {
+        let mut regs = GdbRegs {
+            raw: vec![0x11, 0x22, 0x33],
+            pc: 0x1234,
+        };
+        let mut out = Vec::new();
+        regs.gdb_serialize(|b| out.push(b.unwrap()));
+        assert_eq!(out, vec![0x11, 0x22, 0x33]);
+        assert_eq!(regs.pc(), 0x1234);
+
+        regs.gdb_deserialize(&[0xaa, 0xbb]).unwrap();
+        assert_eq!(regs.raw, vec![0xaa, 0xbb]);
+        assert_eq!(regs.pc(), 0x1234);
     }
 }
