@@ -847,8 +847,8 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
         None => return Err(ApiError::not_found("unknown board")),
     }
 
-    if let Some(mut old) = take_idle_gdb_slot(state, id)? {
-        old.shutdown();
+    if let Some(old) = take_idle_gdb_slot(state, id)? {
+        drop(old);
     }
 
     state.backend.stop(id)?;
@@ -871,9 +871,9 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
     .map_err(|err| ApiError::internal(err.to_string()))?;
     let info = slot.info();
     let mut map = gdb_map(state)?;
-    if let Some(mut displaced) = map.insert(id.to_string(), slot) {
+    if let Some(displaced) = map.insert(id.to_string(), slot) {
         drop(map);
-        displaced.shutdown();
+        drop(displaced);
     }
     Ok(info)
 }
