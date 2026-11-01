@@ -141,10 +141,6 @@ impl Target for ClusterGdbTarget {
     fn support_breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
         Some(self)
     }
-
-    fn use_rle(&self) -> bool {
-        false
-    }
 }
 
 impl SingleThreadBase for ClusterGdbTarget {
