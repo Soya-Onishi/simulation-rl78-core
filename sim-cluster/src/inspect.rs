@@ -145,6 +145,9 @@ impl Drop for InspectServer {
 /// Client RPC (one connection per call).
 pub fn inspect_rpc(path: &Path, req: &InspectRequest) -> Result<InspectReply, String> {
     let mut stream = UnixStream::connect(path).map_err(|err| err.to_string())?;
+    // Timeouts are a hang guard only. SO_RCVTIMEO / SO_SNDTIMEO almost never
+    // fail on a connected UDS; if they do, read/write still work, so do not
+    // fail the RPC.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     write_msg(&mut stream, req).map_err(|err| err.to_string())?;
