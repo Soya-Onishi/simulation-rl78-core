@@ -180,12 +180,13 @@ impl BlockingEventLoop for ClusterGdbEventLoop {
             <Self::Connection as Connection>::Error,
         >,
     > {
-        let _ = conn.set_read_timeout(Some(Duration::from_millis(20)));
+        // Cap GetStatus traffic. Incoming bytes and an already-stopped guest
+        // still return on this iteration; the sleep runs only when both are idle.
+        const IDLE_POLL: Duration = Duration::from_millis(100);
         loop {
             match conn.peek() {
                 Ok(Some(_)) => {
                     let byte = conn.read().map_err(WaitForStopReasonError::Connection)?;
-                    let _ = conn.set_read_timeout(None);
                     return Ok(Event::IncomingData(byte));
                 }
                 Ok(None) => {}
@@ -196,12 +197,12 @@ impl BlockingEventLoop for ClusterGdbEventLoop {
             }
             match target.status_stop_reason() {
                 Ok(Some(reason)) => {
-                    let _ = conn.set_read_timeout(None);
                     return Ok(Event::TargetStopped(map_status_reason(Some(&reason))));
                 }
                 Ok(None) => {}
                 Err(err) => return Err(WaitForStopReasonError::Target(err)),
             }
+            thread::sleep(IDLE_POLL);
         }
     }
 
