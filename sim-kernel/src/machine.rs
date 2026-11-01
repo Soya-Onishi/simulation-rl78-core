@@ -312,10 +312,6 @@ impl<C: Cpu> Entity for Machine<C> {
         }
 
         let now = self.clock().now();
-        if ctx.budget.is_zero() {
-            return EntityPoll::NoProgress;
-        }
-
         let budget_ns = self
             .events_mut()
             .next_deadline()
@@ -344,16 +340,17 @@ impl<C: Cpu> Entity for Machine<C> {
                 max_quantum: ctx.max_quantum,
             }));
         }
-        let insn_limit = now
-            .saturating_add(budget_ns)
-            .saturating_sub(self.last_insn_at);
+
         let max_instructions = if ctx.step_once {
             1
         } else {
-            insn_limit
+            now
+                .saturating_add(budget_ns)
+                .saturating_sub(self.last_insn_at)
                 .saturating_div(ns_per_insn)
                 .min(u64::from(u32::MAX)) as u32
         };
+
         if max_instructions == 0 {
             if budget_ns.is_zero() {
                 return EntityPoll::NoProgress;
@@ -375,10 +372,10 @@ impl<C: Cpu> Entity for Machine<C> {
         }
         let elapsed = ns_per_insn.saturating_mul(result.instructions);
         self.last_insn_at = last_before.saturating_add(elapsed);
-        if !budget_ns.is_zero() {
-            self.advance_clock(budget_ns);
-        }
-
+        let clock_delta = self.last_insn_at
+            .max(now.saturating_add(budget_ns))
+            .saturating_sub(now);
+        self.advance_clock(clock_delta);
         if let Some(access) = self.bus_mut().take_trap() {
             return EntityPoll::Done(Response::Stopped(StopReason::Unmapped {
                 addr: access.addr,

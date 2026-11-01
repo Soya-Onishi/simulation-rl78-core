@@ -444,7 +444,8 @@ fn step_once_ignores_allowed_ceiling() {
     assert_eq!(sim.command(Command::Step), Response::Started);
     assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Step)));
     assert_eq!(sim.state(), SimState::Stopped);
-    assert_eq!(sim.machine().clock().now(), Tick(3) + DEFAULT_MAX_QUANTUM);
+    // One insn (period 1) may pass the ceiling; the clock follows last_insn_at.
+    assert_eq!(sim.machine().clock().now(), Tick(4));
 }
 
 #[test]

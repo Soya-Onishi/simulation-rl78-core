@@ -166,19 +166,11 @@ impl<E: Entity> Simulator<E> {
         }
 
         let now = self.entity.now();
-        // A debugger step must retire one instruction even when `now` already
-        // sits on the multi-board ceiling (catch-up leaves allowed == now).
-        let budget = if self.step_once {
-            Tick::MAX
-        } else if let Some(allowed) = self.allowed {
-            let remaining = allowed.saturating_sub(now);
-            if remaining.is_zero() {
-                return None;
-            }
-            remaining
-        } else {
-            Tick::MAX
+        let budget = match self.allowed {
+            Some(allowed) => allowed.saturating_sub(now),
+            None => Tick::MAX,
         };
+
         let ctx = AdvanceCtx {
             budget,
             max_quantum: self.cfg.max_quantum,
