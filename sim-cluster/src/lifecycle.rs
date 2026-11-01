@@ -144,7 +144,7 @@ impl PeerState {
                 ))),
             ),
             (
-                state @ (PeerState::Running | PeerState::Stopped),
+                state @ (PeerState::Ready | PeerState::Running | PeerState::Stopped),
                 ControlToArbiter::TimeReport {
                     from,
                     virtual_time_ns,
@@ -157,7 +157,7 @@ impl PeerState {
                 }),
             ),
             (
-                PeerState::Running | PeerState::Stopped,
+                PeerState::Ready | PeerState::Running | PeerState::Stopped,
                 ControlToArbiter::HostStop { from, reason },
             ) => (
                 PeerState::Stopped,
@@ -323,6 +323,35 @@ mod tests {
             Some(PeerEffect::TimeReport {
                 from: hash_a,
                 virtual_time_ns: 50,
+            })
+        );
+    }
+
+    #[test]
+    fn peer_accepts_step_reports_while_ready() {
+        let hash_a = board_id_hash("a");
+        let (n, eff) = PeerState::Ready.on_message(ControlToArbiter::TimeReport {
+            from: hash_a,
+            virtual_time_ns: 50,
+        });
+        assert_eq!(n, PeerState::Ready);
+        assert_eq!(
+            eff,
+            Some(PeerEffect::TimeReport {
+                from: hash_a,
+                virtual_time_ns: 50,
+            })
+        );
+        let (n, eff) = n.on_message(ControlToArbiter::HostStop {
+            from: hash_a,
+            reason: HostStopReason::Step,
+        });
+        assert_eq!(n, PeerState::Stopped);
+        assert_eq!(
+            eff,
+            Some(PeerEffect::HostStop {
+                from: hash_a,
+                reason: HostStopReason::Step,
             })
         );
     }
