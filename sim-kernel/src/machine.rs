@@ -267,12 +267,12 @@ impl<C: Cpu> Machine<C> {
                 self.sync_breakpoints();
                 Response::Inspect(InspectResult::Breakpoint { id })
             }
-            Command::RemoveBreakpoint { id } => {
-                if self.breakpoints_mut().remove(id) {
+            Command::RemoveBreakpoint { addr } => {
+                if self.breakpoints_mut().remove_at(addr) {
                     self.sync_breakpoints();
                     Response::Inspect(InspectResult::Ok)
                 } else {
-                    Response::Error(SimError::UnknownBreakpoint(id))
+                    Response::Error(SimError::UnknownBreakpoint(addr))
                 }
             }
             Command::ClearBreakpoints => {

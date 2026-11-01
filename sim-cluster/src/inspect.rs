@@ -1,13 +1,12 @@
 //! Length-prefixed JSON inspect RPC over a Unix domain socket (server ↔ node).
 
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use sim_kernel::{BreakpointId, Command, Entity, InspectResult, Response, Simulator};
+use sim_kernel::{Command, Entity, InspectResult, Response, Simulator};
 
 use crate::ipc::board_id_hash;
 
@@ -46,7 +45,6 @@ pub enum InspectReply {
 pub struct InspectServer {
     listener: UnixListener,
     path: PathBuf,
-    breakpoints: HashMap<u64, BreakpointId>,
 }
 
 impl InspectServer {
@@ -58,11 +56,7 @@ impl InspectServer {
         }
         let listener = UnixListener::bind(&path)?;
         listener.set_nonblocking(true)?;
-        Ok(Self {
-            listener,
-            path,
-            breakpoints: HashMap::new(),
-        })
+        Ok(Self { listener, path })
     }
 
     pub fn service<E: Entity>(&mut self, sim: &mut Simulator<E>) -> std::io::Result<()> {
@@ -130,24 +124,12 @@ impl InspectServer {
                 Err(message) => InspectReply::Error { message },
             },
             InspectRequest::AddBreakpoint { addr } => {
-                match sim.command(Command::AddBreakpoint { addr }) {
-                    Response::Inspect(InspectResult::Breakpoint { id }) => {
-                        self.breakpoints.insert(addr, id);
-                        InspectReply::Breakpoint { id: id.0 }
-                    }
-                    other => reply_from_response(other),
-                }
+                reply_from_response(sim.command(Command::AddBreakpoint { addr }))
             }
             InspectRequest::RemoveBreakpoint { addr } => {
-                let Some(id) = self.breakpoints.remove(&addr) else {
-                    return InspectReply::Error {
-                        message: "unknown breakpoint".into(),
-                    };
-                };
-                reply_from_response(sim.command(Command::RemoveBreakpoint { id }))
+                reply_from_response(sim.command(Command::RemoveBreakpoint { addr }))
             }
             InspectRequest::ClearBreakpoints => {
-                self.breakpoints.clear();
                 reply_from_response(sim.command(Command::ClearBreakpoints))
             }
         }

@@ -516,6 +516,15 @@ fn clear_breakpoints_removes_all() {
         Response::Inspect(InspectResult::Breakpoint { .. })
     ));
     assert_eq!(
+        sim.command(Command::RemoveBreakpoint { addr: 0x10 }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    assert_eq!(sim.machine().breakpoints().as_slice().len(), 1);
+    assert_eq!(
+        sim.command(Command::RemoveBreakpoint { addr: 0x99 }),
+        Response::Error(SimError::UnknownBreakpoint(0x99))
+    );
+    assert_eq!(
         sim.command(Command::ClearBreakpoints),
         Response::Inspect(InspectResult::Ok)
     );
