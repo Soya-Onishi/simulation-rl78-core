@@ -428,6 +428,26 @@ fn allowed_ceiling_hard_blocks_until_raised() {
 }
 
 #[test]
+fn step_once_ignores_allowed_ceiling() {
+    let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(100)), SimConfig::default());
+    assert_eq!(
+        sim.command(Command::SetAllowed { tick: Tick(3) }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    assert_eq!(sim.command(Command::Start), Response::Started);
+    for _ in 0..8 {
+        let _ = sim.poll();
+    }
+    assert_eq!(sim.machine().clock().now(), Tick(3));
+    assert_eq!(sim.poll(), None);
+
+    assert_eq!(sim.command(Command::Step), Response::Started);
+    assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Step)));
+    assert_eq!(sim.state(), SimState::Stopped);
+    assert_eq!(sim.machine().clock().now(), Tick(4));
+}
+
+#[test]
 fn insn_budget_uses_last_exec_time_across_idle_sync() {
     let mut sim = Simulator::new(
         empty_machine(ScriptedCpu::nops(8).with_period(Tick(5))),
