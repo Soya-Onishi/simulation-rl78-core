@@ -34,6 +34,10 @@ pub struct Machine<C: Cpu> {
     clock: VirtualClock,
     ctl: EventCtl,
     breakpoints: BreakpointStore,
+    /// Virtual time of the last retired instruction. Instruction budget is
+    /// `allowed - last_insn_at`; the clock still advances toward `allowed`
+    /// for cluster sync even when no instruction fits.
+    last_insn_at: Tick,
 }
 
 impl<C: Cpu> Machine<C> {
@@ -75,6 +79,7 @@ impl<C: Cpu> Machine<C> {
             clock: VirtualClock::new(),
             ctl,
             breakpoints: BreakpointStore::new(),
+            last_insn_at: Tick::ZERO,
         })
     }
 
@@ -130,6 +135,7 @@ impl<C: Cpu> Machine<C> {
             device.reset(&mut self.bus);
         }
         self.cpu.reset(&mut self.bus);
+        self.last_insn_at = self.clock.now();
     }
 
     #[must_use]
@@ -338,10 +344,13 @@ impl<C: Cpu> Entity for Machine<C> {
                 max_quantum: ctx.max_quantum,
             }));
         }
+        let insn_limit = now
+            .saturating_add(budget_ns)
+            .saturating_sub(self.last_insn_at);
         let max_instructions = if ctx.step_once {
             1
         } else {
-            budget_ns
+            insn_limit
                 .saturating_div(ns_per_insn)
                 .min(u64::from(u32::MAX)) as u32
         };
@@ -356,6 +365,7 @@ impl<C: Cpu> Entity for Machine<C> {
             return EntityPoll::Progressed;
         }
 
+        let last_before = self.last_insn_at;
         let result = {
             let (cpu, _, _) = self.parts_mut();
             cpu.run_quantum(max_instructions)
@@ -364,7 +374,12 @@ impl<C: Cpu> Entity for Machine<C> {
             return EntityPoll::NoProgress;
         }
         let elapsed = ns_per_insn.saturating_mul(result.instructions);
-        self.advance_clock(elapsed);
+        self.last_insn_at = last_before.saturating_add(elapsed);
+        if ctx.step_once || now <= last_before {
+            self.advance_clock(elapsed);
+        } else if !budget_ns.is_zero() {
+            self.advance_clock(budget_ns);
+        }
 
         if let Some(access) = self.bus_mut().take_trap() {
             return EntityPoll::Done(Response::Stopped(StopReason::Unmapped {

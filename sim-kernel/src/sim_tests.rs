@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::bus::{MemoryBus, MemoryMapBuilder, Ram, UnmappedPolicy};
 use crate::clock::Tick;
 use crate::command::{Command, InspectResult, Response, SimError};
-use crate::cpu::RegId;
+use crate::cpu::{Core, RegId};
 use crate::event::{EventCtl, EventCtx, SimEvent};
 use crate::machine::Machine;
 use crate::sim::{SimConfig, SimState, Simulator, spawn};
@@ -425,6 +425,34 @@ fn allowed_ceiling_hard_blocks_until_raised() {
     assert!(!sim.waiting_on_allowed_ceiling());
     let _ = sim.poll();
     assert!(sim.machine().clock().now() > Tick(3));
+}
+
+#[test]
+fn insn_budget_uses_last_exec_time_across_idle_sync() {
+    let mut sim = Simulator::new(
+        empty_machine(ScriptedCpu::nops(8).with_period(Tick(5))),
+        SimConfig::default(),
+    );
+    assert_eq!(
+        sim.command(Command::SetAllowed { tick: Tick(3) }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    assert_eq!(sim.command(Command::Start), Response::Started);
+    for _ in 0..8 {
+        let _ = sim.poll();
+    }
+    assert_eq!(sim.machine().clock().now(), Tick(3));
+    assert_eq!(sim.machine().cpu().pc(), 0);
+
+    assert_eq!(
+        sim.command(Command::SetAllowed { tick: Tick(10) }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    for _ in 0..8 {
+        let _ = sim.poll();
+    }
+    assert_eq!(sim.machine().clock().now(), Tick(10));
+    assert_eq!(sim.machine().cpu().pc(), 2);
 }
 
 #[test]
