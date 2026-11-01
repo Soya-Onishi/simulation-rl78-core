@@ -21,8 +21,8 @@ use futures_util::stream::{self, Stream};
 use crate::backend::SimulationBackend;
 use crate::contract::{
     ActionList, ApiError, AttachGdbRequest, CreateSimulationRequest, CreateSimulationResponse,
-    GdbSessionInfo, InvokeActionRequest, ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
-    prepare_create_topology,
+    GdbSessionInfo, GdbSshCommand, InvokeActionRequest, ProbeSamplesResponse,
+    StartSimulationRequest, StatusEvent, prepare_create_topology,
 };
 use crate::gdb::GdbSlot;
 use crate::inspect::{InspectReply, InspectRequest};
@@ -37,16 +37,6 @@ pub struct AppState {
     pub backend: Arc<dyn SimulationBackend>,
     gdb: Arc<Mutex<HashMap<String, GdbSlot>>>,
     advertise_host: Ipv4Addr,
-}
-
-impl AppState {
-    fn status(&self, id: &str) -> Result<StatusEvent, ApiError> {
-        let mut status = self.backend.status(id)?;
-        if let Ok(map) = gdb_map(self) {
-            status.gdb = map.get(id).map(GdbSlot::info);
-        }
-        Ok(status)
-    }
 }
 
 impl IntoResponse for ApiError {
@@ -80,6 +70,7 @@ pub fn router(backend: Arc<dyn SimulationBackend>, advertise_host: Ipv4Addr) -> 
             "/api/simulation/{id}/gdb",
             get(gdb_get).post(gdb_attach).delete(gdb_detach),
         )
+        .route("/api/simulation/{id}/gdb/ssh", get(gdb_ssh))
         .route("/api/simulation/{id}/status", get(status_sse))
         .route("/api/simulation/{id}/viewer", get(viewer_sse))
         .route("/api/simulation/{id}/log", get(log_sse))
@@ -238,7 +229,8 @@ async fn simulation_status(
     Query(query): Query<ViewerParam>,
 ) -> Result<Json<StatusEvent>, ApiError> {
     require_viewer(&state, &id, &headers, &query).await?;
-    let status = tokio::task::spawn_blocking(move || state.status(&id))
+    let backend = state.backend.clone();
+    let status = tokio::task::spawn_blocking(move || backend.status(&id))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(Json(status))
@@ -278,6 +270,16 @@ async fn gdb_get(
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(Json(info))
+}
+
+async fn gdb_ssh(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<GdbSshCommand>, ApiError> {
+    let command = tokio::task::spawn_blocking(move || gdb_ssh_command(&state, &id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(command))
 }
 
 async fn delete_simulation(
@@ -367,9 +369,10 @@ fn status_event_stream(
         (state, id, None::<crate::contract::StatusEvent>),
         |(state, id, last)| async move {
             loop {
-                let state_poll = state.clone();
+                let backend_poll = state.backend.clone();
                 let id_poll = id.clone();
-                let result = tokio::task::spawn_blocking(move || state_poll.status(&id_poll)).await;
+                let result =
+                    tokio::task::spawn_blocking(move || backend_poll.status(&id_poll)).await;
                 match result {
                     Ok(Ok(status)) => {
                         if last.as_ref() != Some(&status) {
@@ -885,6 +888,17 @@ fn gdb_slot_info(state: &AppState, id: &str) -> Result<Option<GdbSessionInfo>, A
         return Err(ApiError::not_found("unknown simulation"));
     }
     Ok(gdb_map(state)?.get(id).map(GdbSlot::info))
+}
+
+fn gdb_ssh_command(state: &AppState, id: &str) -> Result<GdbSshCommand, ApiError> {
+    if !state.backend.exists(id)? {
+        return Err(ApiError::not_found("unknown simulation"));
+    }
+    let command = gdb_map(state)?
+        .get(id)
+        .map(GdbSlot::ssh_command)
+        .ok_or_else(|| ApiError::not_found("gdb is not listening"))?;
+    Ok(GdbSshCommand { command })
 }
 
 fn delete_with_gdb(state: &AppState, id: &str) -> Result<(), ApiError> {

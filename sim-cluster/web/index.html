@@ -441,38 +441,51 @@ function fillGdbBoards(nodes) {
   if (prev && boards.some((board) => board.id === prev)) {
     select.value = prev;
   }
-  const connected = !!(gdbInfo && gdbInfo.connected);
-  document.getElementById("gdb-attach").disabled = connected || boards.length === 0;
+  document.getElementById("gdb-attach").disabled = boards.length === 0;
 }
 
-function gdbSshCommand(info) {
-  return "ssh -L " + info.port + ":127.0.0.1:" + info.port + " " + info.user + "@" + info.host;
+async function loadGdb() {
+  if (!simId) {
+    renderGdb(null, "");
+    return;
+  }
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/gdb");
+  if (!res.ok) {
+    renderGdb(null, "");
+    return;
+  }
+  const info = await res.json();
+  if (!info) {
+    renderGdb(null, "");
+    return;
+  }
+  const sshRes = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/gdb/ssh");
+  const ssh = sshRes.ok ? ((await sshRes.json()).command || "") : "";
+  renderGdb(info, ssh);
 }
 
-function renderGdb(info) {
+function renderGdb(info, sshCommand) {
   gdbInfo = info;
-  const connected = !!(info && info.connected);
   const ssh = document.getElementById("gdb-ssh");
   const status = document.getElementById("gdb-status");
   document.getElementById("gdb-detach").disabled = !info;
-  document.getElementById("gdb-board").disabled = connected;
-  document.getElementById("gdb-attach").disabled = connected || !document.getElementById("gdb-board").value;
+  document.getElementById("gdb-board").disabled = false;
+  document.getElementById("gdb-attach").disabled = !document.getElementById("gdb-board").value;
   if (!info) {
     status.textContent = "未接続";
     ssh.textContent = "";
     return;
   }
-  status.textContent = (connected ? "GDB 接続中" : "待ち受け中") + " · ポート " + info.port;
-  ssh.textContent = gdbSshCommand(info);
+  status.textContent = "ポート " + info.port;
+  ssh.textContent = sshCommand || "";
 }
 
 function setButtons(state) {
   simState = state;
   const dead = state === "exited";
-  const gdb = !!(gdbInfo && gdbInfo.connected);
-  document.getElementById("start").disabled = dead || gdb || state === "running";
-  document.getElementById("stop").disabled = dead || gdb || state !== "running";
-  document.getElementById("reset").disabled = dead || gdb;
+  document.getElementById("start").disabled = dead || state === "running";
+  document.getElementById("stop").disabled = dead || state !== "running";
+  document.getElementById("reset").disabled = dead;
   setActionRunEnabled();
 }
 
@@ -719,7 +732,6 @@ function applyStatus(snap) {
   setStatusError(snap.state === "exited" ? "arbiter has exited" : "");
   renderNodes(snap.nodes || []);
   fillGdbBoards(snap.nodes || []);
-  renderGdb(snap.gdb || null);
   setButtons(snap.state);
   if (snap.state === "running" && prev !== "running") loadActions();
 }
@@ -822,6 +834,7 @@ async function connectProbes() {
 function connectStreams() {
   attachStatusAndLogs();
   connectProbes();
+  loadGdb();
 }
 
 function reconnectLiveStreams() {
@@ -920,9 +933,7 @@ document.getElementById("gdb-attach").onclick = async () => {
     setCommandError(apiError(body, res.statusText));
     return;
   }
-  const info = await res.json();
-  renderGdb(info);
-  setButtons(simState);
+  await loadGdb();
   setCommandError("");
 };
 document.getElementById("gdb-detach").onclick = async () => {
@@ -935,8 +946,7 @@ document.getElementById("gdb-detach").onclick = async () => {
     setCommandError(apiError(body, res.statusText));
     return;
   }
-  renderGdb(null);
-  setButtons(simState);
+  renderGdb(null, "");
   setCommandError("");
 };
 document.getElementById("probes-csv").onclick = async () => {

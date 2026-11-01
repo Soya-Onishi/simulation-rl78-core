@@ -48,8 +48,12 @@ pub struct StatusEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     pub nodes: Vec<SessionNode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gdb: Option<GdbSessionInfo>,
+}
+
+/// Body for `GET /api/simulation/{id}/gdb/ssh`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GdbSshCommand {
+    pub command: String,
 }
 
 /// Body for `POST /api/simulation/{id}/gdb`.

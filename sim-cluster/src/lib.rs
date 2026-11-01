@@ -40,9 +40,9 @@ pub use board_runtime::{
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
     ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, AttachGdbRequest,
-    CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, InvokeActionRequest,
-    LogEvent, ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
-    prepare_create_topology,
+    CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, GdbSshCommand,
+    InvokeActionRequest, LogEvent, ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest,
+    StatusEvent, prepare_create_topology,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;

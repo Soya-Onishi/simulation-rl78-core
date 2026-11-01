@@ -42,6 +42,14 @@ impl GdbSlot {
         }
     }
 
+    #[must_use]
+    pub fn ssh_command(&self) -> String {
+        format!(
+            "ssh -L {0}:127.0.0.1:{0} {1}@{2}",
+            self.port, self.user, self.host
+        )
+    }
+
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Ok(mut slot) = self.active.lock()

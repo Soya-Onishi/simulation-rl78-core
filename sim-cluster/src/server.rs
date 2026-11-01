@@ -609,7 +609,6 @@ fn status_event(sim: &Simulation) -> StatusEvent {
         virtual_time_ns: sim.virtual_time_ns,
         stop_reason: sim.stop_reason.clone(),
         nodes: sim.nodes.clone(),
-        gdb: None,
     }
 }
 
