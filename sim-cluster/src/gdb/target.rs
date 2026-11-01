@@ -189,13 +189,13 @@ impl SingleThreadBase for ClusterGdbTarget {
 
     fn write_addrs(&mut self, start_addr: u32, data: &[u8]) -> TargetResult<(), Self> {
         let mut off = 0;
-        while off < data.len() {
-            let end = (off + MEM_CHUNK as usize).min(data.len());
+
+        for chunk in data.chunks(MEM_CHUNK as usize) {
             match self.rpc(InspectRequest::WriteMem {
                 addr: u64::from(start_addr) + off as u64,
-                data: encode_hex(&data[off..end]),
+                data: encode_hex(chunk),
             }) {
-                Ok(InspectReply::Ok) => off = end,
+                Ok(InspectReply::Ok) => off += chunk.len(),
                 Ok(_) | Err(_) => return Err(TargetError::NonFatal),
             }
         }
