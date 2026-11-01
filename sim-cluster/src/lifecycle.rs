@@ -112,9 +112,11 @@ impl NodeState {
 pub enum PeerState {
     /// StartupRecord sent (or about to be); waiting for Ready.
     AwaitingReady,
+    /// Ready received.
+    Ready,
     /// Start broadcast done for this peer.
     Running,
-    /// Idle after Ready, ClusterStop, or a host stop. Same as the node side.
+    /// Stopped (ClusterStop sent or connection lost).
     Stopped,
 }
 
@@ -134,11 +136,9 @@ impl PeerState {
     #[must_use]
     pub fn on_message(self, msg: ControlToArbiter) -> (Self, Option<PeerEffect>) {
         match (self, msg) {
-            (PeerState::AwaitingReady, ControlToArbiter::Ready { .. }) => {
-                (PeerState::Stopped, None)
-            }
-            (PeerState::Stopped, ControlToArbiter::Ready { from }) => (
-                PeerState::Stopped,
+            (PeerState::AwaitingReady, ControlToArbiter::Ready { .. }) => (PeerState::Ready, None),
+            (PeerState::Ready, ControlToArbiter::Ready { from }) => (
+                PeerState::Ready,
                 Some(PeerEffect::Warn(format!(
                     "duplicate Ready from {from:#x}; ignoring"
                 ))),
@@ -179,7 +179,7 @@ impl PeerState {
     pub fn on_start_broadcast(self) -> Self {
         match self {
             // Stopped is included so a later host Start resumes the same peers.
-            PeerState::Running | PeerState::Stopped => PeerState::Running,
+            PeerState::Ready | PeerState::Running | PeerState::Stopped => PeerState::Running,
             other => other,
         }
     }
@@ -257,39 +257,21 @@ mod tests {
         let hash_a = board_id_hash("a");
         let mut s = PeerState::AwaitingReady;
         let (n, eff) = s.on_message(ControlToArbiter::Ready { from: hash_a });
-        assert_eq!(n, PeerState::Stopped);
+        assert_eq!(n, PeerState::Ready);
         assert!(eff.is_none());
         s = n;
         let (n, eff) = s.on_message(ControlToArbiter::Ready { from: hash_a });
-        assert_eq!(n, PeerState::Stopped);
+        assert_eq!(n, PeerState::Ready);
         assert!(matches!(eff, Some(PeerEffect::Warn(_))));
     }
 
     #[test]
     fn peer_start_from_stopped_resumes() {
         assert_eq!(PeerState::Stopped.on_start_broadcast(), PeerState::Running);
+        assert_eq!(PeerState::Ready.on_start_broadcast(), PeerState::Running);
         assert_eq!(
             PeerState::AwaitingReady.on_start_broadcast(),
             PeerState::AwaitingReady
-        );
-    }
-
-    #[test]
-    fn peer_accepts_host_stop_after_ready() {
-        let hash_a = board_id_hash("a");
-        let (n, _) = PeerState::AwaitingReady.on_message(ControlToArbiter::Ready { from: hash_a });
-        assert_eq!(n, PeerState::Stopped);
-        let (n, eff) = n.on_message(ControlToArbiter::HostStop {
-            from: hash_a,
-            reason: HostStopReason::Step,
-        });
-        assert_eq!(n, PeerState::Stopped);
-        assert_eq!(
-            eff,
-            Some(PeerEffect::HostStop {
-                from: hash_a,
-                reason: HostStopReason::Step,
-            })
         );
     }
 

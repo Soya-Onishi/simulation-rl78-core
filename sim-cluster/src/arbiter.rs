@@ -131,7 +131,7 @@ fn await_ready(
     control.publish(&startup)?;
     let mut last_startup = Instant::now();
 
-    while peers.values().any(|p| *p == PeerState::AwaitingReady) {
+    while peers.values().any(|p| *p != PeerState::Ready) {
         if Instant::now() >= deadline {
             return Err(ready_timeout(topo, &peers));
         }
@@ -887,6 +887,7 @@ fn write_status(
 fn peer_state_name(state: &PeerState) -> &'static str {
     match state {
         PeerState::AwaitingReady => "awaiting_ready",
+        PeerState::Ready => "ready",
         PeerState::Running => "running",
         PeerState::Stopped => "stopped",
     }
@@ -908,7 +909,7 @@ fn broadcast_cluster_stop(
 fn ready_timeout(topo: &LogicalTopology, peers: &HashMap<String, PeerState>) -> ArbiterError {
     let missing = peers
         .iter()
-        .filter(|(_, p)| **p == PeerState::AwaitingReady)
+        .filter(|(_, p)| **p != PeerState::Ready)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>()
         .join(",");
