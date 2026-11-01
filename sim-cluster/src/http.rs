@@ -818,11 +818,18 @@ fn take_gdb_slot(state: &AppState, id: &str) -> Result<Option<GdbSlot>, ApiError
     Ok(gdb_map(state)?.remove(id))
 }
 
-fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError> {
-    if gdb_connected(state, id) {
+fn take_idle_gdb_slot(state: &AppState, id: &str) -> Result<Option<GdbSlot>, ApiError> {
+    let mut map = gdb_map(state)?;
+    if map
+        .get(id)
+        .is_some_and(|slot| slot.connected.load(Ordering::SeqCst))
+    {
         return Err(ApiError::conflict("gdb is connected"));
     }
+    Ok(map.remove(id))
+}
 
+fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError> {
     let status = state.backend.status(id)?;
     match status
         .nodes
@@ -840,6 +847,10 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
         None => return Err(ApiError::not_found("unknown board")),
     }
 
+    if let Some(mut old) = take_idle_gdb_slot(state, id)? {
+        old.shutdown();
+    }
+
     state.backend.stop(id)?;
     match state
         .backend
@@ -851,10 +862,6 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
         Err(err) => return Err(err),
     }
 
-    if gdb_connected(state, id) {
-        return Err(ApiError::conflict("gdb is connected"));
-    }
-
     let slot = crate::gdb::spawn_slot(
         state.backend.clone(),
         id.to_string(),
@@ -864,18 +871,9 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
     .map_err(|err| ApiError::internal(err.to_string()))?;
     let info = slot.info();
     let mut map = gdb_map(state)?;
-    if map
-        .get(id)
-        .is_some_and(|existing| existing.connected.load(Ordering::SeqCst))
-    {
+    if let Some(mut displaced) = map.insert(id.to_string(), slot) {
         drop(map);
-        let mut slot = slot;
-        slot.shutdown();
-        return Err(ApiError::conflict("gdb is connected"));
-    }
-    if let Some(mut old) = map.insert(id.to_string(), slot) {
-        drop(map);
-        old.shutdown();
+        displaced.shutdown();
     }
     Ok(info)
 }
