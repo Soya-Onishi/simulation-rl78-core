@@ -23,7 +23,7 @@ use target::{ClusterGdbTarget, map_status_reason};
 pub struct GdbSlot {
     pub board_id: String,
     pub port: u16,
-    pub host: Ipv4Addr,
+    pub host: String,
     pub user: String,
     pub connected: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
@@ -35,7 +35,7 @@ impl GdbSlot {
     pub fn info(&self) -> GdbSessionInfo {
         GdbSessionInfo {
             board_id: self.board_id.clone(),
-            host: self.host.to_string(),
+            host: self.host.clone(),
             port: self.port,
             user: self.user.clone(),
             connected: self.connected.load(Ordering::SeqCst),
@@ -79,7 +79,7 @@ pub fn spawn_slot(
     backend: Arc<dyn SimulationBackend>,
     sim_id: String,
     board_id: String,
-    host: Ipv4Addr,
+    host: String,
 ) -> io::Result<GdbSlot> {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
     listener.set_nonblocking(true)?;

@@ -9,7 +9,8 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test -p sim-cluster
 cargo build -p sim-cluster --bins -p rl78-minimal-board
-cargo run -p sim-cluster --bin cluster-server -- --listen 127.0.0.1:8090
+cargo run -p sim-cluster --bin cluster-backend -- --config example/config/backend.yaml
+cargo run -p sim-cluster --bin simulation-frontend -- --config example/config/frontend.yaml
 scripts/create-sim.sh python/examples/two_board_uart.py
 # or: python -m topology_dsl create python/examples/two_board_uart.py
 # PYTHONPATH=python; override server with --server or SIMULATION_SERVER

@@ -1,4 +1,4 @@
-"""Development sample: requires a running cluster-server.
+"""Development sample: requires a running cluster-backend and simulation-frontend.
 
 This is not a product system test. Real cases live in the development project.
 ``@sim_case`` skips automatically when the server is down.

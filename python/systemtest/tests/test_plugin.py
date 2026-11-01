@@ -20,5 +20,5 @@ def test_sim_case_setup_skips_when_server_is_down(monkeypatch) -> None:
         def get_closest_marker(self, name: str):
             return object() if name == "sim_case" else None
 
-    with pytest.raises(pytest.skip.Exception, match="cluster-server is not running"):
+    with pytest.raises(pytest.skip.Exception, match="simulation-frontend is not running"):
         pytest_runtest_setup(_Item())  # type: ignore[arg-type]

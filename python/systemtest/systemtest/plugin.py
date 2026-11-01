@@ -15,17 +15,17 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Skip @sim_case tests when cluster-server is not listening."""
+    """Skip @sim_case tests when simulation-frontend is not listening."""
     if item.get_closest_marker("sim_case") is None:
         return
     if not cluster_available():
-        pytest.skip("cluster-server is not running")
+        pytest.skip("simulation-frontend is not running")
 
 
 def sim_case(*, topology, csv: bool = False):
     """Mark a test that receives a connected Simulation as argument ``sim``.
 
-    If cluster-server is down, the test is skipped automatically.
+    If simulation-frontend is down, the test is skipped automatically.
     """
 
     def decorator(fn):

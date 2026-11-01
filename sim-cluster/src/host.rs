@@ -1,4 +1,4 @@
-//! Logical host commands and status shared by `cluster-server` and `cluster-arbiter`.
+//! Logical host commands and status shared by `cluster-backend` and `cluster-arbiter`.
 //!
 //! The samples themselves travel on iceoryx (`ctrl/s2a` and `status/a2s`).
 

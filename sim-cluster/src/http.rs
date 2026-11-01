@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,7 +35,7 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 pub struct AppState {
     pub backend: Arc<dyn SimulationBackend>,
     gdb: Arc<Mutex<HashMap<String, GdbSlot>>>,
-    advertise_host: Ipv4Addr,
+    advertise_host: String,
 }
 
 impl IntoResponse for ApiError {
@@ -47,11 +46,11 @@ impl IntoResponse for ApiError {
 }
 
 /// Build the application router (API under `/api`, UI at `/{id}`).
-pub fn router(backend: Arc<dyn SimulationBackend>, advertise_host: Ipv4Addr) -> Router {
+pub fn router(backend: Arc<dyn SimulationBackend>, advertise_host: impl Into<String>) -> Router {
     let state = AppState {
         backend,
         gdb: Arc::new(Mutex::new(HashMap::new())),
-        advertise_host,
+        advertise_host: advertise_host.into(),
     };
     Router::new()
         .route("/api/simulation", post(create_simulation))
@@ -846,7 +845,7 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
         state.backend.clone(),
         id.to_string(),
         board_id.to_string(),
-        state.advertise_host,
+        state.advertise_host.clone(),
     )
     .map_err(|err| ApiError::internal(err.to_string()))?;
     let info = slot.info();
@@ -908,53 +907,15 @@ fn delete_with_gdb(state: &AppState, id: &str) -> Result<(), ApiError> {
     state.backend.delete(id)
 }
 
-/// Concrete IPv4 from `--listen` for GDB `host` (SSH target). Not probed.
-/// Unspecified / unparseable → loopback.
-#[must_use]
-fn advertise_host_from_listen(listen: &str) -> Ipv4Addr {
-    let ip = match listen.parse::<SocketAddr>() {
-        Ok(SocketAddr::V4(addr)) => *addr.ip(),
-        _ => match listen.rsplit_once(':') {
-            Some((host, _)) => host.parse().unwrap_or(Ipv4Addr::LOCALHOST),
-            None => Ipv4Addr::LOCALHOST,
-        },
-    };
-    if ip.is_unspecified() {
-        Ipv4Addr::LOCALHOST
-    } else {
-        ip
-    }
-}
-
 /// Serve with axum on `listen` (`host:port`).
 pub async fn serve(
     listen: &str,
+    advertise_host: impl Into<String>,
     backend: Arc<dyn SimulationBackend>,
 ) -> Result<(), std::io::Error> {
-    let app = router(backend, advertise_host_from_listen(listen));
+    let app = router(backend, advertise_host);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
-    eprintln!("cluster-server listening on http://{addr}");
+    eprintln!("simulation-frontend listening on http://{addr}");
     axum::serve(listener, app).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn advertise_host_follows_listen_ipv4() {
-        assert_eq!(
-            advertise_host_from_listen("192.168.1.10:8090"),
-            Ipv4Addr::new(192, 168, 1, 10)
-        );
-        assert_eq!(
-            advertise_host_from_listen("0.0.0.0:8090"),
-            Ipv4Addr::LOCALHOST
-        );
-        assert_eq!(
-            advertise_host_from_listen("localhost:8090"),
-            Ipv4Addr::LOCALHOST
-        );
-    }
 }

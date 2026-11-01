@@ -1,4 +1,4 @@
-"""HTTP client for cluster-server."""
+"""HTTP client for simulation-frontend."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def default_base_url() -> str:
 
 
 def cluster_available(base_url: str | None = None) -> bool:
-    """True when cluster-server accepts a TCP connection at the harness URL."""
+    """True when simulation-frontend accepts a TCP connection at the harness URL."""
     url = (base_url or default_base_url()).rstrip("/")
     try:
         httpx.get(url, timeout=0.5)

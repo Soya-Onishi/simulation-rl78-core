@@ -2,7 +2,8 @@
 
 ``python -m topology_dsl run <script.py>`` prints logical JSON (elf strings
 unchanged). ``python -m topology_dsl create <script.py>`` embeds local ELF
-files as ``base64:``, POSTs ``/api/simulation`` on a running cluster-server,
+files as ``base64:``, POSTs ``/api/simulation`` on a running simulation-frontend
+(start ``cluster-backend`` first),
 and prints the simulation URL. The server validates JSON
 (``sim_cluster::topology``) and starts the arbiter. This is a runtime
 handoff, not a checked-in product config.

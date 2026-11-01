@@ -1,8 +1,4 @@
-//! Simulation control backend.
-//!
-//! [`SimulationBackend`] is the process/module boundary: today
-//! [`LocalBackend`] talks to the in-process worker; later an HTTP client
-//! implementation can target a remote sim-server with the same contract.
+//! In-process [`SimulationBackend`] over the worker job queue.
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
@@ -14,63 +10,9 @@ use crate::inspect::{InspectReply, InspectRequest};
 use crate::server::{Job, JobKind, JobReply};
 use crate::topology::LogicalTopology;
 
-/// Control-plane operations shared by HTTP adapters.
-pub trait SimulationBackend: Send + Sync {
-    fn create(&self, topology: LogicalTopology) -> Result<String, ApiError>;
-    fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError>;
-    fn stop(&self, id: &str) -> Result<(), ApiError>;
-    fn reset(&self, id: &str) -> Result<(), ApiError>;
-    fn delete(&self, id: &str) -> Result<(), ApiError>;
-    fn exists(&self, id: &str) -> Result<bool, ApiError>;
-    fn status(&self, id: &str) -> Result<StatusEvent, ApiError>;
-    /// Logs with `seq > after`. Use the high-water mark at subscribe time for
-    /// "from connection onward" streaming.
-    fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError>;
-    /// Highest log seq currently stored (`0` if none).
-    fn log_high_water(&self, id: &str) -> Result<u64, ApiError>;
-    fn actions(&self, id: &str) -> Result<ActionList, ApiError>;
-    fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError>;
-    fn probe_catalog(&self, id: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError>;
-    fn probe_watch_get(&self, id: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError>;
-    fn probe_watch_put(
-        &self,
-        id: &str,
-        probes: Vec<crate::probe_log::ProbeRef>,
-    ) -> Result<crate::probe_log::ProbeWatchView, ApiError>;
-    fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError>;
-    fn probe_watch_live(
-        &self,
-        id: &str,
-        after: u64,
-    ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError>;
-    fn csv_start(
-        &self,
-        id: &str,
-        range: crate::probe_log::ProbeRange,
-    ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError>;
-    fn csv_poll(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;
-    fn csv_status(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;
-    fn probe_samples(
-        &self,
-        id: &str,
-        board: &str,
-        probe: &str,
-        from_ns: Option<u64>,
-        to_ns: Option<u64>,
-    ) -> Result<crate::contract::ProbeSamplesResponse, ApiError>;
-    fn viewer_attach(&self, id: &str) -> Result<String, ApiError>;
-    fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError>;
-    fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError>;
-    fn inspect(
-        &self,
-        id: &str,
-        board_id: &str,
-        req: InspectRequest,
-    ) -> Result<InspectReply, ApiError>;
-    fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError>;
-}
+use super::SimulationBackend;
 
-/// In-process backend over the cluster-server worker queue.
+/// In-process backend over the `cluster-backend` worker queue.
 #[derive(Clone)]
 pub struct LocalBackend {
     tx: Sender<Job>,
@@ -93,10 +35,10 @@ impl LocalBackend {
                 kind,
                 reply: reply_tx,
             })
-            .map_err(|_| ApiError::internal("cluster-server worker is not running"))?;
+            .map_err(|_| ApiError::internal("cluster-backend worker is not running"))?;
         reply_rx
             .recv_timeout(timeout)
-            .map_err(|_| ApiError::internal("cluster-server worker timed out"))
+            .map_err(|_| ApiError::internal("cluster-backend worker timed out"))
     }
 
     fn command(&self, id: &str, cmd: HostCommand) -> Result<(), ApiError> {
