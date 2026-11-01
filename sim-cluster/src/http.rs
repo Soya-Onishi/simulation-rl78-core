@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -895,15 +895,53 @@ fn delete_with_gdb(state: &AppState, id: &str) -> Result<(), ApiError> {
     state.backend.delete(id)
 }
 
+/// Concrete IPv4 from `--listen` for GDB `host` (SSH target). Not probed.
+/// Unspecified / unparseable → loopback.
+#[must_use]
+fn advertise_host_from_listen(listen: &str) -> Ipv4Addr {
+    let ip = match listen.parse::<SocketAddr>() {
+        Ok(SocketAddr::V4(addr)) => *addr.ip(),
+        _ => match listen.rsplit_once(':') {
+            Some((host, _)) => host.parse().unwrap_or(Ipv4Addr::LOCALHOST),
+            None => Ipv4Addr::LOCALHOST,
+        },
+    };
+    if ip.is_unspecified() {
+        Ipv4Addr::LOCALHOST
+    } else {
+        ip
+    }
+}
+
 /// Serve with axum on `listen` (`host:port`).
 pub async fn serve(
     listen: &str,
     backend: Arc<dyn SimulationBackend>,
-    advertise_host: Ipv4Addr,
 ) -> Result<(), std::io::Error> {
-    let app = router(backend, advertise_host);
+    let app = router(backend, advertise_host_from_listen(listen));
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     eprintln!("cluster-server listening on http://{addr}");
     axum::serve(listener, app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertise_host_follows_listen_ipv4() {
+        assert_eq!(
+            advertise_host_from_listen("192.168.1.10:8090"),
+            Ipv4Addr::new(192, 168, 1, 10)
+        );
+        assert_eq!(
+            advertise_host_from_listen("0.0.0.0:8090"),
+            Ipv4Addr::LOCALHOST
+        );
+        assert_eq!(
+            advertise_host_from_listen("localhost:8090"),
+            Ipv4Addr::LOCALHOST
+        );
+    }
 }

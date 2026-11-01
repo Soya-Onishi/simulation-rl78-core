@@ -5,7 +5,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -47,8 +46,6 @@ const WATCH_PENDING_KEEP: usize = 64;
 pub struct ServerOptions {
     /// `host:port` to bind. Port `0` picks a free port.
     pub listen: String,
-    /// Host advertised in GDB session info (the `--listen` IPv4, not probed).
-    pub advertise_host: Ipv4Addr,
     /// Path to the `cluster-arbiter` executable.
     pub arbiter_bin: PathBuf,
 }
@@ -60,29 +57,10 @@ impl ServerOptions {
         let exe_dir = exe
             .parent()
             .ok_or_else(|| ServerError::Message("current_exe has no parent".into()))?;
-        let listen = listen.into();
         Ok(Self {
-            advertise_host: advertise_host_from_listen(&listen),
-            listen,
+            listen: listen.into(),
             arbiter_bin: exe_dir.join("cluster-arbiter"),
         })
-    }
-}
-
-/// Concrete IPv4 from `--listen`. Unspecified / unparseable → loopback.
-#[must_use]
-fn advertise_host_from_listen(listen: &str) -> Ipv4Addr {
-    let ip = match listen.parse::<SocketAddr>() {
-        Ok(SocketAddr::V4(addr)) => *addr.ip(),
-        _ => match listen.rsplit_once(':') {
-            Some((host, _)) => host.parse().unwrap_or(Ipv4Addr::LOCALHOST),
-            None => Ipv4Addr::LOCALHOST,
-        },
-    };
-    if ip.is_unspecified() {
-        Ipv4Addr::LOCALHOST
-    } else {
-        ip
     }
 }
 
@@ -327,11 +305,7 @@ pub fn run_server(opts: &ServerOptions) -> Result<(), ServerError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(crate::http::serve(
-        &opts.listen,
-        backend,
-        opts.advertise_host,
-    ))?;
+    rt.block_on(crate::http::serve(&opts.listen, backend))?;
     Ok(())
 }
 
@@ -1359,22 +1333,6 @@ mod tests {
         assert_eq!(
             watch.pending.back().map(|batch| batch.seq),
             Some(WATCH_PENDING_KEEP as u64 + 2)
-        );
-    }
-
-    #[test]
-    fn advertise_host_follows_listen_ipv4() {
-        assert_eq!(
-            advertise_host_from_listen("192.168.1.10:8090"),
-            Ipv4Addr::new(192, 168, 1, 10)
-        );
-        assert_eq!(
-            advertise_host_from_listen("0.0.0.0:8090"),
-            Ipv4Addr::LOCALHOST
-        );
-        assert_eq!(
-            advertise_host_from_listen("localhost:8090"),
-            Ipv4Addr::LOCALHOST
         );
     }
 }
