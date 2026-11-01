@@ -1363,6 +1363,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "futures-util",
+ "gdbstub",
  "iceoryx2",
  "iceoryx2-bb-system-types",
  "log",
@@ -1382,7 +1383,6 @@ dependencies = [
 name = "sim-kernel"
 version = "0.1.0"
 dependencies = [
- "gdbstub",
  "iceoryx2-bb-derive-macros",
  "iceoryx2-bb-elementary-traits",
  "object",

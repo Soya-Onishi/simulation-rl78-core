@@ -106,6 +106,8 @@ pub enum ControlToNode {
         count: u8,
         probe_ids: [u64; crate::probe::MAX_PROBES_PER_BOARD],
     },
+    /// One instruction on `board_hash`; other nodes ignore this sample.
+    GdbStep { board_hash: u64 },
     // TODO: add Shutdown to end the node process (ClusterStop only halts to Stopped).
 }
 

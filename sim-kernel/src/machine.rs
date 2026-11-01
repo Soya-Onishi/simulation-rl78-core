@@ -34,6 +34,10 @@ pub struct Machine<C: Cpu> {
     clock: VirtualClock,
     ctl: EventCtl,
     breakpoints: BreakpointStore,
+    /// Virtual time of the last retired instruction. Instruction budget is
+    /// `allowed - last_insn_at`; the clock still advances toward `allowed`
+    /// for cluster sync even when no instruction fits.
+    last_insn_at: Tick,
 }
 
 impl<C: Cpu> Machine<C> {
@@ -75,6 +79,7 @@ impl<C: Cpu> Machine<C> {
             clock: VirtualClock::new(),
             ctl,
             breakpoints: BreakpointStore::new(),
+            last_insn_at: Tick::ZERO,
         })
     }
 
@@ -130,6 +135,7 @@ impl<C: Cpu> Machine<C> {
             device.reset(&mut self.bus);
         }
         self.cpu.reset(&mut self.bus);
+        self.last_insn_at = self.clock.now();
     }
 
     #[must_use]
@@ -261,18 +267,31 @@ impl<C: Cpu> Machine<C> {
                 self.sync_breakpoints();
                 Response::Inspect(InspectResult::Breakpoint { id })
             }
-            Command::RemoveBreakpoint { id } => {
-                if self.breakpoints_mut().remove(id) {
+            Command::RemoveBreakpoint { addr } => {
+                if self.breakpoints_mut().remove_at(addr) {
                     self.sync_breakpoints();
                     Response::Inspect(InspectResult::Ok)
                 } else {
-                    Response::Error(SimError::UnknownBreakpoint(id))
+                    Response::Error(SimError::UnknownBreakpoint(addr))
                 }
             }
             Command::ClearBreakpoints => {
                 self.breakpoints_mut().clear();
                 self.sync_breakpoints();
                 Response::Inspect(InspectResult::Ok)
+            }
+            Command::ReadGdbRegs => match self.cpu.core().read_gdb_registers() {
+                Ok(data) => Response::Inspect(InspectResult::GdbRegs {
+                    data,
+                    pc: self.cpu.core().pc(),
+                }),
+                Err(err) => Response::Error(err),
+            },
+            Command::WriteGdbRegs { data } => {
+                match self.cpu.core_mut().write_gdb_registers(&data) {
+                    Ok(()) => Response::Inspect(InspectResult::Ok),
+                    Err(err) => Response::Error(err),
+                }
             }
             Command::Start
             | Command::Step
@@ -293,10 +312,6 @@ impl<C: Cpu> Entity for Machine<C> {
         }
 
         let now = self.clock().now();
-        if ctx.budget.is_zero() {
-            return EntityPoll::NoProgress;
-        }
-
         let budget_ns = self
             .events_mut()
             .next_deadline()
@@ -325,13 +340,17 @@ impl<C: Cpu> Entity for Machine<C> {
                 max_quantum: ctx.max_quantum,
             }));
         }
+
         let max_instructions = if ctx.step_once {
             1
         } else {
-            budget_ns
+            now
+                .saturating_add(budget_ns)
+                .saturating_sub(self.last_insn_at)
                 .saturating_div(ns_per_insn)
                 .min(u64::from(u32::MAX)) as u32
         };
+
         if max_instructions == 0 {
             if budget_ns.is_zero() {
                 return EntityPoll::NoProgress;
@@ -343,6 +362,7 @@ impl<C: Cpu> Entity for Machine<C> {
             return EntityPoll::Progressed;
         }
 
+        let last_before = self.last_insn_at;
         let result = {
             let (cpu, _, _) = self.parts_mut();
             cpu.run_quantum(max_instructions)
@@ -351,8 +371,11 @@ impl<C: Cpu> Entity for Machine<C> {
             return EntityPoll::NoProgress;
         }
         let elapsed = ns_per_insn.saturating_mul(result.instructions);
-        self.advance_clock(elapsed);
-
+        self.last_insn_at = last_before.saturating_add(elapsed);
+        let clock_delta = self.last_insn_at
+            .max(now.saturating_add(budget_ns))
+            .saturating_sub(now);
+        self.advance_clock(clock_delta);
         if let Some(access) = self.bus_mut().take_trap() {
             return EntityPoll::Done(Response::Stopped(StopReason::Unmapped {
                 addr: access.addr,

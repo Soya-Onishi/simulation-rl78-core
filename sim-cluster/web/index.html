@@ -41,6 +41,14 @@
   .time strong { font-size: 20px; font-variant-numeric: tabular-nums; }
   .time span, .meta { color: #5c6570; font-size: 12px; }
   #command-error, #status-error { width: 100%; color: #9b2c2c; font-size: 13px; }
+  #gdb-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+  #gdb-ssh { font-size: 12px; user-select: all; }
   #busy {
     max-width: 720px;
     margin: 24px auto;
@@ -222,6 +230,14 @@
     <button id="start" class="primary" type="button">スタート</button>
     <button id="stop" class="danger" type="button">ストップ</button>
     <button id="reset" type="button">リセット</button>
+  </div>
+  <div id="gdb-panel">
+    <div class="meta">GDB</div>
+    <select id="gdb-board"></select>
+    <button id="gdb-attach" type="button">接続</button>
+    <button id="gdb-detach" type="button">切断</button>
+    <div class="meta" id="gdb-status">未接続</div>
+    <code id="gdb-ssh"></code>
   </div>
   <div class="time">
     <div class="meta">仮想時間</div>
@@ -407,6 +423,61 @@ function setActionRunEnabled() {
   document.querySelectorAll(".action-run").forEach((btn) => {
     btn.disabled = !enabled;
   });
+}
+
+let gdbInfo = null;
+
+function fillGdbBoards(nodes) {
+  const select = document.getElementById("gdb-board");
+  const prev = select.value;
+  const boards = (nodes || []).filter((node) => node.kind === "rl78");
+  select.replaceChildren();
+  for (const board of boards) {
+    const opt = document.createElement("option");
+    opt.value = board.id;
+    opt.textContent = board.id;
+    select.appendChild(opt);
+  }
+  if (prev && boards.some((board) => board.id === prev)) {
+    select.value = prev;
+  }
+  document.getElementById("gdb-attach").disabled = boards.length === 0;
+}
+
+async function loadGdb() {
+  if (!simId) {
+    renderGdb(null, "");
+    return;
+  }
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/gdb");
+  if (!res.ok) {
+    renderGdb(null, "");
+    return;
+  }
+  const info = await res.json();
+  if (!info) {
+    renderGdb(null, "");
+    return;
+  }
+  const sshRes = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/gdb/ssh");
+  const ssh = sshRes.ok ? ((await sshRes.json()).command || "") : "";
+  renderGdb(info, ssh);
+}
+
+function renderGdb(info, sshCommand) {
+  gdbInfo = info;
+  const ssh = document.getElementById("gdb-ssh");
+  const status = document.getElementById("gdb-status");
+  document.getElementById("gdb-detach").disabled = !info;
+  document.getElementById("gdb-board").disabled = false;
+  document.getElementById("gdb-attach").disabled = !document.getElementById("gdb-board").value;
+  if (!info) {
+    status.textContent = "未接続";
+    ssh.textContent = "";
+    return;
+  }
+  status.textContent = "ポート " + info.port;
+  ssh.textContent = sshCommand || "";
 }
 
 function setButtons(state) {
@@ -660,6 +731,7 @@ function applyStatus(snap) {
   document.getElementById("vraw").textContent = (snap.virtual_time_ns ?? 0) + " ns";
   setStatusError(snap.state === "exited" ? "arbiter has exited" : "");
   renderNodes(snap.nodes || []);
+  fillGdbBoards(snap.nodes || []);
   setButtons(snap.state);
   if (snap.state === "running" && prev !== "running") loadActions();
 }
@@ -762,6 +834,7 @@ async function connectProbes() {
 function connectStreams() {
   attachStatusAndLogs();
   connectProbes();
+  loadGdb();
 }
 
 function reconnectLiveStreams() {
@@ -846,6 +919,36 @@ function showSim(id) {
 document.getElementById("start").onclick = () => command("start");
 document.getElementById("stop").onclick = () => command("stop");
 document.getElementById("reset").onclick = () => command("reset");
+document.getElementById("gdb-attach").onclick = async () => {
+  if (!simId) return;
+  const board_id = document.getElementById("gdb-board").value;
+  if (!board_id) return;
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/gdb", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ board_id }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setCommandError(apiError(body, res.statusText));
+    return;
+  }
+  await loadGdb();
+  setCommandError("");
+};
+document.getElementById("gdb-detach").onclick = async () => {
+  if (!simId) return;
+  const res = await fetch("/api/simulation/" + encodeURIComponent(simId) + "/gdb", {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    setCommandError(apiError(body, res.statusText));
+    return;
+  }
+  renderGdb(null, "");
+  setCommandError("");
+};
 document.getElementById("probes-csv").onclick = async () => {
   if (!simId) return;
   const headers = viewerHeaders();

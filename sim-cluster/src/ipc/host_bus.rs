@@ -27,6 +27,7 @@ pub enum HostCommandWire {
     Stop,
     Reset,
     Shutdown,
+    Step { board_hash: u64 },
 }
 
 impl HostCommandWire {
@@ -39,6 +40,7 @@ impl HostCommandWire {
             HostCommand::Stop => Self::Stop,
             HostCommand::Reset => Self::Reset,
             HostCommand::Shutdown => Self::Shutdown,
+            HostCommand::Step { board_hash } => Self::Step { board_hash },
         }
     }
 
@@ -53,6 +55,7 @@ impl HostCommandWire {
             Self::Stop => HostCommand::Stop,
             Self::Reset => HostCommand::Reset,
             Self::Shutdown => HostCommand::Shutdown,
+            Self::Step { board_hash } => HostCommand::Step { board_hash },
         }
     }
 }
@@ -368,6 +371,7 @@ mod tests {
             HostCommand::Stop,
             HostCommand::Reset,
             HostCommand::Shutdown,
+            HostCommand::Step { board_hash: 9 },
         ] {
             assert_eq!(HostCommandWire::from_cmd(cmd).to_cmd(), cmd);
         }

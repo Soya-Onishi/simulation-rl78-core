@@ -20,10 +20,12 @@ use crate::contract::{
     StatusEvent, prepare_create_topology,
 };
 use crate::host::{HostCommand, SessionNode};
+use crate::inspect::{InspectReply, InspectRequest, inspect_rpc, inspect_sock_path};
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
     ServerActions, ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox,
-    board_hash_table, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
+    board_hash_table, board_id_hash, create_node, isolated_config, new_cluster_key,
+    root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
@@ -180,6 +182,15 @@ pub enum JobKind {
         id: String,
         token: String,
     },
+    Inspect {
+        id: String,
+        board_id: String,
+        req: InspectRequest,
+    },
+    Step {
+        id: String,
+        board_id: String,
+    },
 }
 
 /// Worker → backend replies.
@@ -205,6 +216,7 @@ pub enum JobReply {
     ProbeCsvPoll(crate::probe_log::CsvPoll),
     ProbeSamples(ProbeSamplesResponse),
     ViewerToken(String),
+    Inspect(InspectReply),
     Err(ApiError),
 }
 
@@ -238,6 +250,7 @@ struct Simulation {
     next_request_id: u64,
     viewer: Option<String>,
     csv_job: Option<CsvJob>,
+    iox_root: PathBuf,
     _iox: IoxNode,
 }
 
@@ -470,6 +483,40 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             }
             None => JobReply::Accepted,
         },
+        JobKind::Inspect { id, board_id, req } => match world.sims.get(&id) {
+            Some(sim) => {
+                if !sim.nodes.iter().any(|node| node.id == board_id) {
+                    JobReply::Err(ApiError::not_found("unknown board"))
+                } else {
+                    let path = inspect_sock_path(&sim.iox_root, &board_id);
+                    match inspect_rpc(&path, &req) {
+                        Ok(reply) => JobReply::Inspect(reply),
+                        Err(err) => JobReply::Err(ApiError::internal(err)),
+                    }
+                }
+            }
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::Step { id, board_id } => match world.sims.get_mut(&id) {
+            Some(sim) => {
+                if sim.state == "exited" {
+                    JobReply::Err(ApiError::conflict("arbiter has exited"))
+                } else if !sim.nodes.iter().any(|node| node.id == board_id) {
+                    JobReply::Err(ApiError::not_found("unknown board"))
+                } else {
+                    match send_cmd(
+                        sim,
+                        HostCommand::Step {
+                            board_hash: board_id_hash(&board_id),
+                        },
+                    ) {
+                        Ok(()) => JobReply::Accepted,
+                        Err(err) => JobReply::Err(ApiError::internal(err)),
+                    }
+                }
+            }
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
     };
     let _ = job.reply.send(reply);
 }
@@ -539,6 +586,7 @@ fn create_simulation(
         next_request_id: 1,
         viewer: None,
         csv_job: None,
+        iox_root,
         _iox: iox,
     })
 }

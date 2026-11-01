@@ -36,10 +36,16 @@ pub enum Command {
         addr: Addr,
     },
     RemoveBreakpoint {
-        id: BreakpointId,
+        addr: Addr,
     },
     /// Drop every software breakpoint (e.g. new GDB session).
     ClearBreakpoints,
+    /// Architecture GDB `g` packet (opaque bytes assembled by the CPU crate).
+    ReadGdbRegs,
+    /// Architecture GDB `G` packet.
+    WriteGdbRegs {
+        data: Vec<u8>,
+    },
     /// Multi-board virtual-time ceiling: do not advance past `tick`.
     SetAllowed {
         tick: Tick,
@@ -64,6 +70,7 @@ pub enum InspectResult {
     Reg { id: RegId, value: u64 },
     Mem { addr: Addr, data: Vec<u8> },
     Breakpoint { id: BreakpointId },
+    GdbRegs { data: Vec<u8>, pc: Addr },
 }
 
 /// Recoverable control-plane error.
@@ -72,7 +79,7 @@ pub enum SimError {
     /// Inspect / mutate was requested while the guest is running.
     Running,
     UnknownRegister(RegId),
-    UnknownBreakpoint(BreakpointId),
+    UnknownBreakpoint(Addr),
     Bus(BusError),
     /// One instruction costs more virtual time than [`crate::SimConfig::max_quantum`].
     InstructionPeriodExceedsQuantum {
@@ -118,6 +125,7 @@ impl fmt::Display for InspectResult {
                 Ok(())
             }
             Self::Breakpoint { id } => write!(f, "breakpoint {}", id.0),
+            Self::GdbRegs { data, pc } => write!(f, "gdb-regs {} bytes pc={pc:#x}", data.len()),
         }
     }
 }
@@ -127,7 +135,7 @@ impl fmt::Display for SimError {
         match self {
             Self::Running => write!(f, "simulation is running"),
             Self::UnknownRegister(id) => write!(f, "unknown register {}", id.0),
-            Self::UnknownBreakpoint(id) => write!(f, "unknown breakpoint {}", id.0),
+            Self::UnknownBreakpoint(addr) => write!(f, "unknown breakpoint {addr:#x}"),
             Self::Bus(err) => write!(f, "{err}"),
             Self::InstructionPeriodExceedsQuantum {
                 period,

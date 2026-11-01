@@ -47,6 +47,13 @@ impl BreakpointStore {
         self.items.len() != before
     }
 
+    /// Drop every breakpoint at `addr`.
+    pub fn remove_at(&mut self, addr: Addr) -> bool {
+        let before = self.items.len();
+        self.items.retain(|bp| bp.addr != addr);
+        self.items.len() != before
+    }
+
     pub fn clear(&mut self) {
         self.items.clear();
     }
@@ -82,6 +89,18 @@ mod tests {
         assert_eq!(store.hit_at(0x101), None);
         assert!(store.remove(id));
         assert_eq!(store.hit_at(0x100), None);
+    }
+
+    #[test]
+    fn remove_at_drops_all_at_address() {
+        let mut store = BreakpointStore::new();
+        let _ = store.insert(0x100);
+        let _ = store.insert(0x100);
+        let kept = store.insert(0x200);
+        assert!(store.remove_at(0x100));
+        assert_eq!(store.hit_at(0x100), None);
+        assert_eq!(store.hit_at(0x200), Some(kept));
+        assert!(!store.remove_at(0x100));
     }
 
     #[test]

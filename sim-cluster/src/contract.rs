@@ -50,6 +50,28 @@ pub struct StatusEvent {
     pub nodes: Vec<SessionNode>,
 }
 
+/// Body for `GET /api/simulation/{id}/gdb/ssh`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GdbSshCommand {
+    pub command: String,
+}
+
+/// Body for `POST /api/simulation/{id}/gdb`.
+#[derive(Debug, Deserialize)]
+pub struct AttachGdbRequest {
+    pub board_id: String,
+}
+
+/// Live gdbserver slot advertised by the web layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GdbSessionInfo {
+    pub board_id: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub connected: bool,
+}
+
 /// Body for `POST /api/simulation/{id}/start`. Empty / omitted `until_ns` is unlimited.
 #[derive(Debug, Default, Deserialize)]
 pub struct StartSimulationRequest {

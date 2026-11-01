@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::contract::{ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent};
 use crate::host::HostCommand;
+use crate::inspect::{InspectReply, InspectRequest};
 use crate::server::{Job, JobKind, JobReply};
 use crate::topology::LogicalTopology;
 
@@ -60,6 +61,13 @@ pub trait SimulationBackend: Send + Sync {
     fn viewer_attach(&self, id: &str) -> Result<String, ApiError>;
     fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError>;
     fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError>;
+    fn inspect(
+        &self,
+        id: &str,
+        board_id: &str,
+        req: InspectRequest,
+    ) -> Result<InspectReply, ApiError>;
+    fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError>;
 }
 
 /// In-process backend over the cluster-server worker queue.
@@ -368,6 +376,38 @@ impl SimulationBackend for LocalBackend {
             JobReply::Accepted | JobReply::Err(_) => Ok(()),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for viewer detach: {other:?}"
+            ))),
+        }
+    }
+
+    fn inspect(
+        &self,
+        id: &str,
+        board_id: &str,
+        req: InspectRequest,
+    ) -> Result<InspectReply, ApiError> {
+        match self.rpc(JobKind::Inspect {
+            id: id.to_string(),
+            board_id: board_id.to_string(),
+            req,
+        })? {
+            JobReply::Inspect(reply) => Ok(reply),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for inspect: {other:?}"
+            ))),
+        }
+    }
+
+    fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError> {
+        match self.rpc(JobKind::Step {
+            id: id.to_string(),
+            board_id: board_id.to_string(),
+        })? {
+            JobReply::Accepted => Ok(()),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for step: {other:?}"
             ))),
         }
     }

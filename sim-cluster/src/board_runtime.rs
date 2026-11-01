@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sim_kernel::{
     ActionFailure, BoardPorts, Command, Entity, FirmwareError, ProbePoint, Response, SimConfig,
@@ -21,6 +21,7 @@ use crate::action::{
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::elf_source;
+use crate::inspect::InspectServer;
 use crate::ipc::{
     IpcError, NodeActions, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node,
     isolated_config,
@@ -205,6 +206,12 @@ pub fn run_node<E: Entity>(
     sim.entity_mut().reset();
     ports.clear_pending();
 
+    let mut inspect = if board.kind == "rl78" {
+        Some(InspectServer::bind(&opts.iox_root, board_id)?)
+    } else {
+        None
+    };
+
     let mut data_planes = bind_data_planes(plane_maps, &ports)?;
 
     let mut state = NodeState::AwaitingStartup;
@@ -285,6 +292,16 @@ pub fn run_node<E: Entity>(
                     } => {
                         probes.set_watch(board_hash, &probe_ids);
                     }
+                    NodeEffect::GdbStep { board_hash: target } => {
+                        if target == board_hash {
+                            perform_local_step(
+                                &mut sim,
+                                &control,
+                                board_hash,
+                                &mut last_time_report,
+                            )?;
+                        }
+                    }
                     NodeEffect::Warn(msg) => {
                         log::warn!("{msg}");
                     }
@@ -305,6 +322,9 @@ pub fn run_node<E: Entity>(
             }
         }
 
+        if let Some(inspect) = inspect.as_mut() {
+            inspect.service(&mut sim)?;
+        }
         if has_actions {
             service_actions(&actions, &mut sim, state, board_hash, &mut pending_actions)?;
         }
@@ -433,6 +453,51 @@ fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a Board
         .iter()
         .find(|b| b.id == board_id)
         .ok_or_else(|| BoardError::Message(format!("board id `{board_id}` not in topology")))
+}
+
+fn perform_local_step<E: Entity>(
+    sim: &mut Simulator<E>,
+    control: &NodeControl,
+    board_hash: u64,
+    last_time_report: &mut Option<u64>,
+) -> Result<(), BoardError> {
+    match sim.command(Command::Step) {
+        Response::Started => {}
+        other => {
+            log::warn!("gdb step command: {other:?}");
+            return Ok(());
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match sim.poll() {
+            Some(Response::Stopped(reason)) => {
+                let virtual_time_ns = sim.entity().now().0;
+                control.publish(&ControlToArbiter::TimeReport {
+                    from: board_hash,
+                    virtual_time_ns,
+                })?;
+                *last_time_report = Some(virtual_time_ns);
+                if let Some(host_reason) = cluster_host_stop_reason(&reason) {
+                    control.publish(&ControlToArbiter::HostStop {
+                        from: board_hash,
+                        reason: host_reason,
+                    })?;
+                    log::info!("gdb HostStop ({host_reason}) at vt={virtual_time_ns}");
+                }
+                return Ok(());
+            }
+            Some(other) => {
+                log::warn!("unexpected sim response during gdb step {other:?}");
+                return Ok(());
+            }
+            None if Instant::now() >= deadline => {
+                log::warn!("gdb step timed out");
+                return Ok(());
+            }
+            None => thread::yield_now(),
+        }
+    }
 }
 
 fn maybe_time_report(

@@ -283,6 +283,12 @@ enum SyncStep {
     Stopped(HostStopReason),
 }
 
+/// GDB single-step: wait for the debug node's insn, then catch peers up.
+enum GdbStepPhase {
+    WaitInsn { board_id: String },
+    CatchUp { reason: HostStopReason },
+}
+
 /// Forward catalog advertisements that arrived before this iteration's control read.
 ///
 /// Nodes `send_copy` every advertisement before `Ready`, so the samples are already
@@ -392,6 +398,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     let mut running = false;
     let mut until_cap: Option<u64> = None;
     let mut last_stop_reason: Option<HostStopReason> = None;
+    let mut gdb_step: Option<GdbStepPhase> = None;
     let mut last_status = Instant::now();
     write_status(
         &host,
@@ -414,6 +421,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     break;
                 }
                 Some(HostCommand::Start { until_ns }) => {
+                    gdb_step = None;
                     apply_start(
                         &control,
                         &mut peers,
@@ -427,6 +435,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                 }
                 Some(HostCommand::Stop) if running => {
                     log::info!("host Stop");
+                    gdb_step = None;
                     broadcast_cluster_stop(
                         &control,
                         &mut peers,
@@ -439,6 +448,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                 }
                 Some(HostCommand::Reset) => {
                     log::info!("host Reset");
+                    gdb_step = None;
                     until_cap = None;
                     broadcast_cluster_stop(
                         &control,
@@ -455,6 +465,17 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     log::info!("host Reset: Start");
                 }
                 Some(HostCommand::Stop) => {}
+                Some(HostCommand::Step { board_hash }) => {
+                    apply_gdb_step(
+                        &control,
+                        &mut peers,
+                        board_hash,
+                        &mut running,
+                        &mut until_cap,
+                        &mut last_stop_reason,
+                        &mut gdb_step,
+                    )?;
+                }
                 None => break,
             }
         }
@@ -471,11 +492,21 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             log::warn!("probe forward: {err}");
         }
 
-        match step_time_sync(&control, &mut peers, &mut ceiling, &mut allowed, until_cap)? {
+        match step_time_sync(
+            &control,
+            &mut peers,
+            &mut ceiling,
+            &mut allowed,
+            &mut until_cap,
+            &mut running,
+            &mut gdb_step,
+            &mut last_stop_reason,
+        )? {
             SyncStep::Continue => {}
             SyncStep::Stopped(reason) => {
                 running = false;
                 until_cap = None;
+                gdb_step = None;
                 last_stop_reason = Some(reason);
             }
         }
@@ -614,6 +645,34 @@ fn apply_start(
     Ok(())
 }
 
+/// ClusterStop if needed, then one insn on `board_hash`. Catch-up starts
+/// when that node reports [`HostStopReason`].
+#[allow(clippy::too_many_arguments)]
+fn apply_gdb_step(
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
+    board_hash: u64,
+    running: &mut bool,
+    until_cap: &mut Option<u64>,
+    last_stop_reason: &mut Option<HostStopReason>,
+    gdb_step: &mut Option<GdbStepPhase>,
+) -> Result<(), ArbiterError> {
+    let Some(board_id) = control.resolve_board(board_hash).map(str::to_owned) else {
+        log::warn!("gdb Step: unknown board_hash={board_hash:#x}");
+        return Ok(());
+    };
+    if *running {
+        log::info!("gdb Step: ClusterStop before insn on '{board_id}'");
+        broadcast_cluster_stop(control, peers, "server", HostStopReason::ExternalStop)?;
+        *running = false;
+        *until_cap = None;
+        *last_stop_reason = Some(HostStopReason::ExternalStop);
+    }
+    control.publish(&ControlToNode::GdbStep { board_hash })?;
+    *gdb_step = Some(GdbStepPhase::WaitInsn { board_id });
+    Ok(())
+}
+
 /// Guest clocks may already equal the last Allowed. Treat that as `now` so the
 /// republished ceiling is `now + margin` and boards can leave the old ceiling.
 fn allowed_after_reset(ceiling: &mut TimeCeiling, last_allowed: u64) -> u64 {
@@ -635,15 +694,20 @@ fn broadcast_start(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step_time_sync(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
     ceiling: &mut TimeCeiling,
     allowed: &mut u64,
-    until_ns: Option<u64>,
+    until_ns: &mut Option<u64>,
+    running: &mut bool,
+    gdb_step: &mut Option<GdbStepPhase>,
+    last_stop_reason: &mut Option<HostStopReason>,
 ) -> Result<SyncStep, ArbiterError> {
     let mut changed = false;
     let mut cluster_stop: Option<(String, HostStopReason)> = None;
+    let mut gdb_insn: Option<(String, HostStopReason)> = None;
     while let Some(msg) = control.try_recv()? {
         let from = msg.from_board();
         let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
@@ -661,32 +725,52 @@ fn step_time_sync(
                 ceiling.report(&board_id, virtual_time_ns);
                 changed = true;
             }
-            Some(PeerEffect::HostStop { from: _, reason }) => {
-                cluster_stop = Some((board_id.clone(), reason));
-            }
+            Some(PeerEffect::HostStop { from: _, reason }) => match gdb_step.as_ref() {
+                Some(GdbStepPhase::WaitInsn { board_id: stepped }) if stepped == &board_id => {
+                    gdb_insn = Some((board_id.clone(), reason));
+                }
+                _ => cluster_stop = Some((board_id.clone(), reason)),
+            },
             other => warn_peer(&board_id, other)?,
         }
         *state = next;
     }
     if let Some((source, reason)) = cluster_stop {
         log::info!("HostStop from '{source}' ({reason}); broadcasting ClusterStop");
+        *gdb_step = None;
         broadcast_cluster_stop(control, peers, &source, reason)?;
         return Ok(SyncStep::Stopped(reason));
     }
+    if let Some((source, reason)) = gdb_insn {
+        let target = ceiling.last_report(&source).unwrap_or(0);
+        log::info!("gdb Step from '{source}' ({reason}) vt={target}; catch-up");
+        *until_ns = Some(target);
+        *allowed = ceiling.allowed_ns_until(*until_ns);
+        broadcast_start(control, peers, *allowed)?;
+        *running = true;
+        *last_stop_reason = None;
+        *gdb_step = Some(GdbStepPhase::CatchUp { reason });
+        return Ok(SyncStep::Continue);
+    }
     if changed {
-        let next_allowed = ceiling.allowed_ns_until(until_ns);
+        let next_allowed = ceiling.allowed_ns_until(*until_ns);
         if next_allowed != *allowed {
             *allowed = next_allowed;
             publish_allowed(control, *allowed)?;
         }
     }
-    if reached_until(until_ns, ceiling.virtual_time_ns()) {
+    if reached_until(*until_ns, ceiling.virtual_time_ns()) {
+        let reason = match gdb_step {
+            Some(GdbStepPhase::CatchUp { reason }) => *reason,
+            _ => HostStopReason::Until,
+        };
         log::info!(
-            "until_ns reached at vt={}; broadcasting ClusterStop",
+            "until_ns reached at vt={} ({reason}); broadcasting ClusterStop",
             ceiling.virtual_time_ns()
         );
-        broadcast_cluster_stop(control, peers, "server", HostStopReason::Until)?;
-        return Ok(SyncStep::Stopped(HostStopReason::Until));
+        *gdb_step = None;
+        broadcast_cluster_stop(control, peers, "server", reason)?;
+        return Ok(SyncStep::Stopped(reason));
     }
 
     Ok(SyncStep::Continue)
