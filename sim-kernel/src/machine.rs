@@ -375,9 +375,7 @@ impl<C: Cpu> Entity for Machine<C> {
         }
         let elapsed = ns_per_insn.saturating_mul(result.instructions);
         self.last_insn_at = last_before.saturating_add(elapsed);
-        if ctx.step_once || now <= last_before {
-            self.advance_clock(elapsed);
-        } else if !budget_ns.is_zero() {
+        if !budget_ns.is_zero() {
             self.advance_clock(budget_ns);
         }
 

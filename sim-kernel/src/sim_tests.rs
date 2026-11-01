@@ -6,7 +6,7 @@ use crate::command::{Command, InspectResult, Response, SimError};
 use crate::cpu::{Core, RegId};
 use crate::event::{EventCtl, EventCtx, SimEvent};
 use crate::machine::Machine;
-use crate::sim::{SimConfig, SimState, Simulator, spawn};
+use crate::sim::{DEFAULT_MAX_QUANTUM, SimConfig, SimState, Simulator, spawn};
 use crate::stop::StopReason;
 use crate::testing::{ScriptOp, ScriptedCpu};
 
@@ -107,9 +107,10 @@ fn scripted_cpu_halts() {
     );
     sim.command(Command::Start);
     // Nop then Halt in one quantum: Halt stays Running and does not emit Stopped.
+    // The clock still consumes the quantum budget.
     assert_eq!(sim.poll(), None);
     assert_eq!(sim.state(), SimState::Running);
-    assert_eq!(sim.machine().clock().now(), Tick(2));
+    assert_eq!(sim.machine().clock().now(), DEFAULT_MAX_QUANTUM);
 }
 
 /// CPU that returns a zero-instruction quantum with no stop (IRQ-style engine exit).
@@ -335,8 +336,7 @@ fn instruction_period_scales_virtual_time() {
     sim.command(Command::Start);
     assert_eq!(sim.poll(), None);
     assert_eq!(sim.state(), SimState::Running);
-    // 3 instructions × 10 ns
-    assert_eq!(sim.machine().clock().now(), Tick(30));
+    assert_eq!(sim.machine().clock().now(), DEFAULT_MAX_QUANTUM);
 }
 
 #[test]
@@ -368,7 +368,7 @@ fn step_into_halt_completes_as_step() {
     assert_eq!(sim.command(Command::Step), Response::Started);
     assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Step)));
     assert_eq!(sim.state(), SimState::Stopped);
-    assert_eq!(sim.machine().clock().now(), Tick(1));
+    assert_eq!(sim.machine().clock().now(), DEFAULT_MAX_QUANTUM);
 }
 
 #[test]
@@ -444,7 +444,7 @@ fn step_once_ignores_allowed_ceiling() {
     assert_eq!(sim.command(Command::Step), Response::Started);
     assert_eq!(sim.poll(), Some(Response::Stopped(StopReason::Step)));
     assert_eq!(sim.state(), SimState::Stopped);
-    assert_eq!(sim.machine().clock().now(), Tick(4));
+    assert_eq!(sim.machine().clock().now(), Tick(3) + DEFAULT_MAX_QUANTUM);
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn step_runs_one_instruction_then_stops() {
     }
     assert_eq!(response, Some(Response::Stopped(StopReason::Step)));
     assert_eq!(sim.state(), SimState::Stopped);
-    assert_eq!(sim.machine().clock().now(), Tick(1));
+    assert_eq!(sim.machine().clock().now(), DEFAULT_MAX_QUANTUM);
 }
 
 #[test]
