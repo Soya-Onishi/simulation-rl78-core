@@ -818,18 +818,11 @@ fn take_gdb_slot(state: &AppState, id: &str) -> Result<Option<GdbSlot>, ApiError
     Ok(gdb_map(state)?.remove(id))
 }
 
-fn take_idle_gdb_slot(state: &AppState, id: &str) -> Result<Option<GdbSlot>, ApiError> {
-    let mut map = gdb_map(state)?;
-    if map
-        .get(id)
-        .is_some_and(|slot| slot.connected.load(Ordering::SeqCst))
-    {
+fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError> {
+    if gdb_connected(state, id) {
         return Err(ApiError::conflict("gdb is connected"));
     }
-    Ok(map.remove(id))
-}
 
-fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError> {
     let status = state.backend.status(id)?;
     match status
         .nodes
@@ -847,21 +840,6 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
         None => return Err(ApiError::not_found("unknown board")),
     }
 
-    if let Some(old) = take_idle_gdb_slot(state, id)? {
-        drop(old);
-    }
-
-    state.backend.stop(id)?;
-    match state
-        .backend
-        .inspect(id, board_id, InspectRequest::ClearBreakpoints)
-    {
-        Ok(InspectReply::Ok) => {}
-        Ok(InspectReply::Error { message }) => return Err(ApiError::internal(message)),
-        Ok(_) => return Err(ApiError::internal("unexpected inspect reply")),
-        Err(err) => return Err(err),
-    }
-
     let slot = crate::gdb::spawn_slot(
         state.backend.clone(),
         id.to_string(),
@@ -874,6 +852,17 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
     if let Some(displaced) = map.insert(id.to_string(), slot) {
         drop(map);
         drop(displaced);
+    }
+
+    state.backend.stop(id)?;
+    match state
+        .backend
+        .inspect(id, board_id, InspectRequest::ClearBreakpoints)
+    {
+        Ok(InspectReply::Ok) => {}
+        Ok(InspectReply::Error { message }) => return Err(ApiError::internal(message)),
+        Ok(_) => return Err(ApiError::internal("unexpected inspect reply")),
+        Err(err) => return Err(err),
     }
     Ok(info)
 }
