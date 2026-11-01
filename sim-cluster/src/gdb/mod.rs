@@ -62,10 +62,6 @@ impl Drop for GdbSlot {
     }
 }
 
-pub fn ssh_command(user: &str, host: Ipv4Addr, port: u16) -> String {
-    format!("ssh -L {port}:127.0.0.1:{port} {user}@{host}")
-}
-
 #[must_use]
 pub fn process_user() -> String {
     std::env::var("USER").unwrap_or_else(|_| "user".into())
@@ -203,16 +199,5 @@ impl BlockingEventLoop for ClusterGdbEventLoop {
         target.stop()?;
         target.wait_stopped()?;
         Ok(Some(SingleThreadStopReason::Signal(Signal::SIGINT)))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ssh_command_uses_loopback_forward_and_server_ip() {
-        let cmd = ssh_command("soya", Ipv4Addr::new(192, 168, 1, 10), 45231);
-        assert_eq!(cmd, "ssh -L 45231:127.0.0.1:45231 soya@192.168.1.10");
     }
 }
