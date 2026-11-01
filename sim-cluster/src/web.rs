@@ -23,6 +23,6 @@ mod tests {
     fn page_attaches_gdb() {
         assert!(PAGE_HTML.contains("id=\"gdb-panel\""));
         assert!(PAGE_HTML.contains("/gdb"));
-        assert!(PAGE_HTML.contains("ssh_command"));
+        assert!(PAGE_HTML.contains("ssh -L "));
     }
 }

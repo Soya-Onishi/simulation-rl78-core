@@ -17,14 +17,16 @@ use iceoryx2::prelude::{Node, ipc};
 use crate::action::{ActionRequest, ActionUpstream};
 use crate::backend::LocalBackend;
 use crate::contract::{
-    ActionList, AdvertisedAction, ApiError, GdbSessionInfo, InvokeActionRequest, LogEvent,
-    ProbeSamplesResponse, StatusEvent, prepare_create_topology,
+    ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
+    StatusEvent, prepare_create_topology,
 };
 use crate::host::{HostCommand, SessionNode};
+use crate::inspect::{InspectReply, InspectRequest, inspect_rpc, inspect_sock_path};
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
     ServerActions, ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox,
-    board_hash_table, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
+    board_hash_table, board_id_hash, create_node, isolated_config, new_cluster_key,
+    root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
@@ -45,7 +47,7 @@ const WATCH_PENDING_KEEP: usize = 64;
 pub struct ServerOptions {
     /// `host:port` to bind. Port `0` picks a free port.
     pub listen: String,
-    /// Host shown in the GDB `ssh` command (the `--listen` IPv4, not probed).
+    /// Host advertised in GDB session info (the `--listen` IPv4, not probed).
     pub advertise_host: Ipv4Addr,
     /// Path to the `cluster-arbiter` executable.
     pub arbiter_bin: PathBuf,
@@ -202,19 +204,14 @@ pub enum JobKind {
         id: String,
         token: String,
     },
-    GdbAttach {
+    Inspect {
         id: String,
         board_id: String,
+        req: InspectRequest,
     },
-    GdbDetach {
+    Step {
         id: String,
-    },
-    GdbGet {
-        id: String,
-    },
-    GdbHost {
-        id: String,
-        cmd: HostCommand,
+        board_id: String,
     },
 }
 
@@ -241,13 +238,12 @@ pub enum JobReply {
     ProbeCsvPoll(crate::probe_log::CsvPoll),
     ProbeSamples(ProbeSamplesResponse),
     ViewerToken(String),
-    Gdb(Option<GdbSessionInfo>),
+    Inspect(InspectReply),
     Err(ApiError),
 }
 
 struct World {
     sims: HashMap<String, Simulation>,
-    jobs: Sender<Job>,
 }
 
 type IoxNode = Node<ipc::Service>;
@@ -278,7 +274,6 @@ struct Simulation {
     csv_job: Option<CsvJob>,
     iox_root: PathBuf,
     _iox: IoxNode,
-    gdb: Option<crate::gdb::GdbSlot>,
 }
 
 struct CsvJob {
@@ -325,22 +320,24 @@ pub fn run_server(opts: &ServerOptions) -> Result<(), ServerError> {
     }
     let (tx, rx) = mpsc::channel();
     let worker_opts = opts.clone();
-    let worker_tx = tx.clone();
-    thread::spawn(move || worker_loop(worker_tx, rx, worker_opts));
+    thread::spawn(move || worker_loop(rx, worker_opts));
 
     let backend = LocalBackend::new(tx);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(crate::http::serve(&opts.listen, backend))?;
+    rt.block_on(crate::http::serve(
+        &opts.listen,
+        backend,
+        opts.advertise_host,
+    ))?;
     Ok(())
 }
 
-fn worker_loop(jobs: Sender<Job>, rx: Receiver<Job>, opts: ServerOptions) {
+fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
     let mut world = World {
         sims: HashMap::new(),
-        jobs,
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
@@ -512,32 +509,38 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             }
             None => JobReply::Accepted,
         },
-        JobKind::GdbAttach { id, board_id } => {
-            let jobs = world.jobs.clone();
-            match world.sims.get_mut(&id) {
-                Some(sim) => match attach_gdb(sim, jobs, board_id, opts.advertise_host) {
-                    Ok(info) => JobReply::Gdb(Some(info)),
-                    Err(err) => JobReply::Err(err),
-                },
-                None => JobReply::Err(ApiError::not_found("unknown simulation")),
-            }
-        }
-        JobKind::GdbDetach { id } => match world.sims.get_mut(&id) {
+        JobKind::Inspect { id, board_id, req } => match world.sims.get(&id) {
             Some(sim) => {
-                sim.gdb = None;
-                JobReply::Accepted
+                if !sim.nodes.iter().any(|node| node.id == board_id) {
+                    JobReply::Err(ApiError::not_found("unknown board"))
+                } else {
+                    let path = inspect_sock_path(&sim.iox_root, &board_id);
+                    match inspect_rpc(&path, &req) {
+                        Ok(reply) => JobReply::Inspect(reply),
+                        Err(err) => JobReply::Err(ApiError::internal(err)),
+                    }
+                }
             }
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::GdbGet { id } => match world.sims.get(&id) {
-            Some(sim) => JobReply::Gdb(sim.gdb.as_ref().map(crate::gdb::GdbSlot::info)),
-            None => JobReply::Err(ApiError::not_found("unknown simulation")),
-        },
-        JobKind::GdbHost { id, cmd } => match world.sims.get_mut(&id) {
-            Some(sim) => match send_cmd(sim, cmd) {
-                Ok(()) => JobReply::Accepted,
-                Err(err) => JobReply::Err(ApiError::internal(err)),
-            },
+        JobKind::Step { id, board_id } => match world.sims.get_mut(&id) {
+            Some(sim) => {
+                if sim.state == "exited" {
+                    JobReply::Err(ApiError::conflict("arbiter has exited"))
+                } else if !sim.nodes.iter().any(|node| node.id == board_id) {
+                    JobReply::Err(ApiError::not_found("unknown board"))
+                } else {
+                    match send_cmd(
+                        sim,
+                        HostCommand::Step {
+                            board_hash: board_id_hash(&board_id),
+                        },
+                    ) {
+                        Ok(()) => JobReply::Accepted,
+                        Err(err) => JobReply::Err(ApiError::internal(err)),
+                    }
+                }
+            }
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
     };
@@ -611,7 +614,6 @@ fn create_simulation(
         csv_job: None,
         iox_root,
         _iox: iox,
-        gdb: None,
     })
 }
 
@@ -619,47 +621,7 @@ fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiE
     if sim.state == "exited" {
         return Err(ApiError::conflict("arbiter has exited"));
     }
-    if sim.gdb.is_some()
-        && matches!(
-            cmd,
-            HostCommand::Start { .. } | HostCommand::Stop | HostCommand::Reset
-        )
-    {
-        return Err(ApiError::conflict("gdb is attached"));
-    }
     send_cmd(sim, cmd).map_err(ApiError::internal)
-}
-
-fn attach_gdb(
-    sim: &mut Simulation,
-    jobs: Sender<Job>,
-    board_id: String,
-    host: Ipv4Addr,
-) -> Result<GdbSessionInfo, ApiError> {
-    if sim.state == "exited" {
-        return Err(ApiError::conflict("arbiter has exited"));
-    }
-    if sim.gdb.is_some() {
-        return Err(ApiError::conflict("gdb is already attached"));
-    }
-    let kind = sim
-        .nodes
-        .iter()
-        .find(|node| node.id == board_id)
-        .map(|node| node.kind.as_str())
-        .ok_or_else(|| ApiError::not_found("unknown board"))?;
-    if kind != "rl78" {
-        return Err(ApiError::bad_request(
-            "bad_param",
-            "gdb target must be an rl78 board",
-        ));
-    }
-    send_cmd(sim, HostCommand::Stop).map_err(ApiError::internal)?;
-    let slot = crate::gdb::spawn_slot(jobs, sim.id.clone(), sim.iox_root.clone(), board_id, host)
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-    let info = slot.info();
-    sim.gdb = Some(slot);
-    Ok(info)
 }
 
 fn send_cmd(sim: &mut Simulation, cmd: HostCommand) -> Result<(), String> {
@@ -673,7 +635,7 @@ fn status_event(sim: &Simulation) -> StatusEvent {
         virtual_time_ns: sim.virtual_time_ns,
         stop_reason: sim.stop_reason.clone(),
         nodes: sim.nodes.clone(),
-        gdb: sim.gdb.as_ref().map(crate::gdb::GdbSlot::info),
+        gdb: None,
     }
 }
 

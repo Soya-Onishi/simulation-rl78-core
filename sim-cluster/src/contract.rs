@@ -58,14 +58,13 @@ pub struct AttachGdbRequest {
     pub board_id: String,
 }
 
-/// Live gdbserver slot advertised by cluster-server.
+/// Live gdbserver slot advertised by the web layer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GdbSessionInfo {
     pub board_id: String,
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub ssh_command: String,
     pub connected: bool,
 }
 

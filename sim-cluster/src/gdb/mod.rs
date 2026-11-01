@@ -1,13 +1,11 @@
-//! GDB RSP stub hosted by cluster-server (`127.0.0.1`).
+//! GDB RSP stub hosted by the web layer (`127.0.0.1`).
 
 mod arch;
 mod target;
 
 use std::io;
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -18,9 +16,8 @@ use gdbstub::stub::run_blocking::{BlockingEventLoop, Event, WaitForStopReasonErr
 use gdbstub::stub::{GdbStub, SingleThreadStopReason};
 use gdbstub::target::Target;
 
+use crate::backend::SimulationBackend;
 use crate::contract::GdbSessionInfo;
-use crate::inspect::{InspectRequest, inspect_rpc, inspect_sock_path};
-use crate::server::Job;
 use target::{ClusterGdbTarget, map_status_reason};
 
 pub struct GdbSlot {
@@ -41,7 +38,6 @@ impl GdbSlot {
             host: self.host.to_string(),
             port: self.port,
             user: self.user.clone(),
-            ssh_command: ssh_command(&self.user, self.host, self.port),
             connected: self.connected.load(Ordering::SeqCst),
         }
     }
@@ -76,9 +72,8 @@ pub fn process_user() -> String {
 }
 
 pub fn spawn_slot(
-    tx: Sender<Job>,
+    backend: Arc<dyn SimulationBackend>,
     sim_id: String,
-    iox_root: PathBuf,
     board_id: String,
     host: Ipv4Addr,
 ) -> io::Result<GdbSlot> {
@@ -96,9 +91,8 @@ pub fn spawn_slot(
         .name("gdb".into())
         .spawn(move || {
             gdb_accept_loop(
-                tx,
+                backend,
                 sim_id,
-                iox_root,
                 board_t,
                 listener,
                 shutdown_t,
@@ -119,18 +113,15 @@ pub fn spawn_slot(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn gdb_accept_loop(
-    tx: Sender<Job>,
+    backend: Arc<dyn SimulationBackend>,
     sim_id: String,
-    iox_root: PathBuf,
     board_id: String,
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     active: Arc<Mutex<Option<TcpStream>>>,
 ) {
-    let inspect = inspect_sock_path(&iox_root, &board_id);
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -145,7 +136,7 @@ fn gdb_accept_loop(
                 }
                 connected.store(true, Ordering::SeqCst);
                 let mut target =
-                    ClusterGdbTarget::new(tx.clone(), sim_id.clone(), inspect.clone(), &board_id);
+                    ClusterGdbTarget::new(backend.clone(), sim_id.clone(), board_id.clone());
                 let _ = target.clear_session_breakpoints();
                 let gdb = GdbStub::new(stream);
                 let _ = gdb.run_blocking::<ClusterGdbEventLoop>(&mut target);
@@ -153,7 +144,7 @@ fn gdb_accept_loop(
                 if let Ok(mut slot) = active.lock() {
                     *slot = None;
                 }
-                let _ = inspect_rpc(&inspect, &InspectRequest::ClearBreakpoints);
+                let _ = target.clear_session_breakpoints();
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
@@ -209,7 +200,7 @@ impl BlockingEventLoop for ClusterGdbEventLoop {
     fn on_interrupt(
         target: &mut ClusterGdbTarget,
     ) -> Result<Option<SingleThreadStopReason<u32>>, String> {
-        target.host(crate::host::HostCommand::Stop)?;
+        target.stop()?;
         target.wait_stopped()?;
         Ok(Some(SingleThreadStopReason::Signal(Signal::SIGINT)))
     }

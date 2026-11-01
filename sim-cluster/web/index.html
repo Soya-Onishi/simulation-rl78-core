@@ -425,7 +425,7 @@ function setActionRunEnabled() {
   });
 }
 
-let gdbAttached = false;
+let gdbInfo = null;
 
 function fillGdbBoards(nodes) {
   const select = document.getElementById("gdb-board");
@@ -441,29 +441,35 @@ function fillGdbBoards(nodes) {
   if (prev && boards.some((board) => board.id === prev)) {
     select.value = prev;
   }
-  document.getElementById("gdb-attach").disabled = gdbAttached || boards.length === 0;
+  const connected = !!(gdbInfo && gdbInfo.connected);
+  document.getElementById("gdb-attach").disabled = connected || boards.length === 0;
+}
+
+function gdbSshCommand(info) {
+  return "ssh -L " + info.port + ":127.0.0.1:" + info.port + " " + info.user + "@" + info.host;
 }
 
 function renderGdb(info) {
-  gdbAttached = !!info;
+  gdbInfo = info;
+  const connected = !!(info && info.connected);
   const ssh = document.getElementById("gdb-ssh");
   const status = document.getElementById("gdb-status");
-  document.getElementById("gdb-detach").disabled = !gdbAttached;
-  document.getElementById("gdb-board").disabled = gdbAttached;
-  document.getElementById("gdb-attach").disabled = gdbAttached || !document.getElementById("gdb-board").value;
+  document.getElementById("gdb-detach").disabled = !info;
+  document.getElementById("gdb-board").disabled = connected;
+  document.getElementById("gdb-attach").disabled = connected || !document.getElementById("gdb-board").value;
   if (!info) {
     status.textContent = "未接続";
     ssh.textContent = "";
     return;
   }
-  status.textContent = (info.connected ? "GDB 接続中" : "待ち受け中") + " · ポート " + info.port;
-  ssh.textContent = info.ssh_command || "";
+  status.textContent = (connected ? "GDB 接続中" : "待ち受け中") + " · ポート " + info.port;
+  ssh.textContent = gdbSshCommand(info);
 }
 
 function setButtons(state) {
   simState = state;
   const dead = state === "exited";
-  const gdb = gdbAttached;
+  const gdb = !!(gdbInfo && gdbInfo.connected);
   document.getElementById("start").disabled = dead || gdb || state === "running";
   document.getElementById("stop").disabled = dead || gdb || state !== "running";
   document.getElementById("reset").disabled = dead || gdb;

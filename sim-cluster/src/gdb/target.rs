@@ -1,7 +1,6 @@
-//! [`gdbstub`] target that inspects a node over UDS and resumes via host commands.
+//! [`gdbstub`] target that talks only through [`SimulationBackend`].
 
-use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gdbstub::common::Signal;
@@ -14,73 +13,38 @@ use gdbstub::target::ext::breakpoints::{
 };
 use gdbstub::target::{Target, TargetError, TargetResult};
 
-use crate::host::HostCommand;
-use crate::inspect::{InspectReply, InspectRequest, MEM_CHUNK, inspect_rpc};
-use crate::ipc::board_id_hash;
-use crate::server::{Job, JobKind, JobReply};
+use crate::backend::SimulationBackend;
+use crate::inspect::{InspectReply, InspectRequest, MEM_CHUNK};
 
 use super::arch::{GdbArch, GdbRegs};
 
 pub struct ClusterGdbTarget {
-    tx: Sender<Job>,
+    backend: Arc<dyn SimulationBackend>,
     sim_id: String,
-    inspect: PathBuf,
-    board_hash: u64,
+    board_id: String,
 }
 
 impl ClusterGdbTarget {
-    pub fn new(tx: Sender<Job>, sim_id: String, inspect: PathBuf, board_id: &str) -> Self {
+    pub fn new(backend: Arc<dyn SimulationBackend>, sim_id: String, board_id: String) -> Self {
         Self {
-            tx,
+            backend,
             sim_id,
-            inspect,
-            board_hash: board_id_hash(board_id),
+            board_id,
         }
     }
 
     fn rpc(&self, req: InspectRequest) -> Result<InspectReply, String> {
-        inspect_rpc(&self.inspect, &req)
+        self.backend
+            .inspect(&self.sim_id, &self.board_id, req)
+            .map_err(|err| err.message)
     }
 
-    pub(super) fn host(&self, cmd: HostCommand) -> Result<(), String> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        self.tx
-            .send(Job {
-                kind: JobKind::GdbHost {
-                    id: self.sim_id.clone(),
-                    cmd,
-                },
-                reply: reply_tx,
-            })
-            .map_err(|_| "worker closed".to_string())?;
-        match reply_rx
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "worker timeout".to_string())?
-        {
-            JobReply::Accepted => Ok(()),
-            JobReply::Err(err) => Err(err.message),
-            other => Err(format!("unexpected {other:?}")),
-        }
+    pub(super) fn stop(&self) -> Result<(), String> {
+        self.backend.stop(&self.sim_id).map_err(|err| err.message)
     }
 
     fn snapshot_status(&self) -> Result<crate::contract::StatusEvent, String> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        self.tx
-            .send(Job {
-                kind: JobKind::GetStatus {
-                    id: self.sim_id.clone(),
-                },
-                reply: reply_tx,
-            })
-            .map_err(|_| "worker closed".to_string())?;
-        match reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| "status timeout".to_string())?
-        {
-            JobReply::Status(status) => Ok(status),
-            JobReply::Err(err) => Err(err.message),
-            other => Err(format!("unexpected {other:?}")),
-        }
+        self.backend.status(&self.sim_id).map_err(|err| err.message)
     }
 
     pub fn status_stop_reason(&self) -> Result<Option<String>, String> {
@@ -214,7 +178,9 @@ impl SingleThreadResume for ClusterGdbTarget {
         if signal.is_some() {
             return Err("continuing with a signal is not supported".into());
         }
-        self.host(HostCommand::Start { until_ns: None })?;
+        self.backend
+            .start(&self.sim_id, None)
+            .map_err(|err| err.message)?;
         self.wait_running()
     }
 
@@ -230,9 +196,9 @@ impl SingleThreadSingleStep for ClusterGdbTarget {
         if signal.is_some() {
             return Err("stepping with a signal is not supported".into());
         }
-        self.host(HostCommand::Step {
-            board_hash: self.board_hash,
-        })?;
+        self.backend
+            .step(&self.sim_id, &self.board_id)
+            .map_err(|err| err.message)?;
         self.wait_running()
     }
 }

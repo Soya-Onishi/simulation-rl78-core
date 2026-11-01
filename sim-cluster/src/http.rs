@@ -1,7 +1,10 @@
 //! Axum HTTP surface for the cluster control plane and embedded UI.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::net::Ipv4Addr;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -21,6 +24,8 @@ use crate::contract::{
     GdbSessionInfo, InvokeActionRequest, ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
     prepare_create_topology,
 };
+use crate::gdb::GdbSlot;
+use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{self, ProbeRange, ProbeRef};
 use crate::web::PAGE_HTML;
 
@@ -30,6 +35,8 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     pub backend: Arc<dyn SimulationBackend>,
+    gdb: Arc<Mutex<HashMap<String, GdbSlot>>>,
+    advertise_host: Ipv4Addr,
 }
 
 impl IntoResponse for ApiError {
@@ -40,8 +47,12 @@ impl IntoResponse for ApiError {
 }
 
 /// Build the application router (API under `/api`, UI at `/{id}`).
-pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
-    let state = AppState { backend };
+pub fn router(backend: Arc<dyn SimulationBackend>, advertise_host: Ipv4Addr) -> Router {
+    let state = AppState {
+        backend,
+        gdb: Arc::new(Mutex::new(HashMap::new())),
+        advertise_host,
+    };
     Router::new()
         .route("/api/simulation", post(create_simulation))
         .route("/api/simulation/{id}/start", post(start_simulation))
@@ -200,6 +211,9 @@ async fn run_command<F>(state: AppState, id: String, f: F) -> Result<StatusCode,
 where
     F: FnOnce(Arc<dyn SimulationBackend>, &str) -> Result<(), ApiError> + Send + 'static,
 {
+    if gdb_connected(&state, &id) {
+        return Err(ApiError::conflict("gdb is connected"));
+    }
     let backend = state.backend.clone();
     tokio::task::spawn_blocking(move || f(backend, &id))
         .await
@@ -215,10 +229,11 @@ async fn simulation_status(
 ) -> Result<Json<StatusEvent>, ApiError> {
     require_viewer(&state, &id, &headers, &query).await?;
     let backend = state.backend.clone();
-    let status = tokio::task::spawn_blocking(move || backend.status(&id))
+    let id_status = id.clone();
+    let status = tokio::task::spawn_blocking(move || backend.status(&id_status))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
-    Ok(Json(status))
+    Ok(Json(overlay_gdb(&state, &id, status)))
 }
 
 async fn gdb_attach(
@@ -231,8 +246,7 @@ async fn gdb_attach(
     if request.board_id.is_empty() {
         return Err(ApiError::bad_request("bad_param", "board_id is required"));
     }
-    let backend = state.backend.clone();
-    let info = tokio::task::spawn_blocking(move || backend.gdb_attach(&id, &request.board_id))
+    let info = tokio::task::spawn_blocking(move || attach_gdb_slot(&state, &id, &request.board_id))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok((StatusCode::CREATED, Json(info)))
@@ -242,8 +256,7 @@ async fn gdb_detach(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let backend = state.backend.clone();
-    tokio::task::spawn_blocking(move || backend.gdb_detach(&id))
+    tokio::task::spawn_blocking(move || detach_gdb_slot(&state, &id))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(StatusCode::OK)
@@ -253,8 +266,7 @@ async fn gdb_get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Option<GdbSessionInfo>>, ApiError> {
-    let backend = state.backend.clone();
-    let info = tokio::task::spawn_blocking(move || backend.gdb_get(&id))
+    let info = tokio::task::spawn_blocking(move || gdb_slot_info(&state, &id))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(Json(info))
@@ -267,8 +279,7 @@ async fn delete_simulation(
     Query(query): Query<ViewerParam>,
 ) -> Result<StatusCode, ApiError> {
     require_viewer(&state, &id, &headers, &query).await?;
-    let backend = state.backend.clone();
-    tokio::task::spawn_blocking(move || backend.delete(&id))
+    tokio::task::spawn_blocking(move || delete_with_gdb(&state, &id))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok(StatusCode::OK)
@@ -320,7 +331,7 @@ async fn status_sse(
     Query(query): Query<ViewerParam>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     require_viewer(&state, &id, &headers, &query).await?;
-    let stream = status_event_stream(state.backend.clone(), id);
+    let stream = status_event_stream(state, id);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -341,24 +352,25 @@ async fn log_sse(
 }
 
 fn status_event_stream(
-    backend: Arc<dyn SimulationBackend>,
+    state: AppState,
     id: String,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     stream::unfold(
-        (backend, id, None::<crate::contract::StatusEvent>),
-        |(backend, id, last)| async move {
+        (state, id, None::<crate::contract::StatusEvent>),
+        |(state, id, last)| async move {
             loop {
-                let backend_poll = backend.clone();
+                let backend_poll = state.backend.clone();
                 let id_poll = id.clone();
                 let result =
                     tokio::task::spawn_blocking(move || backend_poll.status(&id_poll)).await;
                 match result {
                     Ok(Ok(status)) => {
+                        let status = overlay_gdb(&state, &id, status);
                         if last.as_ref() != Some(&status) {
                             let data =
                                 serde_json::to_string(&status).unwrap_or_else(|_| "{}".into());
                             let event = Event::default().event("status").data(data);
-                            return Some((Ok(event), (backend, id, Some(status))));
+                            return Some((Ok(event), (state, id, Some(status))));
                         }
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
@@ -776,12 +788,133 @@ async fn ensure_exists(state: &AppState, id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn gdb_map(
+    state: &AppState,
+) -> Result<std::sync::MutexGuard<'_, HashMap<String, GdbSlot>>, ApiError> {
+    state
+        .gdb
+        .lock()
+        .map_err(|_| ApiError::internal("gdb slot lock"))
+}
+
+fn gdb_connected(state: &AppState, id: &str) -> bool {
+    gdb_map(state)
+        .ok()
+        .and_then(|map| {
+            map.get(id)
+                .map(|slot| slot.connected.load(Ordering::SeqCst))
+        })
+        .unwrap_or(false)
+}
+
+fn overlay_gdb(state: &AppState, id: &str, mut status: StatusEvent) -> StatusEvent {
+    if let Ok(map) = gdb_map(state) {
+        status.gdb = map.get(id).map(GdbSlot::info);
+    }
+    status
+}
+
+fn take_gdb_slot(state: &AppState, id: &str) -> Result<Option<GdbSlot>, ApiError> {
+    Ok(gdb_map(state)?.remove(id))
+}
+
+fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError> {
+    if gdb_connected(state, id) {
+        return Err(ApiError::conflict("gdb is connected"));
+    }
+
+    let status = state.backend.status(id)?;
+    match status
+        .nodes
+        .iter()
+        .find(|node| node.id == board_id)
+        .map(|node| node.kind.as_str())
+    {
+        Some("rl78") => {}
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "bad_param",
+                "gdb target must be an rl78 board",
+            ));
+        }
+        None => return Err(ApiError::not_found("unknown board")),
+    }
+
+    state.backend.stop(id)?;
+    match state
+        .backend
+        .inspect(id, board_id, InspectRequest::ClearBreakpoints)
+    {
+        Ok(InspectReply::Ok) => {}
+        Ok(InspectReply::Error { message }) => return Err(ApiError::internal(message)),
+        Ok(_) => return Err(ApiError::internal("unexpected inspect reply")),
+        Err(err) => return Err(err),
+    }
+
+    if gdb_connected(state, id) {
+        return Err(ApiError::conflict("gdb is connected"));
+    }
+
+    let slot = crate::gdb::spawn_slot(
+        state.backend.clone(),
+        id.to_string(),
+        board_id.to_string(),
+        state.advertise_host,
+    )
+    .map_err(|err| ApiError::internal(err.to_string()))?;
+    let info = slot.info();
+    let mut map = gdb_map(state)?;
+    if map
+        .get(id)
+        .is_some_and(|existing| existing.connected.load(Ordering::SeqCst))
+    {
+        drop(map);
+        let mut slot = slot;
+        slot.shutdown();
+        return Err(ApiError::conflict("gdb is connected"));
+    }
+    if let Some(mut old) = map.insert(id.to_string(), slot) {
+        drop(map);
+        old.shutdown();
+    }
+    Ok(info)
+}
+
+fn detach_gdb_slot(state: &AppState, id: &str) -> Result<(), ApiError> {
+    if !state.backend.exists(id)? {
+        return Err(ApiError::not_found("unknown simulation"));
+    }
+    if let Some(mut slot) = take_gdb_slot(state, id)? {
+        let board_id = slot.board_id.clone();
+        slot.shutdown();
+        let _ = state
+            .backend
+            .inspect(id, &board_id, InspectRequest::ClearBreakpoints);
+    }
+    Ok(())
+}
+
+fn gdb_slot_info(state: &AppState, id: &str) -> Result<Option<GdbSessionInfo>, ApiError> {
+    if !state.backend.exists(id)? {
+        return Err(ApiError::not_found("unknown simulation"));
+    }
+    Ok(gdb_map(state)?.get(id).map(GdbSlot::info))
+}
+
+fn delete_with_gdb(state: &AppState, id: &str) -> Result<(), ApiError> {
+    if let Some(mut slot) = take_gdb_slot(state, id)? {
+        slot.shutdown();
+    }
+    state.backend.delete(id)
+}
+
 /// Serve with axum on `listen` (`host:port`).
 pub async fn serve(
     listen: &str,
     backend: Arc<dyn SimulationBackend>,
+    advertise_host: Ipv4Addr,
 ) -> Result<(), std::io::Error> {
-    let app = router(backend);
+    let app = router(backend, advertise_host);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     eprintln!("cluster-server listening on http://{addr}");
