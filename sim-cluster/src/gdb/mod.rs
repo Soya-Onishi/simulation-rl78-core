@@ -210,6 +210,7 @@ impl BlockingEventLoop for ClusterGdbEventLoop {
         target: &mut ClusterGdbTarget,
     ) -> Result<Option<SingleThreadStopReason<u32>>, String> {
         target.host(crate::host::HostCommand::Stop)?;
+        target.wait_stopped()?;
         Ok(Some(SingleThreadStopReason::Signal(Signal::SIGINT)))
     }
 }

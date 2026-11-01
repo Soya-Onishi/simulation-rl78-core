@@ -108,6 +108,19 @@ impl ClusterGdbTarget {
         Ok(())
     }
 
+    /// Poll until the cluster is not `running`, or fail after 5 seconds.
+    pub(super) fn wait_stopped(&self) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let now = self.snapshot_status()?;
+            if now.state != "running" {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err("stop timeout".into())
+    }
+
     pub fn clear_session_breakpoints(&self) -> Result<(), String> {
         match self.rpc(InspectRequest::ClearBreakpoints)? {
             InspectReply::Ok => Ok(()),
