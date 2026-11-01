@@ -39,6 +39,16 @@ pub struct AppState {
     advertise_host: Ipv4Addr,
 }
 
+impl AppState {
+    fn status(&self, id: &str) -> Result<StatusEvent, ApiError> {
+        let mut status = self.backend.status(id)?;
+        if let Ok(map) = gdb_map(self) {
+            status.gdb = map.get(id).map(GdbSlot::info);
+        }
+        Ok(status)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -228,12 +238,10 @@ async fn simulation_status(
     Query(query): Query<ViewerParam>,
 ) -> Result<Json<StatusEvent>, ApiError> {
     require_viewer(&state, &id, &headers, &query).await?;
-    let backend = state.backend.clone();
-    let id_status = id.clone();
-    let status = tokio::task::spawn_blocking(move || backend.status(&id_status))
+    let status = tokio::task::spawn_blocking(move || state.status(&id))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
-    Ok(Json(overlay_gdb(&state, &id, status)))
+    Ok(Json(status))
 }
 
 async fn gdb_attach(
@@ -359,13 +367,11 @@ fn status_event_stream(
         (state, id, None::<crate::contract::StatusEvent>),
         |(state, id, last)| async move {
             loop {
-                let backend_poll = state.backend.clone();
+                let state_poll = state.clone();
                 let id_poll = id.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || backend_poll.status(&id_poll)).await;
+                let result = tokio::task::spawn_blocking(move || state_poll.status(&id_poll)).await;
                 match result {
                     Ok(Ok(status)) => {
-                        let status = overlay_gdb(&state, &id, status);
                         if last.as_ref() != Some(&status) {
                             let data =
                                 serde_json::to_string(&status).unwrap_or_else(|_| "{}".into());
@@ -805,13 +811,6 @@ fn gdb_connected(state: &AppState, id: &str) -> bool {
                 .map(|slot| slot.connected.load(Ordering::SeqCst))
         })
         .unwrap_or(false)
-}
-
-fn overlay_gdb(state: &AppState, id: &str, mut status: StatusEvent) -> StatusEvent {
-    if let Ok(map) = gdb_map(state) {
-        status.gdb = map.get(id).map(GdbSlot::info);
-    }
-    status
 }
 
 fn take_gdb_slot(state: &AppState, id: &str) -> Result<Option<GdbSlot>, ApiError> {
