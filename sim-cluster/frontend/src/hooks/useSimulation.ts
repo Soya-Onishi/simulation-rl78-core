@@ -91,6 +91,53 @@ export function useSimulation(simId: string) {
     }
     loadActionsRef.current = loadActions
 
+    const openProbeStream = () => {
+      probeSrc?.close()
+      probeSrc = client.eventSource('/probes/stream')
+      probeSrc.addEventListener('probe', (ev) => {
+        try {
+          const batch = JSON.parse((ev as MessageEvent<string>).data) as ProbeBatch
+          // TODO: this is the coarse 100 ms stream; fetch /probes/samples for full-resolution history.
+          store.append(batch.samples ?? [])
+        } catch {
+          // ignore malformed event
+        }
+      })
+    }
+
+    let catalogReady = false
+    let catalogConnecting = false
+    const connectProbes = async () => {
+      if (catalogReady || catalogConnecting) return
+      catalogConnecting = true
+      try {
+        try {
+          await client.clearWatch()
+        } catch (err) {
+          if (client.isBusy(err)) {
+            goBusyRef.current()
+            return
+          }
+        }
+        store.clear()
+        try {
+          const items = await client.probeCatalog()
+          catalogReady = true
+          catalogRef.current = items
+          setCatalog(items)
+          setWatchedState(new Set())
+          openProbeStream()
+        } catch (err) {
+          if (client.isBusy(err)) goBusyRef.current()
+          else if (!(err instanceof Error && err.message.includes('not ready'))) {
+            setCommandError(messageOf(err))
+          }
+        }
+      } finally {
+        catalogConnecting = false
+      }
+    }
+
     const openStatusAndLog = () => {
       statusSrc?.close()
       logSrc?.close()
@@ -102,7 +149,10 @@ export function useSimulation(simId: string) {
           lastVt = snap.virtual_time_ns
           setStatus(snap)
           setStatusError(snap.state === 'exited' ? 'arbiter has exited' : '')
-          if (snap.state === 'running' && lastState !== 'running') void loadActions()
+          if (snap.state === 'running' && lastState !== 'running') {
+            void loadActions()
+            if (!catalogReady) void connectProbes()
+          }
           lastState = snap.state
         } catch {
           // ignore malformed event
@@ -124,42 +174,6 @@ export function useSimulation(simId: string) {
           // ignore malformed event
         }
       })
-    }
-
-    const openProbeStream = () => {
-      probeSrc?.close()
-      probeSrc = client.eventSource('/probes/stream')
-      probeSrc.addEventListener('probe', (ev) => {
-        try {
-          const batch = JSON.parse((ev as MessageEvent<string>).data) as ProbeBatch
-          // TODO: this is the coarse 100 ms stream; fetch /probes/samples for full-resolution history.
-          store.append(batch.samples ?? [])
-        } catch {
-          // ignore malformed event
-        }
-      })
-    }
-
-    const connectProbes = async () => {
-      try {
-        await client.clearWatch()
-      } catch (err) {
-        if (client.isBusy(err)) {
-          goBusyRef.current()
-          return
-        }
-      }
-      store.clear()
-      try {
-        const items = await client.probeCatalog()
-        catalogRef.current = items
-        setCatalog(items)
-        setWatchedState(new Set())
-        openProbeStream()
-      } catch (err) {
-        if (client.isBusy(err)) goBusyRef.current()
-        else setCommandError(messageOf(err))
-      }
     }
 
     goBusyRef.current = () => {
@@ -189,7 +203,9 @@ export function useSimulation(simId: string) {
         void connectProbes()
         void loadActions()
         actionPoll = setInterval(() => {
-          if (actionCount === 0 && lastState !== 'exited') void loadActions()
+          if (lastState === 'exited') return
+          if (actionCount === 0) void loadActions()
+          if (!catalogReady) void connectProbes()
         }, 2000)
         return
       }
