@@ -16,11 +16,10 @@ interface Props {
 export default function AnalogLane({ series, t0, t1, color, version }: Props) {
   const [hostRef, size] = useElementSize<HTMLDivElement>()
   const plotRef = useRef<uPlot | null>(null)
-  // Read by the uPlot scale range callbacks.
   const live = useRef({ t0, t1, series })
   live.current = { t0, t1, series }
+  const lastDataVersion = useRef<number | null>(null)
 
-  // Create once on mount; width follows the element size below.
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
@@ -35,7 +34,6 @@ export default function AnalogLane({ series, t0, t1, color, version }: Props) {
         x: { time: false, range: () => [live.current.t0, live.current.t1] },
         y: {
           range: () => {
-            // Autoscale from all kept data (not just the visible window).
             const s = live.current.series
             if (!s || !Number.isFinite(s.min) || !Number.isFinite(s.max)) return [0, 1]
             if (s.min === s.max) return [s.min - 1, s.max + 1]
@@ -59,6 +57,7 @@ export default function AnalogLane({ series, t0, t1, color, version }: Props) {
     }
     const plot = new uPlot(opts, [[], []], host)
     plotRef.current = plot
+    lastDataVersion.current = null
     return () => {
       plot.destroy()
       plotRef.current = null
@@ -71,13 +70,16 @@ export default function AnalogLane({ series, t0, t1, color, version }: Props) {
     if (size.w > 0) plotRef.current?.setSize({ width: size.w, height: ANALOG_H })
   }, [size.w])
 
-  // Push data / scale on every tick.
   useEffect(() => {
     const plot = plotRef.current
     if (!plot) return
-    const t = series?.t ?? []
-    const v = series?.v ?? []
-    plot.setData([t, v], true)
+    if (lastDataVersion.current !== version) {
+      const t = series?.t ?? []
+      const v = series?.v ?? []
+      plot.setData([t, v], false)
+      lastDataVersion.current = version
+    }
+    plot.setScale('x', { min: t0, max: t1 })
   }, [series, t0, t1, version, size.w])
 
   return <div className="lane-plot" style={{ height: ANALOG_H }} ref={hostRef} />
