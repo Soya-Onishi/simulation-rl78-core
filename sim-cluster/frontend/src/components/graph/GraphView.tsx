@@ -144,6 +144,9 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
   }, [followLive, liveEnd])
 
   const expired = !followLive && viewExpired(viewEndNs, virtualTimeNs)
+  useEffect(() => {
+    if (expired) setHover(null)
+  }, [expired])
   const t1 = followLive ? liveEnd : viewEndNs
   const t0 = t1 - windowNs
   viewRef.current = { t0, t1, liveEnd }
@@ -157,9 +160,11 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
 
   const onScale = (nextIdx: number) => {
     const nextTick = TICK_STEPS[nextIdx].tickNs
+    const nextLive = advanceLiveEnd(0, virtualTimeNs, nextTick)
+    liveEndRef.current = nextLive
     setStepIdx(nextIdx)
     if (followLive) return
-    setViewEndNs(clampViewEnd(viewEndNs, liveEndRef.current, nextTick))
+    setViewEndNs(clampViewEnd(viewEndNs, nextLive, nextTick))
   }
 
   const applySelection = (timeA: number, timeB: number) => {
@@ -169,9 +174,11 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
     if (!(span > 0)) return
     const idx = tickStepIndexForSpan(span)
     const nextTick = TICK_STEPS[idx].tickNs
+    const nextLive = advanceLiveEnd(0, virtualTimeNs, nextTick)
+    liveEndRef.current = nextLive
     setStepIdx(idx)
     setFollowLive(false)
-    setViewEndNs(clampViewEnd(right, liveEndRef.current, nextTick))
+    setViewEndNs(clampViewEnd(right, nextLive, nextTick))
   }
 
   const onScrollMouseDown = (ev: ReactMouseEvent<HTMLDivElement>) => {

@@ -49,13 +49,12 @@ export function tickStepIndexForSpan(spanNs: number): number {
   return best
 }
 
-/** Advance a live right-edge by whole ticks once `virtualTimeNs` fills them.
- * If virtual time rewinds (reset), snap back to the largest tick edge `<= virtualTimeNs`. */
-export function advanceLiveEnd(viewEndNs: number, virtualTimeNs: number, tickNs: number): number {
-  if (tickNs <= 0) return viewEndNs
-  let end = virtualTimeNs < viewEndNs ? 0 : viewEndNs
-  while (virtualTimeNs >= end + tickNs) end += tickNs
-  return end
+/** Live right-edge: largest tick multiple `<= virtualTimeNs` on the current grid.
+ * Recomputed from `virtualTimeNs`/`tickNs` so scale changes and resets stay aligned.
+ * `viewEndNs` is unused (kept for call-site compatibility). */
+export function advanceLiveEnd(_viewEndNs: number, virtualTimeNs: number, tickNs: number): number {
+  if (tickNs <= 0 || virtualTimeNs <= 0) return 0
+  return Math.floor(virtualTimeNs / tickNs) * tickNs
 }
 
 /** Clamp a history right-edge into the retain window ending at `liveEndNs`. */

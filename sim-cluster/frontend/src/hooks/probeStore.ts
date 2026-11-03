@@ -85,13 +85,27 @@ export class ProbeStore {
       // Digital/analog coarse samples collapse same-timestamp updates.
       // UART keeps every word, even when timestamps collide.
       if (last >= 0 && t === ser.t[last] && ser.kind !== 'uart') {
+        const prev = ser.v[last]
         ser.v[last] = value
+        if (value < ser.min) ser.min = value
+        if (value > ser.max) ser.max = value
+        // Shrinking past a former extreme needs a full rescan.
+        if ((prev === ser.min && value > prev) || (prev === ser.max && value < prev)) {
+          let min = Infinity
+          let max = -Infinity
+          for (const x of ser.v) {
+            if (x < min) min = x
+            if (x > max) max = x
+          }
+          ser.min = min
+          ser.max = max
+        }
       } else {
         ser.t.push(t)
         ser.v.push(value)
+        if (value < ser.min) ser.min = value
+        if (value > ser.max) ser.max = value
       }
-      if (value < ser.min) ser.min = value
-      if (value > ser.max) ser.max = value
       this.trim(ser, t)
     }
     this.touch()

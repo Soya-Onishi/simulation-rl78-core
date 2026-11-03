@@ -33,6 +33,12 @@ describe('timeWindow', () => {
     expect(advanceLiveEnd(50e6, 25e6, tick)).toBe(20e6)
   })
 
+  it('realigns to the new tick grid when the previous live end is off-grid', () => {
+    // Previous 10ms grid left liveEnd at 50ms; switching to 100ms must not keep 50ms.
+    expect(advanceLiveEnd(50e6, 50e6, 100e6)).toBe(0)
+    expect(advanceLiveEnd(50e6, 150e6, 100e6)).toBe(100e6)
+  })
+
   it('marks a view expired once it falls behind the retain window', () => {
     const now = RETAIN_NS + 50
     expect(viewExpired(40, now)).toBe(true)
