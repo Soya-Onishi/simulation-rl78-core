@@ -125,7 +125,26 @@
 .graph-slider { width: 140px; max-width: 22vw; }
 .graph-range { font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .graph-expired { color: #9b2c2c; }
-.graph-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
+.graph-scroll {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  user-select: none;
+  cursor: crosshair;
+}
+.graph-select-rect {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: rgba(20, 108, 67, 0.18);
+  border-left: 1px solid #146c43;
+  border-right: 1px solid #146c43;
+}
 .lane-plot-wrap { position: relative; flex: 1; min-width: 0; }
 .pre-zero-overlay {
   position: absolute;

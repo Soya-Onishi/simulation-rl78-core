@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react'
 import type { ProbeStore } from '../../hooks/probeStore'
 import type { ProbeCatalogItem } from '../../types'
 import { probeKey } from '../../types'
@@ -9,6 +9,7 @@ import {
   RETAIN_NS,
   DEFAULT_TICK_STEP_INDEX,
   TICK_STEPS,
+  tickStepIndexForSpan,
   viewExpired,
   windowNsForTick,
 } from '../../timeWindow'
@@ -25,6 +26,9 @@ interface Props {
   /** Latest virtual time (ns); drives live follow. */
   virtualTimeNs: number
 }
+
+/** Ignore clicks shorter than this (px) so lane hover still works. */
+const SELECT_MIN_PX = 8
 
 function Ruler({ t0, t1, tickNs }: { t0: number; t1: number; tickNs: number }) {
   const draw = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
@@ -77,6 +81,28 @@ function PreZeroOverlay({ t0, t1 }: { t0: number; t1: number }) {
   )
 }
 
+function plotGeom(scroll: HTMLElement): { left: number; width: number; plot: DOMRect } | null {
+  const plot = scroll.querySelector('.lane-plot') as HTMLElement | null
+  if (!plot) return null
+  const scrollRect = scroll.getBoundingClientRect()
+  const plotRect = plot.getBoundingClientRect()
+  return {
+    left: plotRect.left - scrollRect.left + scroll.scrollLeft,
+    width: plotRect.width,
+    plot: plotRect,
+  }
+}
+
+function timeAtClientX(clientX: number, plot: DOMRect, t0: number, t1: number): number | null {
+  if (t1 <= t0) return null
+  const x = clientX - plot.left
+  const x0 = PAD_L
+  const x1 = plot.width - PAD_R
+  if (x1 <= x0) return null
+  const clamped = Math.min(Math.max(x, x0), x1)
+  return t0 + ((clamped - x0) / (x1 - x0)) * (t1 - t0)
+}
+
 export default function GraphView({ store, catalog, watched, virtualTimeNs }: Props) {
   const [stepIdx, setStepIdx] = useState(
     DEFAULT_TICK_STEP_INDEX >= 0 ? DEFAULT_TICK_STEP_INDEX : 0,
@@ -84,6 +110,15 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
   const [followLive, setFollowLive] = useState(true)
   const [viewEndNs, setViewEndNs] = useState(0)
   const [hover, setHover] = useState<LaneHoverInfo | null>(null)
+  const [selectPx, setSelectPx] = useState<{ left: number; width: number } | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{
+    originClientX: number
+    originTime: number
+    plotLeftInScroll: number
+  } | null>(null)
+  const viewRef = useRef({ t0: 0, t1: 0, liveEnd: 0 })
   const liveEndRef = useRef(0)
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
 
@@ -100,6 +135,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
   const expired = !followLive && viewExpired(viewEndNs, virtualTimeNs)
   const t1 = followLive ? liveEnd : viewEndNs
   const t0 = t1 - windowNs
+  viewRef.current = { t0, t1, liveEnd }
 
   const lanes = catalog.filter((item) => watched.has(probeKey(item.board, item.probe)))
 
@@ -112,9 +148,81 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
     const nextTick = TICK_STEPS[nextIdx].tickNs
     setStepIdx(nextIdx)
     if (followLive) return
-    // Keep the current right edge so the viewed slice becomes the newest end.
     setViewEndNs(clampViewEnd(viewEndNs, liveEndRef.current, nextTick))
   }
+
+  const applySelection = (timeA: number, timeB: number) => {
+    const left = Math.min(timeA, timeB)
+    const right = Math.max(timeA, timeB)
+    const span = right - left
+    if (!(span > 0)) return
+    const idx = tickStepIndexForSpan(span)
+    const nextTick = TICK_STEPS[idx].tickNs
+    setStepIdx(idx)
+    setFollowLive(false)
+    setViewEndNs(clampViewEnd(right, liveEndRef.current, nextTick))
+  }
+
+  const onScrollMouseDown = (ev: ReactMouseEvent<HTMLDivElement>) => {
+    if (ev.button !== 0) return
+    const scroll = scrollRef.current
+    if (!scroll || expired) return
+    const target = ev.target as HTMLElement
+    if (target.closest('.lane-label')) return
+    const geom = plotGeom(scroll)
+    if (!geom) return
+    const { t0: vt0, t1: vt1 } = viewRef.current
+    const time = timeAtClientX(ev.clientX, geom.plot, vt0, vt1)
+    if (time === null) return
+    dragRef.current = {
+      originClientX: ev.clientX,
+      originTime: time,
+      plotLeftInScroll: geom.left,
+    }
+    setDragging(true)
+    setHover(null)
+    setSelectPx({ left: ev.clientX - geom.plot.left + geom.left, width: 0 })
+    ev.preventDefault()
+  }
+
+  useEffect(() => {
+    const onMove = (ev: MouseEvent) => {
+      const drag = dragRef.current
+      const scroll = scrollRef.current
+      if (!drag || !scroll) return
+      const geom = plotGeom(scroll)
+      if (!geom) return
+      const a = drag.originClientX - geom.plot.left + geom.left
+      const b = ev.clientX - geom.plot.left + geom.left
+      const left = Math.min(a, b)
+      const right = Math.max(a, b)
+      setSelectPx({ left, width: Math.max(0, right - left) })
+      setHover(null)
+    }
+    const onUp = (ev: MouseEvent) => {
+      const drag = dragRef.current
+      if (!drag) return
+      dragRef.current = null
+      setDragging(false)
+      setSelectPx(null)
+      const dx = Math.abs(ev.clientX - drag.originClientX)
+      if (dx < SELECT_MIN_PX) return
+      const scroll = scrollRef.current
+      if (!scroll) return
+      const geom = plotGeom(scroll)
+      if (!geom) return
+      const { t0: vt0, t1: vt1 } = viewRef.current
+      const endTime = timeAtClientX(ev.clientX, geom.plot, vt0, vt1)
+      if (endTime === null) return
+      applySelection(drag.originTime, endTime)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
 
   const sliderMin = Math.max(0, liveEnd - RETAIN_NS + windowNs)
   const sliderMax = Math.max(sliderMin, liveEnd)
@@ -197,7 +305,20 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
           }
         </p>
       ) : (
-        <div className="graph-scroll" onMouseLeave={() => setHover(null)}>
+        <div
+          className="graph-scroll"
+          ref={scrollRef}
+          onMouseDown={onScrollMouseDown}
+          onMouseLeave={() => {
+            if (!dragRef.current) setHover(null)
+          }}
+        >
+          {selectPx && selectPx.width > 0 && (
+            <div
+              className="graph-select-rect"
+              style={{ left: selectPx.left, width: selectPx.width }}
+            />
+          )}
           <div className="lane ruler-row">
             <div className="lane-label" />
             <Ruler t0={t0} t1={t1} tickNs={tickNs} />
@@ -228,18 +349,24 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
                       t1={t1}
                       color={color}
                       version={version}
-                      onHover={setHover}
+                      onHover={dragging ? undefined : setHover}
                     />
                   </div>
                 ) : item.kind === 'uart' ? (
-                  <UartLane series={series} t0={t0} t1={t1} color={color} onHover={setHover} />
+                  <UartLane
+                    series={series}
+                    t0={t0}
+                    t1={t1}
+                    color={color}
+                    onHover={dragging ? undefined : setHover}
+                  />
                 ) : (
                   <DigitalLane
                     series={series}
                     t0={t0}
                     t1={t1}
                     color={color}
-                    onHover={setHover}
+                    onHover={dragging ? undefined : setHover}
                   />
                 )}
               </div>
@@ -247,7 +374,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
           })}
         </div>
       )}
-      {hover && (
+      {hover && !selectPx && (
         <div className="graph-hover-dialog" style={{ left: hover.x + 12, top: hover.y + 12 }}>
           {hover.lines.map((line, i) => (
             <div key={i} className="mono">

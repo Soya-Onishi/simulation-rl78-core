@@ -6,6 +6,7 @@ import {
   RETAIN_NS,
   TICK_STEPS,
   TICKS_PER_WINDOW,
+  tickStepIndexForSpan,
   viewExpired,
   windowNsForTick,
 } from './timeWindow'
@@ -43,5 +44,11 @@ describe('timeWindow', () => {
     expect(formatViewTime(0)).toBe('0ns')
     expect(formatViewTime(12.5e3)).toBe('12.5µs')
     expect(formatViewTime(1.5e9)).toBe('1.500s')
+  })
+
+  it('picks a tick step whose window matches a selected span', () => {
+    const idx = tickStepIndexForSpan(1e9) // 1s window → 100ms tick
+    expect(TICK_STEPS[idx].tickNs).toBe(100e6)
+    expect(windowNsForTick(TICK_STEPS[idx].tickNs)).toBe(1e9)
   })
 })

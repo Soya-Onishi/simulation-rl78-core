@@ -31,6 +31,24 @@ export function windowNsForTick(tickNs: number): number {
   return tickNs * TICKS_PER_WINDOW
 }
 
+/** Pick the −/+ step whose 10-grid window best matches `spanNs`. */
+export function tickStepIndexForSpan(spanNs: number): number {
+  if (!(spanNs > 0) || TICK_STEPS.length === 0) {
+    return DEFAULT_TICK_STEP_INDEX >= 0 ? DEFAULT_TICK_STEP_INDEX : 0
+  }
+  const idealTick = spanNs / TICKS_PER_WINDOW
+  let best = 0
+  let bestDist = Number.POSITIVE_INFINITY
+  for (let i = 0; i < TICK_STEPS.length; i++) {
+    const dist = Math.abs(TICK_STEPS[i].tickNs - idealTick)
+    if (dist < bestDist) {
+      bestDist = dist
+      best = i
+    }
+  }
+  return best
+}
+
 /** Advance a live right-edge by whole ticks once `virtualTimeNs` fills them. */
 export function advanceLiveEnd(viewEndNs: number, virtualTimeNs: number, tickNs: number): number {
   if (tickNs <= 0) return viewEndNs
