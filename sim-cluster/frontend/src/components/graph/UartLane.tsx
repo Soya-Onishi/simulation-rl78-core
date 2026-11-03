@@ -22,6 +22,7 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
 
     fillPreZero(ctx, t0, t1, x0, x1, h)
 
+    // Idle baseline (drawn first; boxes cover it so cells stay visually separate).
     ctx.strokeStyle = '#ddd'
     ctx.lineWidth = 1
     ctx.beginPath()
@@ -38,7 +39,7 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
     ctx.font = '11px ui-monospace, monospace'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.lineWidth = 1.2
+    ctx.lineWidth = 1.5
 
     const boxes = layoutUartBoxes(
       series.t,
@@ -49,10 +50,21 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
       x1,
       (text) => ctx.measureText(text).width,
     )
-    for (const box of boxes) {
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i]
+      // Explicit gap fill so adjacent strokes never read as one bar.
+      if (i > 0) {
+        const prev = boxes[i - 1]
+        if (box.x0 > prev.x1) {
+          ctx.fillStyle = '#fff'
+          ctx.fillRect(prev.x1, yTop - 1, box.x0 - prev.x1, yBot - yTop + 2)
+        }
+      }
       const bw = Math.max(box.x1 - box.x0, 1)
+      ctx.fillStyle = '#fff'
+      ctx.fillRect(box.x0, yTop, bw, yBot - yTop)
       ctx.fillStyle = color
-      ctx.globalAlpha = 0.12
+      ctx.globalAlpha = 0.16
       ctx.fillRect(box.x0, yTop, bw, yBot - yTop)
       ctx.globalAlpha = 1
       ctx.strokeStyle = color
@@ -77,8 +89,8 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
     }
     const rect = host.getBoundingClientRect()
     const x = ev.clientX - rect.left
-    const x0 = PAD_L
-    const x1 = rect.width - PAD_R
+    const plotX0 = PAD_L
+    const plotX1 = rect.width - PAD_R
     const canvas = canvasRef.current
     const measure = (text: string) => {
       if (!canvas) return text.length * 7
@@ -87,7 +99,7 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
       ctx.font = '11px ui-monospace, monospace'
       return ctx.measureText(text).width
     }
-    const boxes = layoutUartBoxes(series.t, series.v, t0, t1, x0, x1, measure)
+    const boxes = layoutUartBoxes(series.t, series.v, t0, t1, plotX0, plotX1, measure)
     const hit = hitUartBox(boxes, x)
     if (!hit) {
       onHover(null)
