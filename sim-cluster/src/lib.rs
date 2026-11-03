@@ -30,7 +30,6 @@ mod probe_log;
 pub mod server;
 pub mod time_sync;
 pub mod topology;
-pub mod web;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
