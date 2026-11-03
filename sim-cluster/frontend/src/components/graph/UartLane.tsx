@@ -3,7 +3,7 @@ import type { Series } from '../../hooks/probeStore'
 import { fillPreZero, formatUart, PAD_L, PAD_R, UART_H, useCanvasDraw } from './common'
 import { formatViewTime } from '../../timeWindow'
 import type { LaneHoverHandler } from './hover'
-import { hitUartBox, layoutUartBoxes } from './uartLayout'
+import { hitUartBox, layoutUartBoxes, uartLabelFits } from './uartLayout'
 
 interface Props {
   series: Series | undefined
@@ -22,7 +22,6 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
 
     fillPreZero(ctx, t0, t1, x0, x1, h)
 
-    // Idle baseline (drawn first; boxes cover it so cells stay visually separate).
     ctx.strokeStyle = '#ddd'
     ctx.lineWidth = 1
     ctx.beginPath()
@@ -41,28 +40,10 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
     ctx.textBaseline = 'middle'
     ctx.lineWidth = 1.5
 
-    const boxes = layoutUartBoxes(
-      series.t,
-      series.v,
-      t0,
-      t1,
-      x0,
-      x1,
-      (text) => ctx.measureText(text).width,
-    )
-    for (let i = 0; i < boxes.length; i++) {
-      const box = boxes[i]
-      // Explicit gap fill so adjacent strokes never read as one bar.
-      if (i > 0) {
-        const prev = boxes[i - 1]
-        if (box.x0 > prev.x1) {
-          ctx.fillStyle = '#fff'
-          ctx.fillRect(prev.x1, yTop - 1, box.x0 - prev.x1, yBot - yTop + 2)
-        }
-      }
-      const bw = Math.max(box.x1 - box.x0, 1)
-      ctx.fillStyle = '#fff'
-      ctx.fillRect(box.x0, yTop, bw, yBot - yTop)
+    const boxes = layoutUartBoxes(series.t, series.v, t0, t1, x0, x1)
+    for (const box of boxes) {
+      const bw = Math.max(box.x1 - box.x0, 0)
+      if (bw <= 0) continue
       ctx.fillStyle = color
       ctx.globalAlpha = 0.16
       ctx.fillRect(box.x0, yTop, bw, yBot - yTop)
@@ -70,7 +51,7 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
       ctx.strokeStyle = color
       ctx.strokeRect(box.x0 + 0.5, yTop + 0.5, Math.max(bw - 1, 0), yBot - yTop - 1)
       const text = formatUart(box.value)
-      if (ctx.measureText(text).width + 6 <= bw) {
+      if (uartLabelFits(bw, text, (s) => ctx.measureText(s).width)) {
         ctx.fillStyle = '#222'
         ctx.fillText(text, box.x0 + bw / 2, h / 2)
       }
@@ -89,17 +70,7 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
     }
     const rect = host.getBoundingClientRect()
     const x = ev.clientX - rect.left
-    const plotX0 = PAD_L
-    const plotX1 = rect.width - PAD_R
-    const canvas = canvasRef.current
-    const measure = (text: string) => {
-      if (!canvas) return text.length * 7
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return text.length * 7
-      ctx.font = '11px ui-monospace, monospace'
-      return ctx.measureText(text).width
-    }
-    const boxes = layoutUartBoxes(series.t, series.v, t0, t1, plotX0, plotX1, measure)
+    const boxes = layoutUartBoxes(series.t, series.v, t0, t1, PAD_L, rect.width - PAD_R)
     const hit = hitUartBox(boxes, x)
     if (!hit) {
       onHover(null)
