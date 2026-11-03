@@ -110,7 +110,7 @@ export default function WiringView({ client, refreshKey, guard }: Props) {
         'elk.layered.spacing.nodeNodeBetweenLayers': '90',
       },
       children: model.boards.map((b) => ({ id: b.id, width: b.width, height: b.height })),
-      edges: model.edges.map((e) => ({ id: e.id, sources: [e.source], targets: [e.target] })),
+      edges: model.edges.map((e) => ({ id: e.id, sources: [e.a], targets: [e.b] })),
     }
     elk
       .layout(graph)
@@ -141,10 +141,12 @@ export default function WiringView({ client, refreshKey, guard }: Props) {
     () =>
       (model?.edges ?? []).map((e) => ({
         id: e.id,
-        source: e.source,
-        target: e.target,
-        sourceHandle: e.sourceHandle,
-        targetHandle: e.targetHandle,
+        source: e.a,
+        target: e.b,
+        sourceHandle: e.aHandle,
+        targetHandle: e.bHandle,
+        // Undirected: no arrowhead. Payload direction lives in tooltip lines.
+        markerEnd: undefined,
         data: { lines: e.lines },
       })),
     [model],
