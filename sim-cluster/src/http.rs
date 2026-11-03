@@ -904,7 +904,7 @@ fn delete_with_gdb(state: &AppState, id: &str) -> Result<(), ApiError> {
     if let Some(mut slot) = take_gdb_slot(state, id)? {
         slot.shutdown();
     }
-    state.backend.delete(id)
+    state.backend.shutdown(id)
 }
 
 /// Serve with axum on `listen` (`host:port`).

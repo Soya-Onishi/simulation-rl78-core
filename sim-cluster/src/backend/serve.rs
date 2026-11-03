@@ -169,7 +169,7 @@ async fn delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let backend = state.backend.clone();
-    blocking(move || backend.delete(&id)).await?;
+    blocking(move || backend.shutdown(&id)).await?;
     Ok(StatusCode::OK)
 }
 

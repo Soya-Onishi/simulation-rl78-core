@@ -78,12 +78,12 @@ impl SimulationBackend for LocalBackend {
         self.command(id, HostCommand::Reset)
     }
 
-    fn delete(&self, id: &str) -> Result<(), ApiError> {
+    fn shutdown(&self, id: &str) -> Result<(), ApiError> {
         match self.rpc(JobKind::Delete { id: id.to_string() })? {
             JobReply::Deleted => Ok(()),
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
-                "unexpected worker reply for delete: {other:?}"
+                "unexpected worker reply for shutdown: {other:?}"
             ))),
         }
     }

@@ -23,7 +23,7 @@ pub trait SimulationBackend: Send + Sync {
     fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError>;
     fn stop(&self, id: &str) -> Result<(), ApiError>;
     fn reset(&self, id: &str) -> Result<(), ApiError>;
-    fn delete(&self, id: &str) -> Result<(), ApiError>;
+    fn shutdown(&self, id: &str) -> Result<(), ApiError>;
     fn exists(&self, id: &str) -> Result<bool, ApiError>;
     fn status(&self, id: &str) -> Result<StatusEvent, ApiError>;
     /// Logs with `seq > after`. Use the high-water mark at subscribe time for

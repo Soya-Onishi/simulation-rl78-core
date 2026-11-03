@@ -40,22 +40,15 @@ fn main() {
         );
     }
 
-    let mut any_ok = false;
-    for (index, server) in cfg.servers.iter().enumerate() {
-        match check_health(&server.ip, server.port, Duration::from_secs(2)) {
-            Ok(()) => any_ok = true,
-            Err(err) => eprintln!(
-                "simulation-frontend: warning: servers[{index}] {}:{} health check failed: {err}",
-                server.ip, server.port
-            ),
-        }
-    }
-    if !any_ok {
-        eprintln!("simulation-frontend: no backend passed GET /internal/health");
+    let first = &cfg.servers[0];
+    if let Err(err) = check_health(&first.ip, first.port, Duration::from_secs(2)) {
+        eprintln!(
+            "simulation-frontend: servers[0] {}:{} health check failed: {err}",
+            first.ip, first.port
+        );
         process::exit(1);
     }
 
-    let first = &cfg.servers[0];
     let backend = TcpipBackend::new(format!("http://{}:{}", first.ip, first.port));
     let listen = cfg.listen.socket_addr();
     let advertise = advertise_host_from_ip(&cfg.listen.ip);

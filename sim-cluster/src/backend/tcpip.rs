@@ -40,23 +40,38 @@ impl TcpipBackend {
     }
 
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
-        read_json(send("GET", &self.url(path), None::<&()>, RPC_TIMEOUT)?)
+        read_json(get(&self.url(path), RPC_TIMEOUT)?)
     }
 
-    fn send_json<B: Serialize>(
+    fn post_json<B: Serialize>(
         &self,
-        method: &str,
         path: &str,
-        body: Option<&B>,
+        body: &B,
     ) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
-        send(method, &self.url(path), body, RPC_TIMEOUT)
+        post_json(&self.url(path), body, RPC_TIMEOUT)
+    }
+
+    fn post(&self, path: &str) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
+        post(&self.url(path), RPC_TIMEOUT)
+    }
+
+    fn put_json<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
+        put_json(&self.url(path), body, RPC_TIMEOUT)
+    }
+
+    fn delete(&self, path: &str) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
+        delete(&self.url(path), RPC_TIMEOUT)
     }
 }
 
 /// `GET /internal/health` on `http://{ip}:{port}`. HTTP 200 and `status=ok`.
 pub fn check_health(ip: &str, port: u16, timeout: Duration) -> Result<(), String> {
     let url = format!("http://{ip}:{port}/internal/health");
-    let response = send("GET", &url, None::<&()>, timeout).map_err(|err| err.to_string())?;
+    let response = get(&url, timeout).map_err(|err| err.to_string())?;
     let status = response.status().as_u16();
     if status != 200 {
         return Err(format!("HTTP {status} from {url}"));
@@ -83,40 +98,55 @@ fn agent(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
-fn send<B: Serialize>(
-    method: &str,
+fn get(url: &str, timeout: Duration) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
+    agent(timeout)
+        .get(url)
+        .call()
+        .map_err(|err| ApiError::internal(err.to_string()))
+}
+
+fn delete(url: &str, timeout: Duration) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
+    agent(timeout)
+        .delete(url)
+        .call()
+        .map_err(|err| ApiError::internal(err.to_string()))
+}
+
+fn post(url: &str, timeout: Duration) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
+    agent(timeout)
+        .post(url)
+        .send_empty()
+        .map_err(|err| ApiError::internal(err.to_string()))
+}
+
+fn encode_json_body<B: Serialize>(body: &B) -> Result<Vec<u8>, ApiError> {
+    serde_json::to_vec(body).map_err(|err| ApiError::internal(format!("encode JSON: {err}")))
+}
+
+fn post_json<B: Serialize>(
     url: &str,
-    body: Option<&B>,
+    body: &B,
     timeout: Duration,
 ) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
-    let agent = agent(timeout);
-    let result = match (method, body) {
-        ("GET", _) => agent.get(url).call(),
-        ("DELETE", _) => agent.delete(url).call(),
-        ("POST", Some(body)) => {
-            let bytes = serde_json::to_vec(body)
-                .map_err(|err| ApiError::internal(format!("encode JSON: {err}")))?;
-            agent
-                .post(url)
-                .header("Content-Type", "application/json")
-                .send(bytes)
-        }
-        ("POST", None) => agent.post(url).send_empty(),
-        ("PUT", Some(body)) => {
-            let bytes = serde_json::to_vec(body)
-                .map_err(|err| ApiError::internal(format!("encode JSON: {err}")))?;
-            agent
-                .put(url)
-                .header("Content-Type", "application/json")
-                .send(bytes)
-        }
-        (other, _) => {
-            return Err(ApiError::internal(format!(
-                "unsupported internal HTTP method: {other}"
-            )));
-        }
-    };
-    result.map_err(|err| ApiError::internal(err.to_string()))
+    let bytes = encode_json_body(body)?;
+    agent(timeout)
+        .post(url)
+        .header("Content-Type", "application/json")
+        .send(bytes)
+        .map_err(|err| ApiError::internal(err.to_string()))
+}
+
+fn put_json<B: Serialize>(
+    url: &str,
+    body: &B,
+    timeout: Duration,
+) -> Result<ureq::http::Response<ureq::Body>, ApiError> {
+    let bytes = encode_json_body(body)?;
+    agent(timeout)
+        .put(url)
+        .header("Content-Type", "application/json")
+        .send(bytes)
+        .map_err(|err| ApiError::internal(err.to_string()))
 }
 
 fn read_json<T: DeserializeOwned>(
@@ -158,44 +188,30 @@ fn remote_error(status: u16, bytes: &[u8]) -> ApiError {
 
 impl SimulationBackend for TcpipBackend {
     fn create(&self, topology: LogicalTopology) -> Result<String, ApiError> {
-        let body: CreateSimulationResponse = read_json(self.send_json(
-            "POST",
+        let body: CreateSimulationResponse = read_json(self.post_json(
             "/internal/simulations",
-            Some(&CreateSimulationRequest { topology }),
+            &CreateSimulationRequest { topology },
         )?)?;
         Ok(body.id)
     }
 
     fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "POST",
+        drop_body(self.post_json(
             &format!("/internal/simulations/{id}/start"),
-            Some(&StartSimulationRequest { until_ns }),
+            &StartSimulationRequest { until_ns },
         )?)
     }
 
     fn stop(&self, id: &str) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "POST",
-            &format!("/internal/simulations/{id}/stop"),
-            None::<&()>,
-        )?)
+        drop_body(self.post(&format!("/internal/simulations/{id}/stop"))?)
     }
 
     fn reset(&self, id: &str) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "POST",
-            &format!("/internal/simulations/{id}/reset"),
-            None::<&()>,
-        )?)
+        drop_body(self.post(&format!("/internal/simulations/{id}/reset"))?)
     }
 
-    fn delete(&self, id: &str) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "DELETE",
-            &format!("/internal/simulations/{id}"),
-            None::<&()>,
-        )?)
+    fn shutdown(&self, id: &str) -> Result<(), ApiError> {
+        drop_body(self.delete(&format!("/internal/simulations/{id}"))?)
     }
 
     fn exists(&self, id: &str) -> Result<bool, ApiError> {
@@ -223,11 +239,7 @@ impl SimulationBackend for TcpipBackend {
     }
 
     fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "POST",
-            &format!("/internal/simulations/{id}/actions"),
-            Some(&request),
-        )?)
+        drop_body(self.post_json(&format!("/internal/simulations/{id}/actions"), &request)?)
     }
 
     fn probe_catalog(&self, id: &str) -> Result<Vec<ProbeCatalogItem>, ApiError> {
@@ -239,19 +251,11 @@ impl SimulationBackend for TcpipBackend {
     }
 
     fn probe_watch_put(&self, id: &str, probes: Vec<ProbeRef>) -> Result<ProbeWatchView, ApiError> {
-        read_json(self.send_json(
-            "PUT",
-            &format!("/internal/simulations/{id}/probes/watch"),
-            Some(&probes),
-        )?)
+        read_json(self.put_json(&format!("/internal/simulations/{id}/probes/watch"), &probes)?)
     }
 
     fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "DELETE",
-            &format!("/internal/simulations/{id}/probes/watch"),
-            None::<&()>,
-        )?)
+        drop_body(self.delete(&format!("/internal/simulations/{id}/probes/watch"))?)
     }
 
     fn probe_watch_live(&self, id: &str, after: u64) -> Result<Vec<CoarseBatch>, ApiError> {
@@ -265,10 +269,9 @@ impl SimulationBackend for TcpipBackend {
         id: &str,
         range: ProbeRange,
     ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
-        let body: CsvStartBody = read_json(self.send_json(
-            "POST",
+        let body: CsvStartBody = read_json(self.post_json(
             &format!("/internal/simulations/{id}/probes/csv/start"),
-            Some(&range),
+            &range,
         )?)?;
         Ok((body.request_id, body.probes))
     }
@@ -305,31 +308,26 @@ impl SimulationBackend for TcpipBackend {
     }
 
     fn viewer_attach(&self, id: &str) -> Result<String, ApiError> {
-        let body: ViewerTokenBody = read_json(self.send_json(
-            "POST",
-            &format!("/internal/simulations/{id}/viewer/attach"),
-            None::<&()>,
-        )?)?;
+        let body: ViewerTokenBody =
+            read_json(self.post(&format!("/internal/simulations/{id}/viewer/attach"))?)?;
         Ok(body.token)
     }
 
     fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "POST",
+        drop_body(self.post_json(
             &format!("/internal/simulations/{id}/viewer/check"),
-            Some(&ViewerTokenBody {
+            &ViewerTokenBody {
                 token: token.to_string(),
-            }),
+            },
         )?)
     }
 
     fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "POST",
+        drop_body(self.post_json(
             &format!("/internal/simulations/{id}/viewer/detach"),
-            Some(&ViewerTokenBody {
+            &ViewerTokenBody {
                 token: token.to_string(),
-            }),
+            },
         )?)
     }
 
@@ -339,19 +337,14 @@ impl SimulationBackend for TcpipBackend {
         board_id: &str,
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
-        read_json(self.send_json(
-            "POST",
+        read_json(self.post_json(
             &format!("/internal/simulations/{id}/boards/{board_id}/inspect"),
-            Some(&req),
+            &req,
         )?)
     }
 
     fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError> {
-        drop_body(self.send_json(
-            "POST",
-            &format!("/internal/simulations/{id}/boards/{board_id}/step"),
-            None::<&()>,
-        )?)
+        drop_body(self.post(&format!("/internal/simulations/{id}/boards/{board_id}/step"))?)
     }
 }
 
@@ -399,7 +392,7 @@ mod tests {
             self.set(&format!("reset:{id}"));
             Ok(())
         }
-        fn delete(&self, id: &str) -> Result<(), ApiError> {
+        fn shutdown(&self, id: &str) -> Result<(), ApiError> {
             self.set(&format!("delete:{id}"));
             Ok(())
         }
@@ -622,7 +615,7 @@ mod tests {
             .inspect(&id, "mcu-a", InspectRequest::ReadRegs)
             .unwrap();
         backend.step(&id, "mcu-a").unwrap();
-        backend.delete(&id).unwrap();
+        backend.shutdown(&id).unwrap();
 
         let missing = backend.status("missing").unwrap_err();
         assert_eq!(missing.status, 404);
