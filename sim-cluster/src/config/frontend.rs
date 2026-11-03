@@ -51,13 +51,13 @@ impl FrontendConfig {
         }
         if !self.web_root.is_dir() {
             return Err(ConfigError::Message(format!(
-                "web_root: not a directory: {}",
+                "web_root: not a directory: {} (run `npm run build` in sim-cluster/frontend)",
                 self.web_root.display()
             )));
         }
         if !self.web_root.join("index.html").is_file() {
             return Err(ConfigError::Message(format!(
-                "web_root: missing index.html under {}",
+                "web_root: missing index.html under {} (run `npm run build` in sim-cluster/frontend)",
                 self.web_root.display()
             )));
         }
