@@ -66,7 +66,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
         <button
           type="button"
           className="text-btn"
-          title="縮小"
+          title="拡大（時間幅を狭める）"
           disabled={stepIdx === 0}
           onClick={() => setStepIdx((i) => Math.max(0, i - 1))}
         >
@@ -76,7 +76,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
         <button
           type="button"
           className="text-btn"
-          title="拡大"
+          title="縮小（時間幅を広げる）"
           disabled={stepIdx === WINDOW_STEPS.length - 1}
           onClick={() => setStepIdx((i) => Math.min(WINDOW_STEPS.length - 1, i + 1))}
         >
