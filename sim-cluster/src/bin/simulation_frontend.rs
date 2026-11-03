@@ -31,6 +31,7 @@ fn main() {
         }
     };
 
+    // TODO: Remove after supporting multiple server
     if cfg.servers.len() > 1 {
         eprintln!(
             "simulation-frontend: servers has {} entries; using the first only. \
