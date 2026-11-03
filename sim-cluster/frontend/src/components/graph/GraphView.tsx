@@ -163,7 +163,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
           disabled={expired || t1 <= sliderMin}
           onClick={() => jump(t1 - tickNs)}
         >
-          [&lt;]
+          {'<'}
         </button>
         <span className="graph-range mono">
           {formatViewTime(t0)} - {formatViewTime(t1)}/
@@ -175,7 +175,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
           disabled={expired || followLive || t1 >= liveEnd}
           onClick={() => jump(t1 + tickNs)}
         >
-          [&gt;]
+          {'>'}
         </button>
         <button
           type="button"
@@ -187,13 +187,13 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
             setViewEndNs(liveEndRef.current)
           }}
         >
-          [&gt;&gt;]
+          {'>>'}
         </button>
       </div>
       {expired ? (
         <p className="meta pad graph-expired">
           {
-            '表示中の区間は保持期間（過去 10 時間）を超えました。[>>] で最新に戻るか、タイムスケールを変更してください。'
+            '表示中の区間は保持期間（過去 10 時間）を超えました。>> で最新に戻るか、タイムスケールを変更してください。'
           }
         </p>
       ) : (
