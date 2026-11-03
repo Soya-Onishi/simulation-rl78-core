@@ -2,8 +2,9 @@ import { parseProbeValue } from '../api/client'
 import type { ProbeKind, ProbeView } from '../types'
 import { probeKey } from '../types'
 
-/** Samples older than (latest - RETAIN_NS) are dropped per probe. */
-export const RETAIN_NS = 3600 * 1e9
+import { RETAIN_NS } from '../timeWindow'
+
+export { RETAIN_NS }
 
 export interface Series {
   kind: ProbeKind

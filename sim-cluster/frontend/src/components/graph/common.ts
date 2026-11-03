@@ -7,16 +7,21 @@ export const DIGITAL_H = 36
 export const UART_H = 36
 export const ANALOG_H = 96
 
-/** Window steps, in nanoseconds. */
-export const WINDOW_STEPS: { label: string; ns: number }[] = [
-  { label: '1s', ns: 1e9 },
-  { label: '10s', ns: 10e9 },
-  { label: '1m', ns: 60e9 },
-  { label: '5m', ns: 300e9 },
-  { label: '10m', ns: 600e9 },
-  { label: '30m', ns: 1800e9 },
-  { label: '1h', ns: 3600e9 },
-]
+/** Fill the region where virtual time is negative with a gray background. */
+export function fillPreZero(
+  ctx: CanvasRenderingContext2D,
+  t0: number,
+  t1: number,
+  x0: number,
+  x1: number,
+  h: number,
+) {
+  if (t0 >= 0 || t1 <= t0) return
+  const span = t1 - t0
+  const zeroX = t1 <= 0 ? x1 : x0 + ((0 - t0) / span) * (x1 - x0)
+  ctx.fillStyle = '#e8e8e8'
+  ctx.fillRect(x0, 0, Math.max(0, zeroX - x0), h)
+}
 
 /** Stable colour derived from `${board}/${probe}`. */
 export function colorFor(key: string): string {

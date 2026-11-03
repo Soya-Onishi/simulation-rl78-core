@@ -1,6 +1,6 @@
 import type { Series } from '../../hooks/probeStore'
 import { lastAtOrBefore } from '../../hooks/probeStore'
-import { DIGITAL_H, PAD_L, PAD_R, useCanvasDraw } from './common'
+import { DIGITAL_H, fillPreZero, PAD_L, PAD_R, useCanvasDraw } from './common'
 
 interface Props {
   series: Series | undefined
@@ -18,6 +18,8 @@ export default function DigitalLane({ series, t0, t1, color }: Props) {
     const yHigh = MARGIN
     const yLow = h - MARGIN
     const yMid = h / 2
+
+    fillPreZero(ctx, t0, t1, x0, x1, h)
 
     // level labels in the left gutter
     ctx.fillStyle = '#999'

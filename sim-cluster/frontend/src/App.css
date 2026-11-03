@@ -119,9 +119,22 @@
 
 /* graph */
 .graph { height: 100%; display: flex; flex-direction: column; min-height: 0; }
-.graph-controls { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; }
-.graph-window { min-width: 36px; text-align: center; font-variant-numeric: tabular-nums; }
+.graph-controls { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; flex-wrap: wrap; }
+.graph-window { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+.graph-spacer { flex: 1; min-width: 8px; }
+.graph-slider { width: 140px; max-width: 22vw; }
+.graph-range { font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.graph-expired { color: #9b2c2c; }
 .graph-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
+.lane-plot-wrap { position: relative; flex: 1; min-width: 0; }
+.pre-zero-overlay {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #e8e8e8;
+  pointer-events: none;
+  z-index: 1;
+}
 .lane { display: flex; border-bottom: 1px solid #eee; }
 .lane-label {
   width: 140px;

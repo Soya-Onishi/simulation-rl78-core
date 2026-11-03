@@ -1,6 +1,6 @@
 import type { Series } from '../../hooks/probeStore'
 import { lastAtOrBefore } from '../../hooks/probeStore'
-import { formatUart, PAD_L, PAD_R, UART_H, useCanvasDraw } from './common'
+import { fillPreZero, formatUart, PAD_L, PAD_R, UART_H, useCanvasDraw } from './common'
 
 interface Props {
   series: Series | undefined
@@ -23,6 +23,8 @@ export default function UartLane({ series, t0, t1, color }: Props) {
     const x1 = w - PAD_R
     const yTop = MARGIN
     const yBot = h - MARGIN
+
+    fillPreZero(ctx, t0, t1, x0, x1, h)
 
     // idle line
     ctx.strokeStyle = '#ddd'
