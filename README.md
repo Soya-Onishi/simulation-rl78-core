@@ -43,7 +43,14 @@ CLI は標準入力から `start` / `stop` / `quit` を受け付ける。起動�
 cargo run -- path/to/guest.elf
 ```
 
-GDB RSP は `cluster-server` が `127.0.0.1` で待ち受ける。WebUI でボードを選んで接続し、表示されたポートへ `rl78-elf-gdb` / VS Code からつなぐ。詳細は [`docs/gdb.md`](docs/gdb.md)。
+クラスタは `cluster-backend` を先に起動し、そのあと `simulation-frontend` を起動する。設定は YAML（`--config`、相対パスは cwd 基準）。例:
+
+```bash
+cargo run -p sim-cluster --bin cluster-backend -- --config example/config/backend.yaml
+cargo run -p sim-cluster --bin simulation-frontend -- --config example/config/frontend.yaml
+```
+
+GDB RSP は `simulation-frontend` が `127.0.0.1` で待ち受ける。WebUI でボードを選んで接続し、表示されたポートへ `rl78-elf-gdb` / VS Code からつなぐ。詳細は [`docs/gdb.md`](docs/gdb.md)。
 
 Magic probe はゲスト物理 `0xF0000`（`MOV !addr16, #imm` が `addr16 | 0xF0000` に到達）。
 

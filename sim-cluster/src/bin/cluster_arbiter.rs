@@ -97,7 +97,7 @@ fn main() {
 fn usage() -> &'static str {
     "Usage: cluster-arbiter --topology <logical.json> --cluster-key <key> --iox-root <path> [--node-bin <path>] [--plant-bin <path>]\n\
      \n\
-     Spawned by cluster-server. Host commands arrive on iceoryx `ctrl/s2a`
+     Spawned by cluster-backend. Host commands arrive on iceoryx `ctrl/s2a`
      and status is published on `status/a2s`. Logs use `log/a2s`.\n\
      The process stays up after stop until a shutdown command.\n\
      Default board binary is rl78-minimal-board next to this executable.\n\

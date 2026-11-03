@@ -9,8 +9,8 @@ use crate::elf_source;
 use crate::host::SessionNode;
 use crate::topology::LogicalTopology;
 
-/// Body for `POST /api/simulation`.
-#[derive(Debug, Deserialize)]
+/// Body for `POST /api/simulation` and `POST /internal/simulations`.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSimulationRequest {
     pub topology: LogicalTopology,
 }
@@ -34,7 +34,7 @@ pub fn prepare_create_topology(topology: LogicalTopology) -> Result<LogicalTopol
 }
 
 /// Body for `201` create responses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSimulationResponse {
     pub id: String,
 }
@@ -73,7 +73,7 @@ pub struct GdbSessionInfo {
 }
 
 /// Body for `POST /api/simulation/{id}/start`. Empty / omitted `until_ns` is unlimited.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct StartSimulationRequest {
     pub until_ns: Option<u64>,
 }
@@ -133,7 +133,7 @@ pub struct ActionList {
 }
 
 /// `POST /api/simulation/{id}/actions` body.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InvokeActionRequest {
     pub board_id: String,
     pub device: String,
@@ -160,12 +160,12 @@ pub struct ProbeSamplesResponse {
 }
 
 /// Uniform API error envelope: `{"error":{"code","message"}}`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: ErrorDetail,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorDetail {
     pub code: String,
     pub message: String,
@@ -221,6 +221,25 @@ impl ApiError {
                 code: self.code.to_string(),
                 message: self.message.clone(),
             },
+        }
+    }
+
+    /// Rebuild from an internal HTTP error response.
+    #[must_use]
+    pub fn from_remote(status: u16, body: &ErrorBody) -> Self {
+        let code = match body.error.code.as_str() {
+            "not_found" => "not_found",
+            "conflict" => "conflict",
+            "viewer_busy" => "viewer_busy",
+            "internal" => "internal",
+            "invalid_topology" => "invalid_topology",
+            "bad_param" => "bad_param",
+            other => Box::leak(other.to_string().into_boxed_str()),
+        };
+        Self {
+            status,
+            code,
+            message: body.error.message.clone(),
         }
     }
 }

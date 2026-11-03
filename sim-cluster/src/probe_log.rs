@@ -21,7 +21,8 @@ pub const COARSE_INTERVAL: Duration = Duration::from_millis(100);
 
 const SPILL_REC: usize = 8 + 8 + 1 + 2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
     Digital,
     Uart,
@@ -49,7 +50,7 @@ impl ProbeKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbePointName {
     pub probe_id: u64,
     pub board_id: String,
@@ -59,7 +60,7 @@ pub struct ProbePointName {
 
 /// One stored sample. `value` is a [`sim_kernel::DigitalLevel`] as `u16`, a UART
 /// data word, or analog millivolts (`µV / 1000`, clamped to `u16`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeRecord {
     pub probe_id: u64,
     pub virtual_time_ns: u64,
@@ -67,7 +68,7 @@ pub struct ProbeRecord {
     pub value: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeView {
     pub virtual_time_ns: u64,
     pub board: String,
@@ -76,7 +77,7 @@ pub struct ProbeView {
     pub value: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoarseBatch {
     pub seq: u64,
     pub samples: Vec<ProbeView>,
@@ -88,20 +89,20 @@ pub struct ProbeRef {
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeCatalogItem {
     pub board: String,
     pub probe: String,
     pub kind: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeWatchView {
     pub probes: Vec<ProbeRef>,
 }
 
 /// One time-sliced CSV drain from the worker.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CsvPoll {
     pub records: Vec<ProbeRecord>,
     pub done: bool,
@@ -110,7 +111,7 @@ pub struct CsvPoll {
 }
 
 /// Virtual-time window for a detail export.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeRange {
     pub from_ns: Option<u64>,
     pub to_ns: Option<u64>,

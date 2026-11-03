@@ -1,7 +1,8 @@
-//! Long-lived simulation server worker and process entry.
+//! Long-lived simulation worker used by `cluster-backend`.
 //!
-//! HTTP is served by [`crate::http`]; this module owns arbiter processes and
-//! the control-plane job queue used by [`crate::backend::LocalBackend`].
+//! Internal HTTP is served by [`crate::backend::serve_internal`]; this module
+//! owns arbiter processes and the control-plane job queue used by
+//! [`crate::backend::LocalBackend`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -41,24 +42,21 @@ const LOG_CAP: usize = 100;
 /// Live batches kept while `/probes/stream` is between reconnects.
 const WATCH_PENDING_KEEP: usize = 64;
 
-/// Options for [`run_server`].
+/// Options for [`spawn_worker`].
 #[derive(Clone, Debug)]
 pub struct ServerOptions {
-    /// `host:port` to bind. Port `0` picks a free port.
-    pub listen: String,
     /// Path to the `cluster-arbiter` executable.
     pub arbiter_bin: PathBuf,
 }
 
 impl ServerOptions {
     /// Sibling `cluster-arbiter` next to this process.
-    pub fn new(listen: impl Into<String>) -> Result<Self, ServerError> {
+    pub fn from_current_exe() -> Result<Self, ServerError> {
         let exe = std::env::current_exe().map_err(ServerError::Io)?;
         let exe_dir = exe
             .parent()
             .ok_or_else(|| ServerError::Message("current_exe has no parent".into()))?;
         Ok(Self {
-            listen: listen.into(),
             arbiter_bin: exe_dir.join("cluster-arbiter"),
         })
     }
@@ -286,10 +284,8 @@ impl ProbeWatch {
     }
 }
 
-/// Accept control requests until the process is killed.
-///
-/// Arbiter processes come and go; this function does not return when one exits.
-pub fn run_server(opts: &ServerOptions) -> Result<(), ServerError> {
+/// Start the worker thread and return a [`LocalBackend`] to it.
+pub fn spawn_worker(opts: ServerOptions) -> Result<std::sync::Arc<LocalBackend>, ServerError> {
     if !opts.arbiter_bin.is_file() {
         return Err(ServerError::Message(format!(
             "cluster-arbiter not found at {} (build the arbiter binary first)",
@@ -297,15 +293,19 @@ pub fn run_server(opts: &ServerOptions) -> Result<(), ServerError> {
         )));
     }
     let (tx, rx) = mpsc::channel();
-    let worker_opts = opts.clone();
-    thread::spawn(move || worker_loop(rx, worker_opts));
+    thread::spawn(move || worker_loop(rx, opts));
+    Ok(LocalBackend::new(tx))
+}
 
-    let backend = LocalBackend::new(tx);
-
+/// Accept internal HTTP until the process is killed.
+///
+/// Arbiter processes come and go; this function does not return when one exits.
+pub fn run_backend(listen: &str, opts: ServerOptions) -> Result<(), ServerError> {
+    let backend = spawn_worker(opts)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(crate::http::serve(&opts.listen, backend))?;
+    rt.block_on(crate::backend::serve_internal(listen, backend))?;
     Ok(())
 }
 
@@ -678,7 +678,7 @@ fn poll_actions(sim: &mut Simulation) {
                 match AdvertisedAction::new(&board_id, &sample) {
                     Ok(body) => upsert_catalog(sim, body),
                     Err(err) => {
-                        eprintln!("cluster-server {}: action advertise: {err}", sim.id);
+                        eprintln!("cluster-backend {}: action advertise: {err}", sim.id);
                     }
                 }
             }
@@ -688,7 +688,7 @@ fn poll_actions(sim: &mut Simulation) {
             Ok(Some(ActionUpstream::Result(_))) => {}
             Ok(None) => break,
             Err(err) => {
-                eprintln!("cluster-server {}: action inbox: {err}", sim.id);
+                eprintln!("cluster-backend {}: action inbox: {err}", sim.id);
                 break;
             }
         }
@@ -714,7 +714,7 @@ fn poll_probes(sim: &mut Simulation) {
             }
             Ok(None) => break,
             Err(err) => {
-                eprintln!("cluster-server {}: probe catalog: {err}", sim.id);
+                eprintln!("cluster-backend {}: probe catalog: {err}", sim.id);
                 break;
             }
         }
@@ -728,7 +728,7 @@ fn poll_probes(sim: &mut Simulation) {
             }
             Ok(None) => break,
             Err(err) => {
-                eprintln!("cluster-server {}: probe inbox: {err}", sim.id);
+                eprintln!("cluster-backend {}: probe inbox: {err}", sim.id);
                 break;
             }
         }
@@ -1061,7 +1061,7 @@ fn ingest_csv_replies(sim: &mut Simulation) {
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(err) => {
-                eprintln!("cluster-server {}: csv reply: {err}", sim.id);
+                eprintln!("cluster-backend {}: csv reply: {err}", sim.id);
                 job.failed = true;
                 job.done = true;
                 return;
@@ -1160,7 +1160,7 @@ fn poll_simulation(sim: &mut Simulation) {
             }
             Ok(None) => break,
             Err(err) => {
-                eprintln!("cluster-server {}: host status: {err}", sim.id);
+                eprintln!("cluster-backend {}: host status: {err}", sim.id);
                 break;
             }
         }
@@ -1170,7 +1170,7 @@ fn poll_simulation(sim: &mut Simulation) {
             Ok(Some(record)) => push_log(sim, &record),
             Ok(None) => break,
             Err(err) => {
-                eprintln!("cluster-server {}: log inbox: {err}", sim.id);
+                eprintln!("cluster-backend {}: log inbox: {err}", sim.id);
                 break;
             }
         }
@@ -1193,7 +1193,7 @@ fn poll_simulation(sim: &mut Simulation) {
                 sim.child = None;
             }
             Ok(None) => {}
-            Err(err) => eprintln!("cluster-server {}: wait arbiter: {err}", sim.id),
+            Err(err) => eprintln!("cluster-backend {}: wait arbiter: {err}", sim.id),
         }
     }
 }

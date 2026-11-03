@@ -6,7 +6,7 @@
 //! a [`Cpu`] (on-chip part) and assemble a [`Machine`]; host front-ends
 //! talk through
 //! [`Command`] / [`Response`] on the simulation thread. The GDB stub lives
-//! in `sim-cluster` (cluster-server) and uses this inspect surface.
+//! in `sim-cluster` (`simulation-frontend` / `cluster-backend`) and uses this inspect surface.
 
 mod action;
 mod breakpoint;

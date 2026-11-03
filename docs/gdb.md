@@ -1,16 +1,16 @@
-# cluster-server の gdbserver
+# simulation-frontend の gdbserver
 
-GDB RSP は web（HTTP と同じ `cluster-server` プロセス、専用スレッド）が `127.0.0.1` で待ち受ける。1 シミュレーションにつき listen は 1 本。対象は RL78 ボードのみ（plant は対象外）。`ClusterGdbTarget` は `SimulationBackend` だけを呼ぶ。UDS inspect と iceoryx の Step は `LocalBackend` → worker の先にある。
+GDB RSP は web（HTTP と同じ `simulation-frontend` プロセス、専用スレッド）が `127.0.0.1` で待ち受ける。1 シミュレーションにつき listen は 1 本。対象は RL78 ボードのみ（plant は対象外）。`ClusterGdbTarget` は `SimulationBackend` だけを呼ぶ。UDS inspect と iceoryx の Step は `cluster-backend` の worker の先にある。`cluster-backend` を先に起動し、そのあと `simulation-frontend` を起動する。
 
 ## 手順
 
 1. WebUI でシミュレーションを開き、GDB 対象ボードを選んで「接続」する。  
    このときクラスタは必ず停止する。ポートが出ただけでは WebUI の start は止まらない。
-2. 表示されたポートと `ssh` コマンドを控える。`GET /gdb` は `board_id` / `host` / `port` / `user` / `connected` を返す。`GET /gdb/ssh` は `ssh -L {port}:127.0.0.1:{port} {user}@{host}` を返す。`host` は `cluster-server --listen` の IPv4（`0.0.0.0` は `127.0.0.1`）。status には gdb を載せない。
+2. 表示されたポートと `ssh` コマンドを控える。`GET /gdb` は `board_id` / `host` / `port` / `user` / `connected` を返す。`GET /gdb/ssh` は `ssh -L {port}:127.0.0.1:{port} {user}@{host}` を返す。`host` は `simulation-frontend` の YAML `listen.ip`（`0.0.0.0` は `127.0.0.1`。ホスト名はそのまま）。status には gdb を載せない。
 3. サーバと別マシンから使う場合は、先にポート転送する:
 
 ```bash
-# cluster-server --listen 192.168.1.10:8090 のとき
+# simulation-frontend listen.ip が 192.168.1.10 のとき
 ssh -L 45231:127.0.0.1:45231 user@192.168.1.10
 ```
 
