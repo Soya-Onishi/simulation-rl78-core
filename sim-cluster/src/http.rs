@@ -401,17 +401,38 @@ fn status_event_stream(
                     tokio::task::spawn_blocking(move || backend_poll.status(&id_poll)).await;
                 match result {
                     Ok(Ok(status)) => {
-                        if last.as_ref() != Some(&status) {
+                        let (fields_changed, vt_changed) = match last.as_ref() {
+                            None => (true, true),
+                            Some(prev) => {
+                                let fields_changed = prev.id != status.id
+                                    || prev.state != status.state
+                                    || prev.stop_reason != status.stop_reason
+                                    || prev.nodes != status.nodes;
+                                let vt_changed =
+                                    prev.virtual_time_ns != status.virtual_time_ns;
+                                (fields_changed, vt_changed)
+                            }
+                        };
+                        // Non-VT field changes: emit immediately.
+                        // VT-only changes: sleep 250ms then emit (rate-limit).
+                        // No changes: sleep 250ms and poll again.
+                        if fields_changed {
                             let data =
                                 serde_json::to_string(&status).unwrap_or_else(|_| "{}".into());
                             let event = Event::default().event("status").data(data);
                             return Some((Ok(event), (state, id, Some(status))));
                         }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        if vt_changed {
+                            let data =
+                                serde_json::to_string(&status).unwrap_or_else(|_| "{}".into());
+                            let event = Event::default().event("status").data(data);
+                            return Some((Ok(event), (state, id, Some(status))));
+                        }
                     }
                     Ok(Err(err)) if err.status == 404 => return None,
                     Ok(Err(_)) | Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
             }
