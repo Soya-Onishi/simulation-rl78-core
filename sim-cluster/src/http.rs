@@ -947,3 +947,7 @@ pub async fn serve(
     eprintln!("simulation-frontend listening on http://{addr}");
     axum::serve(listener, app).await
 }
+
+#[cfg(test)]
+#[path = "http_tests.rs"]
+mod tests;

@@ -579,6 +579,10 @@ mod tests {
         backend.reset(&id).unwrap();
         assert!(backend.exists(&id).unwrap());
         assert_eq!(backend.status(&id).unwrap().id, "sim-1");
+        let topo = backend.topology(&id).unwrap();
+        assert_eq!(topo.boards.len(), 1);
+        assert_eq!(topo.boards[0].id, "mcu-a");
+        assert!(topo.boards[0].kind == "rl78");
         assert!(backend.logs_after(&id, 0).unwrap().is_empty());
         assert_eq!(backend.log_high_water(&id).unwrap(), 7);
         assert!(backend.actions(&id).unwrap().actions.is_empty());
