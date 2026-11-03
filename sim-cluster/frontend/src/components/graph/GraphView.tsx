@@ -120,6 +120,9 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
   } | null>(null)
   const viewRef = useRef({ t0: 0, t1: 0, liveEnd: 0 })
   const liveEndRef = useRef(0)
+  const virtualTimeRef = useRef(virtualTimeNs)
+  virtualTimeRef.current = virtualTimeNs
+  const applySelectionRef = useRef<(a: number, b: number) => void>(() => {})
   const prevVirtualTimeRef = useRef(virtualTimeNs)
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
 
@@ -160,7 +163,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
 
   const onScale = (nextIdx: number) => {
     const nextTick = TICK_STEPS[nextIdx].tickNs
-    const nextLive = advanceLiveEnd(0, virtualTimeNs, nextTick)
+    const nextLive = advanceLiveEnd(0, virtualTimeRef.current, nextTick)
     liveEndRef.current = nextLive
     setStepIdx(nextIdx)
     if (followLive) return
@@ -174,12 +177,14 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
     if (!(span > 0)) return
     const idx = tickStepIndexForSpan(span)
     const nextTick = TICK_STEPS[idx].tickNs
-    const nextLive = advanceLiveEnd(0, virtualTimeNs, nextTick)
+    // Always derive live end from the latest virtual time (not a closed-over prop).
+    const nextLive = advanceLiveEnd(0, virtualTimeRef.current, nextTick)
     liveEndRef.current = nextLive
     setStepIdx(idx)
     setFollowLive(false)
     setViewEndNs(clampViewEnd(right, nextLive, nextTick))
   }
+  applySelectionRef.current = applySelection
 
   const onScrollMouseDown = (ev: ReactMouseEvent<HTMLDivElement>) => {
     if (ev.button !== 0) return
@@ -232,7 +237,8 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
       const { t0: vt0, t1: vt1 } = viewRef.current
       const endTime = timeAtClientX(ev.clientX, geom.plot, vt0, vt1)
       if (endTime === null) return
-      applySelection(drag.originTime, endTime)
+      // Ref so this []-deps listener always runs the latest applySelection.
+      applySelectionRef.current(drag.originTime, endTime)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
