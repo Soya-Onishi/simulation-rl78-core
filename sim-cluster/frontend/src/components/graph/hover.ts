@@ -1,6 +1,6 @@
 import { lastAtOrBefore, type Series } from '../../hooks/probeStore'
 import { formatViewTime } from '../../timeWindow'
-import { formatUart, PAD_L, PAD_R } from './common'
+import { PAD_L, PAD_R } from './common'
 
 /** Floating dialog contents while the pointer is over a lane. */
 export interface LaneHoverInfo {
@@ -10,9 +10,6 @@ export interface LaneHoverInfo {
 }
 
 export type LaneHoverHandler = (info: LaneHoverInfo | null) => void
-
-/** Nominal UART box duration until baud is exposed (10 bits @ 9600). */
-export const UART_FRAME_NS = 1_040_000
 
 /** Map a client X inside a lane host to virtual time, or null outside the plot. */
 export function timeFromClientX(
@@ -51,22 +48,4 @@ export function hoverAnalogDigital(
     return [`t=${formatViewTime(t)}`, `${v} mV`]
   }
   return [`t=${formatViewTime(t)}`, digitalLabel(v)]
-}
-
-/** Hit-test a UART frame box at `time`. */
-export function hoverUart(series: Series | undefined, time: number): string[] | null {
-  if (!series || series.t.length === 0) return null
-  const { t, v } = series
-  let i = lastAtOrBefore(t, time)
-  if (i < 0) i = 0
-  for (let j = i; j < t.length; j++) {
-    const start = t[j]
-    if (start > time) break
-    const next = j + 1 < t.length ? t[j + 1] : Infinity
-    const end = Math.min(next, start + UART_FRAME_NS)
-    if (time >= start && time < end) {
-      return [`t=${formatViewTime(start)}`, formatUart(v[j])]
-    }
-  }
-  return null
 }

@@ -1,13 +1,9 @@
 import type { MouseEvent } from 'react'
 import type { Series } from '../../hooks/probeStore'
-import { lastAtOrBefore } from '../../hooks/probeStore'
 import { fillPreZero, formatUart, PAD_L, PAD_R, UART_H, useCanvasDraw } from './common'
-import {
-  hoverUart,
-  timeFromClientX,
-  UART_FRAME_NS,
-  type LaneHoverHandler,
-} from './hover'
+import { formatViewTime } from '../../timeWindow'
+import type { LaneHoverHandler } from './hover'
+import { hitUartBox, layoutUartBoxes } from './uartLayout'
 
 interface Props {
   series: Series | undefined
@@ -34,9 +30,6 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
     ctx.stroke()
 
     if (!series || series.t.length === 0) return
-    const { t, v } = series
-    const span = t1 - t0
-    const xOf = (time: number) => x0 + ((time - t0) / span) * (x1 - x0)
 
     ctx.save()
     ctx.beginPath()
@@ -47,27 +40,27 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
     ctx.textBaseline = 'middle'
     ctx.lineWidth = 1.2
 
-    let i = lastAtOrBefore(t, t0)
-    if (i < 0) i = 0
-    for (let j = i; j < t.length; j++) {
-      const start = t[j]
-      if (start > t1) break
-      const next = j + 1 < t.length ? t[j + 1] : Infinity
-      const end = Math.min(next, start + UART_FRAME_NS)
-      const xa = xOf(start)
-      const xb = xOf(end)
-      if (xb < x0) continue
-      const bw = Math.max(xb - xa, 1)
+    const boxes = layoutUartBoxes(
+      series.t,
+      series.v,
+      t0,
+      t1,
+      x0,
+      x1,
+      (text) => ctx.measureText(text).width,
+    )
+    for (const box of boxes) {
+      const bw = Math.max(box.x1 - box.x0, 1)
       ctx.fillStyle = color
       ctx.globalAlpha = 0.12
-      ctx.fillRect(xa, yTop, bw, yBot - yTop)
+      ctx.fillRect(box.x0, yTop, bw, yBot - yTop)
       ctx.globalAlpha = 1
       ctx.strokeStyle = color
-      ctx.strokeRect(xa + 0.5, yTop + 0.5, Math.max(bw - 1, 0), yBot - yTop - 1)
-      const text = formatUart(v[j])
+      ctx.strokeRect(box.x0 + 0.5, yTop + 0.5, Math.max(bw - 1, 0), yBot - yTop - 1)
+      const text = formatUart(box.value)
       if (ctx.measureText(text).width + 6 <= bw) {
         ctx.fillStyle = '#222'
-        ctx.fillText(text, xa + bw / 2, h / 2)
+        ctx.fillText(text, box.x0 + bw / 2, h / 2)
       }
     }
     ctx.restore()
@@ -78,14 +71,33 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
   const report = (ev: MouseEvent<HTMLDivElement>) => {
     if (!onHover) return
     const host = hostRef.current
-    if (!host) return
-    const time = timeFromClientX(ev.clientX, host, t0, t1)
-    if (time === null) {
+    if (!host || !series || series.t.length === 0) {
       onHover(null)
       return
     }
-    const lines = hoverUart(series, time)
-    onHover(lines ? { x: ev.clientX, y: ev.clientY, lines } : null)
+    const rect = host.getBoundingClientRect()
+    const x = ev.clientX - rect.left
+    const x0 = PAD_L
+    const x1 = rect.width - PAD_R
+    const canvas = canvasRef.current
+    const measure = (text: string) => {
+      if (!canvas) return text.length * 7
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return text.length * 7
+      ctx.font = '11px ui-monospace, monospace'
+      return ctx.measureText(text).width
+    }
+    const boxes = layoutUartBoxes(series.t, series.v, t0, t1, x0, x1, measure)
+    const hit = hitUartBox(boxes, x)
+    if (!hit) {
+      onHover(null)
+      return
+    }
+    onHover({
+      x: ev.clientX,
+      y: ev.clientY,
+      lines: [`t=${formatViewTime(hit.tStart)}`, formatUart(hit.value)],
+    })
   }
 
   return (

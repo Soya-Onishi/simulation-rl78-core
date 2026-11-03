@@ -75,7 +75,9 @@ export class ProbeStore {
       const t = s.virtual_time_ns
       const last = ser.t.length - 1
       if (last >= 0 && t < ser.t[last]) continue // out of order: ignore
-      if (last >= 0 && t === ser.t[last]) {
+      // Digital/analog coarse samples collapse same-timestamp updates.
+      // UART keeps every word, even when timestamps collide.
+      if (last >= 0 && t === ser.t[last] && ser.kind !== 'uart') {
         ser.v[last] = value
       } else {
         ser.t.push(t)
