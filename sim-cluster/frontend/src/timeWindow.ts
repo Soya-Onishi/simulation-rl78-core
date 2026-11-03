@@ -49,10 +49,11 @@ export function tickStepIndexForSpan(spanNs: number): number {
   return best
 }
 
-/** Advance a live right-edge by whole ticks once `virtualTimeNs` fills them. */
+/** Advance a live right-edge by whole ticks once `virtualTimeNs` fills them.
+ * If virtual time rewinds (reset), snap back to the largest tick edge `<= virtualTimeNs`. */
 export function advanceLiveEnd(viewEndNs: number, virtualTimeNs: number, tickNs: number): number {
   if (tickNs <= 0) return viewEndNs
-  let end = viewEndNs
+  let end = virtualTimeNs < viewEndNs ? 0 : viewEndNs
   while (virtualTimeNs >= end + tickNs) end += tickNs
   return end
 }

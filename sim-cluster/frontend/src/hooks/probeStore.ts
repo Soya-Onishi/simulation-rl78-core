@@ -73,8 +73,15 @@ export class ProbeStore {
       }
       const value = parseProbeValue(s.kind, s.value)
       const t = s.virtual_time_ns
-      const last = ser.t.length - 1
-      if (last >= 0 && t < ser.t[last]) continue // out of order: ignore
+      let last = ser.t.length - 1
+      // Reset / rewind: drop this series so post-reset samples are not ignored.
+      if (last >= 0 && t < ser.t[last]) {
+        ser.t.length = 0
+        ser.v.length = 0
+        ser.min = Infinity
+        ser.max = -Infinity
+        last = -1
+      }
       // Digital/analog coarse samples collapse same-timestamp updates.
       // UART keeps every word, even when timestamps collide.
       if (last >= 0 && t === ser.t[last] && ser.kind !== 'uart') {

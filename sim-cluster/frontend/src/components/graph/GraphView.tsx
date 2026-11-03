@@ -120,10 +120,21 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
   } | null>(null)
   const viewRef = useRef({ t0: 0, t1: 0, liveEnd: 0 })
   const liveEndRef = useRef(0)
+  const prevVirtualTimeRef = useRef(virtualTimeNs)
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
 
   const tickNs = TICK_STEPS[stepIdx].tickNs
   const windowNs = windowNsForTick(tickNs)
+
+  // Reset rewinds virtual time; snap the live edge and return to follow-live.
+  useEffect(() => {
+    if (virtualTimeNs < prevVirtualTimeRef.current) {
+      liveEndRef.current = 0
+      setFollowLive(true)
+      setViewEndNs(0)
+    }
+    prevVirtualTimeRef.current = virtualTimeNs
+  }, [virtualTimeNs])
 
   const liveEnd = advanceLiveEnd(liveEndRef.current, virtualTimeNs, tickNs)
   liveEndRef.current = liveEnd

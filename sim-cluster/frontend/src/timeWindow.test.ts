@@ -27,6 +27,12 @@ describe('timeWindow', () => {
     expect(advanceLiveEnd(0, 35e6, tick)).toBe(30e6)
   })
 
+  it('snaps the live end back when virtual time rewinds', () => {
+    const tick = 10e6
+    expect(advanceLiveEnd(50e6, 0, tick)).toBe(0)
+    expect(advanceLiveEnd(50e6, 25e6, tick)).toBe(20e6)
+  })
+
   it('marks a view expired once it falls behind the retain window', () => {
     const now = RETAIN_NS + 50
     expect(viewExpired(40, now)).toBe(true)
