@@ -84,25 +84,38 @@ export function useElementSize<T extends HTMLElement>() {
 }
 
 /**
- * Canvas filling its parent; `draw` is re-run whenever it changes (callers
- * recreate it on every data tick) or the element is resized.
+ * Canvas filling its parent. The backing store is resized only when the
+ * element size (or DPR) changes; `draw` may change every tick without realloc.
  */
 export function useCanvasDraw(
   draw: (ctx: CanvasRenderingContext2D, w: number, h: number) => void,
 ) {
   const [hostRef, size] = useElementSize<HTMLDivElement>()
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const drawRef = useRef(draw)
+  drawRef.current = draw
+
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || size.w === 0 || size.h === 0) return
     const dpr = window.devicePixelRatio || 1
-    canvas.width = Math.round(size.w * dpr)
-    canvas.height = Math.round(size.h * dpr)
+    const bw = Math.round(size.w * dpr)
+    const bh = Math.round(size.h * dpr)
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw
+      canvas.height = bh
+    }
+  }, [size])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || size.w === 0 || size.h === 0) return
+    const dpr = window.devicePixelRatio || 1
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, size.w, size.h)
-    draw(ctx, size.w, size.h)
+    drawRef.current(ctx, size.w, size.h)
   }, [draw, size])
   return [hostRef, canvasRef] as const
 }
