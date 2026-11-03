@@ -135,6 +135,18 @@
   pointer-events: none;
   z-index: 1;
 }
+.graph-hover-dialog {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  background: #1c1e22;
+  color: #f4f5f7;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  max-width: 280px;
+}
 .lane { display: flex; border-bottom: 1px solid #eee; }
 .lane-label {
   width: 140px;

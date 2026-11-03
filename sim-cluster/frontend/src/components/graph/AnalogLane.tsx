@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type MouseEvent } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
 import type { Series } from '../../hooks/probeStore'
 import { ANALOG_H, PAD_L, PAD_R, useElementSize } from './common'
+import { hoverAnalogDigital, timeFromClientX, type LaneHoverHandler } from './hover'
 
 interface Props {
   series: Series | undefined
@@ -11,9 +12,10 @@ interface Props {
   color: string
   /** Store version; bumps whenever samples were appended. */
   version: number
+  onHover?: LaneHoverHandler
 }
 
-export default function AnalogLane({ series, t0, t1, color, version }: Props) {
+export default function AnalogLane({ series, t0, t1, color, version, onHover }: Props) {
   const [hostRef, size] = useElementSize<HTMLDivElement>()
   const plotRef = useRef<uPlot | null>(null)
   const live = useRef({ t0, t1, series })
@@ -82,5 +84,26 @@ export default function AnalogLane({ series, t0, t1, color, version }: Props) {
     plot.setScale('x', { min: t0, max: t1 })
   }, [series, t0, t1, version, size.w])
 
-  return <div className="lane-plot" style={{ height: ANALOG_H }} ref={hostRef} />
+  const report = (ev: MouseEvent<HTMLDivElement>) => {
+    if (!onHover) return
+    const host = hostRef.current
+    if (!host) return
+    const time = timeFromClientX(ev.clientX, host, t0, t1)
+    if (time === null) {
+      onHover(null)
+      return
+    }
+    const lines = hoverAnalogDigital(series, time, 'analog')
+    onHover(lines ? { x: ev.clientX, y: ev.clientY, lines } : null)
+  }
+
+  return (
+    <div
+      className="lane-plot"
+      style={{ height: ANALOG_H }}
+      ref={hostRef}
+      onMouseMove={report}
+      onMouseLeave={() => onHover?.(null)}
+    />
+  )
 }

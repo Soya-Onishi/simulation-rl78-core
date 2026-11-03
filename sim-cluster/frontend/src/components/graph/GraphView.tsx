@@ -16,6 +16,7 @@ import AnalogLane from './AnalogLane'
 import DigitalLane from './DigitalLane'
 import UartLane from './UartLane'
 import { colorFor, fillPreZero, formatTick, PAD_L, PAD_R, useCanvasDraw } from './common'
+import type { LaneHoverInfo } from './hover'
 
 interface Props {
   store: ProbeStore
@@ -82,6 +83,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
   )
   const [followLive, setFollowLive] = useState(true)
   const [viewEndNs, setViewEndNs] = useState(0)
+  const [hover, setHover] = useState<LaneHoverInfo | null>(null)
   const liveEndRef = useRef(0)
   const version = useSyncExternalStore(store.subscribe, store.getVersion)
 
@@ -195,7 +197,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
           }
         </p>
       ) : (
-        <div className="graph-scroll">
+        <div className="graph-scroll" onMouseLeave={() => setHover(null)}>
           <div className="lane ruler-row">
             <div className="lane-label" />
             <Ruler t0={t0} t1={t1} tickNs={tickNs} />
@@ -220,16 +222,38 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
                 {item.kind === 'analog' ? (
                   <div className="lane-plot-wrap">
                     <PreZeroOverlay t0={t0} t1={t1} />
-                    <AnalogLane series={series} t0={t0} t1={t1} color={color} version={version} />
+                    <AnalogLane
+                      series={series}
+                      t0={t0}
+                      t1={t1}
+                      color={color}
+                      version={version}
+                      onHover={setHover}
+                    />
                   </div>
                 ) : item.kind === 'uart' ? (
-                  <UartLane series={series} t0={t0} t1={t1} color={color} />
+                  <UartLane series={series} t0={t0} t1={t1} color={color} onHover={setHover} />
                 ) : (
-                  <DigitalLane series={series} t0={t0} t1={t1} color={color} />
+                  <DigitalLane
+                    series={series}
+                    t0={t0}
+                    t1={t1}
+                    color={color}
+                    onHover={setHover}
+                  />
                 )}
               </div>
             )
           })}
+        </div>
+      )}
+      {hover && (
+        <div className="graph-hover-dialog" style={{ left: hover.x + 12, top: hover.y + 12 }}>
+          {hover.lines.map((line, i) => (
+            <div key={i} className="mono">
+              {line}
+            </div>
+          ))}
         </div>
       )}
     </div>

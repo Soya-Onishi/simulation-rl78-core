@@ -1,32 +1,31 @@
+import type { MouseEvent } from 'react'
 import type { Series } from '../../hooks/probeStore'
 import { lastAtOrBefore } from '../../hooks/probeStore'
 import { fillPreZero, formatUart, PAD_L, PAD_R, UART_H, useCanvasDraw } from './common'
+import {
+  hoverUart,
+  timeFromClientX,
+  UART_FRAME_NS,
+  type LaneHoverHandler,
+} from './hover'
 
 interface Props {
   series: Series | undefined
   t0: number
   t1: number
   color: string
+  onHover?: LaneHoverHandler
 }
 
-const MARGIN = 6
-/**
- * TODO: the wire format carries one sample per data word without its duration.
- * Until the baud rate is exposed, a box lasts until the next word, capped at
- * this nominal frame time (10 bits at 9600 baud).
- */
-const NOMINAL_FRAME_NS = 1_040_000
-
-export default function UartLane({ series, t0, t1, color }: Props) {
+export default function UartLane({ series, t0, t1, color, onHover }: Props) {
   const draw = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
     const x0 = PAD_L
     const x1 = w - PAD_R
-    const yTop = MARGIN
-    const yBot = h - MARGIN
+    const yTop = 6
+    const yBot = h - 6
 
     fillPreZero(ctx, t0, t1, x0, x1, h)
 
-    // idle line
     ctx.strokeStyle = '#ddd'
     ctx.lineWidth = 1
     ctx.beginPath()
@@ -54,7 +53,7 @@ export default function UartLane({ series, t0, t1, color }: Props) {
       const start = t[j]
       if (start > t1) break
       const next = j + 1 < t.length ? t[j + 1] : Infinity
-      const end = Math.min(next, start + NOMINAL_FRAME_NS)
+      const end = Math.min(next, start + UART_FRAME_NS)
       const xa = xOf(start)
       const xb = xOf(end)
       if (xb < x0) continue
@@ -75,8 +74,28 @@ export default function UartLane({ series, t0, t1, color }: Props) {
   }
 
   const [hostRef, canvasRef] = useCanvasDraw(draw)
+
+  const report = (ev: MouseEvent<HTMLDivElement>) => {
+    if (!onHover) return
+    const host = hostRef.current
+    if (!host) return
+    const time = timeFromClientX(ev.clientX, host, t0, t1)
+    if (time === null) {
+      onHover(null)
+      return
+    }
+    const lines = hoverUart(series, time)
+    onHover(lines ? { x: ev.clientX, y: ev.clientY, lines } : null)
+  }
+
   return (
-    <div className="lane-plot" style={{ height: UART_H }} ref={hostRef}>
+    <div
+      className="lane-plot"
+      style={{ height: UART_H }}
+      ref={hostRef}
+      onMouseMove={report}
+      onMouseLeave={() => onHover?.(null)}
+    >
       <canvas ref={canvasRef} />
     </div>
   )

@@ -1,17 +1,20 @@
+import type { MouseEvent } from 'react'
 import type { Series } from '../../hooks/probeStore'
 import { lastAtOrBefore } from '../../hooks/probeStore'
 import { DIGITAL_H, fillPreZero, PAD_L, PAD_R, useCanvasDraw } from './common'
+import { hoverAnalogDigital, timeFromClientX, type LaneHoverHandler } from './hover'
 
 interface Props {
   series: Series | undefined
   t0: number
   t1: number
   color: string
+  onHover?: LaneHoverHandler
 }
 
 const MARGIN = 6
 
-export default function DigitalLane({ series, t0, t1, color }: Props) {
+export default function DigitalLane({ series, t0, t1, color, onHover }: Props) {
   const draw = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
     const x0 = PAD_L
     const x1 = w - PAD_R
@@ -21,7 +24,6 @@ export default function DigitalLane({ series, t0, t1, color }: Props) {
 
     fillPreZero(ctx, t0, t1, x0, x1, h)
 
-    // level labels in the left gutter
     ctx.fillStyle = '#999'
     ctx.font = '10px sans-serif'
     ctx.textBaseline = 'middle'
@@ -29,7 +31,6 @@ export default function DigitalLane({ series, t0, t1, color }: Props) {
     ctx.fillText('H', x0 - 6, yHigh)
     ctx.fillText('L', x0 - 6, yLow)
 
-    // faint guides
     ctx.strokeStyle = '#eee'
     ctx.lineWidth = 1
     ctx.beginPath()
@@ -43,7 +44,6 @@ export default function DigitalLane({ series, t0, t1, color }: Props) {
     const { t, v } = series
     const span = t1 - t0
     const xOf = (time: number) => x0 + ((time - t0) / span) * (x1 - x0)
-    // 0 = HiZ (mid line), 1 = High (top), 2 = Low (bottom)
     const yOf = (level: number) => (level === 1 ? yHigh : level === 2 ? yLow : yMid)
 
     ctx.save()
@@ -71,8 +71,28 @@ export default function DigitalLane({ series, t0, t1, color }: Props) {
   }
 
   const [hostRef, canvasRef] = useCanvasDraw(draw)
+
+  const report = (ev: MouseEvent<HTMLDivElement>) => {
+    if (!onHover) return
+    const host = hostRef.current
+    if (!host) return
+    const time = timeFromClientX(ev.clientX, host, t0, t1)
+    if (time === null) {
+      onHover(null)
+      return
+    }
+    const lines = hoverAnalogDigital(series, time, 'digital')
+    onHover(lines ? { x: ev.clientX, y: ev.clientY, lines } : null)
+  }
+
   return (
-    <div className="lane-plot" style={{ height: DIGITAL_H }} ref={hostRef}>
+    <div
+      className="lane-plot"
+      style={{ height: DIGITAL_H }}
+      ref={hostRef}
+      onMouseMove={report}
+      onMouseLeave={() => onHover?.(null)}
+    >
       <canvas ref={canvasRef} />
     </div>
   )
