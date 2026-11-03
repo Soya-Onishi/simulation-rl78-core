@@ -69,7 +69,12 @@ fn main() {
             process::exit(1);
         }
     };
-    if let Err(err) = rt.block_on(http::serve(&listen, advertise, backend)) {
+    if let Err(err) = rt.block_on(http::serve(
+        &listen,
+        advertise,
+        backend,
+        cfg.web_root.clone(),
+    )) {
         eprintln!("simulation-frontend: {err}");
         process::exit(1);
     }

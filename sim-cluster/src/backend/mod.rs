@@ -13,7 +13,9 @@ pub use local::LocalBackend;
 pub use serve::serve_internal;
 pub use tcpip::{TcpipBackend, check_health};
 
-use crate::contract::{ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent};
+use crate::contract::{
+    ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent, TopologyView,
+};
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::topology::LogicalTopology;
 
@@ -26,6 +28,7 @@ pub trait SimulationBackend: Send + Sync {
     fn delete(&self, id: &str) -> Result<(), ApiError>;
     fn exists(&self, id: &str) -> Result<bool, ApiError>;
     fn status(&self, id: &str) -> Result<StatusEvent, ApiError>;
+    fn topology(&self, id: &str) -> Result<TopologyView, ApiError>;
     /// Logs with `seq > after`. Use the high-water mark at subscribe time for
     /// "from connection onward" streaming.
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError>;

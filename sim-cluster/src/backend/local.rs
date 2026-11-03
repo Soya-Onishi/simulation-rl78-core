@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
-use crate::contract::{ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent};
+use crate::contract::{
+    ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent, TopologyView,
+};
 use crate::host::HostCommand;
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::server::{Job, JobKind, JobReply};
@@ -104,6 +106,16 @@ impl SimulationBackend for LocalBackend {
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for status: {other:?}"
+            ))),
+        }
+    }
+
+    fn topology(&self, id: &str) -> Result<TopologyView, ApiError> {
+        match self.rpc(JobKind::GetTopology { id: id.to_string() })? {
+            JobReply::Topology(view) => Ok(view),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for topology: {other:?}"
             ))),
         }
     }

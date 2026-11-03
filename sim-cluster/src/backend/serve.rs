@@ -9,7 +9,7 @@ use axum::{Json, Router};
 
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
-    LogEvent, ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
+    LogEvent, ProbeSamplesResponse, StartSimulationRequest, StatusEvent, TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{
@@ -49,6 +49,7 @@ pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
         .route("/internal/simulations/{id}", axum::routing::delete(delete))
         .route("/internal/simulations/{id}/exists", get(exists))
         .route("/internal/simulations/{id}/status", get(status))
+        .route("/internal/simulations/{id}/topology", get(topology))
         .route("/internal/simulations/{id}/logs", get(logs_after))
         .route(
             "/internal/simulations/{id}/logs/high-water",
@@ -188,6 +189,14 @@ async fn status(
 ) -> Result<Json<StatusEvent>, ApiError> {
     let backend = state.backend.clone();
     Ok(Json(blocking(move || backend.status(&id)).await?))
+}
+
+async fn topology(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TopologyView>, ApiError> {
+    let backend = state.backend.clone();
+    Ok(Json(blocking(move || backend.topology(&id)).await?))
 }
 
 #[derive(serde::Deserialize)]

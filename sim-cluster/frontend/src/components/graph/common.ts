@@ -1,0 +1,108 @@
+import { useEffect, useRef, useState } from 'react'
+
+/** Left gutter inside every lane plot (uPlot y axis width; blank for canvas lanes). */
+export const PAD_L = 44
+export const PAD_R = 8
+export const DIGITAL_H = 36
+export const UART_H = 36
+export const ANALOG_H = 96
+
+/** Window steps, in nanoseconds. */
+export const WINDOW_STEPS: { label: string; ns: number }[] = [
+  { label: '1s', ns: 1e9 },
+  { label: '10s', ns: 10e9 },
+  { label: '1m', ns: 60e9 },
+  { label: '5m', ns: 300e9 },
+  { label: '10m', ns: 600e9 },
+  { label: '30m', ns: 1800e9 },
+  { label: '1h', ns: 3600e9 },
+]
+
+/** Stable colour derived from `${board}/${probe}`. */
+export function colorFor(key: string): string {
+  let h = 2166136261
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  const hue = (h >>> 0) % 360
+  return `hsl(${hue}, 65%, 38%)`
+}
+
+export function formatUart(value: number): string {
+  const hex = value.toString(16).toUpperCase().padStart(2, '0')
+  if (value >= 0x20 && value <= 0x7e) return `${hex}(${String.fromCharCode(value)})`
+  return hex
+}
+
+/** Tick label for a time axis with the given tick spacing (ns). */
+export function formatTick(ns: number, stepNs: number): string {
+  if (stepNs >= 1e9) {
+    const digits = Math.max(0, Math.ceil(-Math.log10(stepNs / 1e9) - 1e-9))
+    return `${(ns / 1e9).toFixed(digits)}s`
+  }
+  if (stepNs >= 1e6) {
+    const digits = Math.max(0, Math.ceil(-Math.log10(stepNs / 1e6) - 1e-9))
+    return `${(ns / 1e6).toFixed(digits)}ms`
+  }
+  if (stepNs >= 1e3) {
+    const digits = Math.max(0, Math.ceil(-Math.log10(stepNs / 1e3) - 1e-9))
+    return `${(ns / 1e3).toFixed(digits)}µs`
+  }
+  return `${Math.round(ns)}ns`
+}
+
+/** Pick a 1/2/5 × 10^k tick step giving roughly `target` ticks across `span`. */
+export function niceStep(span: number, target = 8): number {
+  const raw = span / target
+  const pow = 10 ** Math.floor(Math.log10(raw))
+  for (const m of [1, 2, 5, 10]) {
+    if (m * pow >= raw) return m * pow
+  }
+  return 10 * pow
+}
+
+export interface Size {
+  w: number
+  h: number
+}
+
+/** Tracks the pixel size of an element. */
+export function useElementSize<T extends HTMLElement>() {
+  const ref = useRef<T>(null)
+  const [size, setSize] = useState<Size>({ w: 0, h: 0 })
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const update = () => setSize({ w: el.clientWidth, h: el.clientHeight })
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, size] as const
+}
+
+/**
+ * Canvas filling its parent; `draw` is re-run whenever it changes (callers
+ * recreate it on every data tick) or the element is resized.
+ */
+export function useCanvasDraw(
+  draw: (ctx: CanvasRenderingContext2D, w: number, h: number) => void,
+) {
+  const [hostRef, size] = useElementSize<HTMLDivElement>()
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || size.w === 0 || size.h === 0) return
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = Math.round(size.w * dpr)
+    canvas.height = Math.round(size.h * dpr)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, size.w, size.h)
+    draw(ctx, size.w, size.h)
+  }, [draw, size])
+  return [hostRef, canvasRef] as const
+}

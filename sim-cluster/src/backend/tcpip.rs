@@ -208,6 +208,10 @@ impl SimulationBackend for TcpipBackend {
         self.get_json(&format!("/internal/simulations/{id}/status"))
     }
 
+    fn topology(&self, id: &str) -> Result<crate::contract::TopologyView, ApiError> {
+        self.get_json(&format!("/internal/simulations/{id}/topology"))
+    }
+
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError> {
         self.get_json(&format!("/internal/simulations/{id}/logs?after={after}"))
     }
@@ -421,6 +425,12 @@ mod tests {
                     state: "stopped".into(),
                 }],
             })
+        }
+        fn topology(&self, id: &str) -> Result<crate::contract::TopologyView, ApiError> {
+            if id != "sim-1" {
+                return Err(ApiError::not_found("unknown simulation"));
+            }
+            Ok(crate::contract::TopologyView::from_logical(&one_board()))
         }
         fn logs_after(&self, _id: &str, _after: u64) -> Result<Vec<LogEvent>, ApiError> {
             Ok(vec![])

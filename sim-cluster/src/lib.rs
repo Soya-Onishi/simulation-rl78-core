@@ -43,7 +43,7 @@ pub use contract::{
     ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, AttachGdbRequest,
     CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, GdbSshCommand,
     InvokeActionRequest, LogEvent, ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest,
-    StatusEvent, prepare_create_topology,
+    StatusEvent, TopologyBoardView, TopologyView, prepare_create_topology,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;

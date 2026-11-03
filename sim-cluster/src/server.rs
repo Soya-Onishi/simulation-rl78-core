@@ -18,7 +18,7 @@ use crate::action::{ActionRequest, ActionUpstream};
 use crate::backend::LocalBackend;
 use crate::contract::{
     ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
-    StatusEvent, prepare_create_topology,
+    StatusEvent, TopologyView, prepare_create_topology,
 };
 use crate::host::{HostCommand, SessionNode};
 use crate::inspect::{InspectReply, InspectRequest, inspect_rpc, inspect_sock_path};
@@ -169,6 +169,9 @@ pub enum JobKind {
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     },
+    GetTopology {
+        id: String,
+    },
     ViewerAttach {
         id: String,
     },
@@ -213,6 +216,7 @@ pub enum JobReply {
     },
     ProbeCsvPoll(crate::probe_log::CsvPoll),
     ProbeSamples(ProbeSamplesResponse),
+    Topology(TopologyView),
     ViewerToken(String),
     Inspect(InspectReply),
     Err(ApiError),
@@ -227,6 +231,7 @@ type IoxNode = Node<ipc::Service>;
 struct Simulation {
     id: String,
     topo_path: PathBuf,
+    topology: TopologyView,
     child: Option<Child>,
     host: ServerHostPort,
     state: String,
@@ -355,6 +360,10 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         JobKind::Exists { id } => JobReply::Exists(world.sims.contains_key(&id)),
         JobKind::GetStatus { id } => match world.sims.get(&id) {
             Some(sim) => JobReply::Status(status_event(sim)),
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
+        },
+        JobKind::GetTopology { id } => match world.sims.get(&id) {
+            Some(sim) => JobReply::Topology(sim.topology.clone()),
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
         JobKind::GetLogs { id, after } => match world.sims.get(&id) {
@@ -536,6 +545,7 @@ fn create_simulation(
     let probe_ctrl = ServerProbeCtrl::create(&iox, &id, topo.boards.len())?;
     let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
         .map_err(ServerError::Message)?;
+    let topology = TopologyView::from_logical(&topo);
     let topo_path = write_temp_topology(&topo)?;
     let child = Command::new(&opts.arbiter_bin)
         .arg("--topology")
@@ -560,6 +570,7 @@ fn create_simulation(
     Ok(Simulation {
         id,
         topo_path,
+        topology,
         child: Some(child),
         host,
         state: "stopped".into(),

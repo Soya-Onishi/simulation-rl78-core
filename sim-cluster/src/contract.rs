@@ -159,6 +159,40 @@ pub struct ProbeSamplesResponse {
     pub samples: Vec<ProbeSampleJson>,
 }
 
+/// One board in `GET /api/simulation/{id}/topology` (no `elf`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyBoardView {
+    pub id: String,
+    pub kind: String,
+    pub endpoints: Vec<crate::topology::EndpointSpec>,
+}
+
+/// Wiring-diagram topology without firmware blobs or timing knobs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyView {
+    pub boards: Vec<TopologyBoardView>,
+    pub edges: Vec<crate::topology::DirectedEdge>,
+}
+
+impl TopologyView {
+    /// Drop `elf` and margin fields from a create-time topology.
+    #[must_use]
+    pub fn from_logical(topo: &LogicalTopology) -> Self {
+        Self {
+            boards: topo
+                .boards
+                .iter()
+                .map(|board| TopologyBoardView {
+                    id: board.id.clone(),
+                    kind: board.kind.clone(),
+                    endpoints: board.endpoints.clone(),
+                })
+                .collect(),
+            edges: topo.edges.clone(),
+        }
+    }
+}
+
 /// Uniform API error envelope: `{"error":{"code","message"}}`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorBody {

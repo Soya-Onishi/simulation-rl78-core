@@ -1,7 +1,8 @@
-//! Axum HTTP surface for the cluster control plane and embedded UI.
+//! Axum HTTP surface for the cluster control plane and static React UI.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,17 +17,17 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
+use tower_http::services::ServeDir;
 
 use crate::backend::SimulationBackend;
 use crate::contract::{
     ActionList, ApiError, AttachGdbRequest, CreateSimulationRequest, CreateSimulationResponse,
     GdbSessionInfo, GdbSshCommand, InvokeActionRequest, ProbeSamplesResponse,
-    StartSimulationRequest, StatusEvent, prepare_create_topology,
+    StartSimulationRequest, StatusEvent, TopologyView, prepare_create_topology,
 };
 use crate::gdb::GdbSlot;
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{self, ProbeRange, ProbeRef};
-use crate::web::PAGE_HTML;
 
 /// For ELF Size, max body size must be changed.
 const MAX_BODY: usize = 64 * 1024 * 1024;
@@ -36,6 +37,7 @@ pub struct AppState {
     pub backend: Arc<dyn SimulationBackend>,
     gdb: Arc<Mutex<HashMap<String, GdbSlot>>>,
     advertise_host: String,
+    web_root: PathBuf,
 }
 
 impl IntoResponse for ApiError {
@@ -46,11 +48,17 @@ impl IntoResponse for ApiError {
 }
 
 /// Build the application router (API under `/api`, UI at `/{id}`).
-pub fn router(backend: Arc<dyn SimulationBackend>, advertise_host: impl Into<String>) -> Router {
+pub fn router(
+    backend: Arc<dyn SimulationBackend>,
+    advertise_host: impl Into<String>,
+    web_root: PathBuf,
+) -> Router {
+    let assets = web_root.join("assets");
     let state = AppState {
         backend,
         gdb: Arc::new(Mutex::new(HashMap::new())),
         advertise_host: advertise_host.into(),
+        web_root,
     };
     Router::new()
         .route("/api/simulation", post(create_simulation))
@@ -65,6 +73,7 @@ pub fn router(backend: Arc<dyn SimulationBackend>, advertise_host: impl Into<Str
             "/api/simulation/{id}",
             get(simulation_status).delete(delete_simulation),
         )
+        .route("/api/simulation/{id}/topology", get(simulation_topology))
         .route(
             "/api/simulation/{id}/gdb",
             get(gdb_get).post(gdb_attach).delete(gdb_detach),
@@ -88,15 +97,33 @@ pub fn router(backend: Arc<dyn SimulationBackend>, advertise_host: impl Into<Str
             get(probes_csv_status),
         )
         .route("/{id}", get(simulation_page))
+        .nest_service("/assets", ServeDir::new(assets))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
 }
 
 async fn simulation_page(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match ensure_exists(&state, &id).await {
-        Ok(()) => Html(PAGE_HTML).into_response(),
+        Ok(()) => match tokio::fs::read_to_string(state.web_root.join("index.html")).await {
+            Ok(html) => Html(html).into_response(),
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn simulation_topology(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ViewerParam>,
+) -> Result<Json<TopologyView>, ApiError> {
+    require_viewer(&state, &id, &headers, &query).await?;
+    let backend = state.backend.clone();
+    let view = tokio::task::spawn_blocking(move || backend.topology(&id))
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))??;
+    Ok(Json(view))
 }
 
 async fn create_simulation(
@@ -912,8 +939,9 @@ pub async fn serve(
     listen: &str,
     advertise_host: impl Into<String>,
     backend: Arc<dyn SimulationBackend>,
+    web_root: PathBuf,
 ) -> Result<(), std::io::Error> {
-    let app = router(backend, advertise_host);
+    let app = router(backend, advertise_host, web_root);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     eprintln!("simulation-frontend listening on http://{addr}");
