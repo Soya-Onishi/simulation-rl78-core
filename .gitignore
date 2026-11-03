@@ -11,3 +11,6 @@
 .venv/
 python/**/out/
 out/
+
+# Web UI (sim-cluster/frontend)
+node_modules/

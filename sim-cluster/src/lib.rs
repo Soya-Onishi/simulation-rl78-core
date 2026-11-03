@@ -30,7 +30,6 @@ mod probe_log;
 pub mod server;
 pub mod time_sync;
 pub mod topology;
-pub mod web;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
@@ -43,7 +42,7 @@ pub use contract::{
     ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, AttachGdbRequest,
     CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, GdbSshCommand,
     InvokeActionRequest, LogEvent, ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest,
-    StatusEvent, prepare_create_topology,
+    StatusEvent, TopologyBoardView, TopologyView, prepare_create_topology,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;

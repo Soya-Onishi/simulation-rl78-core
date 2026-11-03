@@ -224,6 +224,10 @@ impl SimulationBackend for TcpipBackend {
         self.get_json(&format!("/internal/simulations/{id}/status"))
     }
 
+    fn topology(&self, id: &str) -> Result<crate::contract::TopologyView, ApiError> {
+        self.get_json(&format!("/internal/simulations/{id}/topology"))
+    }
+
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError> {
         self.get_json(&format!("/internal/simulations/{id}/logs?after={after}"))
     }
@@ -415,6 +419,12 @@ mod tests {
                 }],
             })
         }
+        fn topology(&self, id: &str) -> Result<crate::contract::TopologyView, ApiError> {
+            if id != "sim-1" {
+                return Err(ApiError::not_found("unknown simulation"));
+            }
+            Ok(crate::contract::TopologyView::from_logical(&one_board()))
+        }
         fn logs_after(&self, _id: &str, _after: u64) -> Result<Vec<LogEvent>, ApiError> {
             Ok(vec![])
         }
@@ -562,6 +572,10 @@ mod tests {
         backend.reset(&id).unwrap();
         assert!(backend.exists(&id).unwrap());
         assert_eq!(backend.status(&id).unwrap().id, "sim-1");
+        let topo = backend.topology(&id).unwrap();
+        assert_eq!(topo.boards.len(), 1);
+        assert_eq!(topo.boards[0].id, "mcu-a");
+        assert!(topo.boards[0].kind == "rl78");
         assert!(backend.logs_after(&id, 0).unwrap().is_empty());
         assert_eq!(backend.log_high_water(&id).unwrap(), 7);
         assert!(backend.actions(&id).unwrap().actions.is_empty());

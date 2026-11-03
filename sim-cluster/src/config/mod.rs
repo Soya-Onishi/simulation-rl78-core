@@ -208,15 +208,22 @@ mod tests {
 
     #[test]
     fn frontend_yaml_round_trip() {
-        let file = write_temp(
-            "frontend",
-            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers:\n  - ip: 127.0.0.1\n    port: 8091\n",
-        );
-        let cfg = FrontendConfig::load(file.path()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+        let yaml = dir.path().join("frontend.yaml");
+        std::fs::write(
+            &yaml,
+            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers:\n  - ip: 127.0.0.1\n    port: 8091\nweb_root: web\n",
+        )
+        .unwrap();
+        let cfg = FrontendConfig::load(&yaml).unwrap();
         assert_eq!(cfg.listen.ip, "127.0.0.1");
         assert_eq!(cfg.listen.port, 8090);
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].port, 8091);
+        assert_eq!(cfg.web_root, web);
     }
 
     #[test]
@@ -238,11 +245,17 @@ mod tests {
 
     #[test]
     fn empty_servers_rejected() {
-        let file = write_temp(
-            "empty-servers",
-            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers: []\n",
-        );
-        let err = FrontendConfig::load(file.path()).unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+        let yaml = dir.path().join("frontend.yaml");
+        std::fs::write(
+            &yaml,
+            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers: []\nweb_root: web\n",
+        )
+        .unwrap();
+        let err = FrontendConfig::load(&yaml).unwrap_err();
         assert!(err.to_string().contains("servers"), "{err}");
     }
 
@@ -276,8 +289,13 @@ mod tests {
 
     #[test]
     fn example_yaml_files_load() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../example/config");
-        FrontendConfig::load(&root.join("frontend.yaml")).unwrap();
-        BackendConfig::load(&root.join("backend.yaml")).unwrap();
+        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../example/config");
+        BackendConfig::load(&example.join("backend.yaml")).unwrap();
+
+        // frontend.yaml under example/ points at the Vite build output (gitignored).
+        // Load a checked-in fixture so clean checkouts do not need `npm run build`.
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/frontend.yaml");
+        let cfg = FrontendConfig::load(&fixture).unwrap();
+        assert!(cfg.web_root.join("index.html").is_file());
     }
 }

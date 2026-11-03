@@ -20,11 +20,19 @@ pub struct ServerAddr {
 pub struct FrontendConfig {
     pub listen: ListenAddr,
     pub servers: Vec<ServerAddr>,
+    /// Directory of the Vite build (`index.html` + `assets/`).
+    ///
+    /// Relative paths are resolved from the directory that contains the YAML.
+    pub web_root: std::path::PathBuf,
 }
 
 impl FrontendConfig {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let cfg: Self = super::load_yaml(path)?;
+        let mut cfg: Self = super::load_yaml(path)?;
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        if !cfg.web_root.is_absolute() {
+            cfg.web_root = base.join(&cfg.web_root);
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -40,6 +48,18 @@ impl FrontendConfig {
         for (index, server) in self.servers.iter().enumerate() {
             validate_ip_or_hostname(&server.ip, &format!("servers[{index}].ip"))?;
             validate_port(server.port, &format!("servers[{index}].port"))?;
+        }
+        if !self.web_root.is_dir() {
+            return Err(ConfigError::Message(format!(
+                "web_root: not a directory: {} (run `npm run build` in sim-cluster/frontend)",
+                self.web_root.display()
+            )));
+        }
+        if !self.web_root.join("index.html").is_file() {
+            return Err(ConfigError::Message(format!(
+                "web_root: missing index.html under {} (run `npm run build` in sim-cluster/frontend)",
+                self.web_root.display()
+            )));
         }
         Ok(())
     }
