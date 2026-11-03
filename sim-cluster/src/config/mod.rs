@@ -127,9 +127,6 @@ pub fn validate_port(port: u16, field: &str) -> Result<(), ConfigError> {
 }
 
 fn is_valid_ip_or_hostname(value: &str) -> bool {
-    if value.is_empty() || value.chars().all(char::is_whitespace) {
-        return false;
-    }
     if value.parse::<Ipv4Addr>().is_ok() {
         return true;
     }
