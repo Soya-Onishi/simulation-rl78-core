@@ -7,6 +7,7 @@ import {
   clampViewEnd,
   formatViewTime,
   RETAIN_NS,
+  DEFAULT_TICK_STEP_INDEX,
   TICK_STEPS,
   viewExpired,
   windowNsForTick,
@@ -76,7 +77,9 @@ function PreZeroOverlay({ t0, t1 }: { t0: number; t1: number }) {
 }
 
 export default function GraphView({ store, catalog, watched, virtualTimeNs }: Props) {
-  const [stepIdx, setStepIdx] = useState(1)
+  const [stepIdx, setStepIdx] = useState(
+    DEFAULT_TICK_STEP_INDEX >= 0 ? DEFAULT_TICK_STEP_INDEX : 0,
+  )
   const [followLive, setFollowLive] = useState(true)
   const [viewEndNs, setViewEndNs] = useState(0)
   const liveEndRef = useRef(0)

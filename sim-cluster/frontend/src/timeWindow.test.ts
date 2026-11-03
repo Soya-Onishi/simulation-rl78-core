@@ -11,10 +11,12 @@ import {
 } from './timeWindow'
 
 describe('timeWindow', () => {
-  it('uses 10 ticks per window and a 10ms minimum tick', () => {
+  it('uses 10 ticks per window and a 10µs minimum tick', () => {
     expect(TICKS_PER_WINDOW).toBe(10)
-    expect(TICK_STEPS[0].tickNs).toBe(10e6)
-    expect(windowNsForTick(TICK_STEPS[0].tickNs)).toBe(100e6)
+    expect(TICK_STEPS[0].tickNs).toBe(10e3)
+    expect(TICK_STEPS[0].label).toBe('10µs')
+    // Label is the grid duration; window is 10 grids.
+    expect(windowNsForTick(100e6)).toBe(1e9)
   })
 
   it('advances the live end only after a full tick is measured', () => {
@@ -39,6 +41,7 @@ describe('timeWindow', () => {
 
   it('formats view times for the range label', () => {
     expect(formatViewTime(0)).toBe('0ns')
+    expect(formatViewTime(12.5e3)).toBe('12.5µs')
     expect(formatViewTime(1.5e9)).toBe('1.500s')
   })
 })
