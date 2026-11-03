@@ -39,6 +39,12 @@ describe('layoutUartBoxes', () => {
     expect(boxes[0].x0).toBeCloseTo(boxes[1].x0)
   })
 
+  it('hit-tests the topmost overlapping box (later paint wins)', () => {
+    const boxes = layoutUartBoxes([1e6, 1e6], [0x41, 0x42], 0, 10e6, 0, 1000)
+    const x = (boxes[0].x0 + boxes[0].x1) / 2
+    expect(hitUartBox(boxes, x)?.value).toBe(0x42)
+  })
+
   it('uses the nominal frame length when the next word is farther away', () => {
     const t0 = 0
     const t1 = 10e6

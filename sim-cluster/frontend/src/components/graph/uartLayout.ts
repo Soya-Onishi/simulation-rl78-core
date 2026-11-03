@@ -51,8 +51,10 @@ export function layoutUartBoxes(
   return boxes
 }
 
+/** Prefer the last matching box so hit-testing matches paint order (later on top). */
 export function hitUartBox(boxes: UartBox[], x: number): UartBox | null {
-  for (const box of boxes) {
+  for (let i = boxes.length - 1; i >= 0; i--) {
+    const box = boxes[i]
     if (x >= box.x0 && x < box.x1) return box
   }
   return null

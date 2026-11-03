@@ -70,6 +70,10 @@ export default function UartLane({ series, t0, t1, color, onHover }: Props) {
     }
     const rect = host.getBoundingClientRect()
     const x = ev.clientX - rect.left
+    if (x < PAD_L || x > rect.width - PAD_R) {
+      onHover(null)
+      return
+    }
     const boxes = layoutUartBoxes(series.t, series.v, t0, t1, PAD_L, rect.width - PAD_R)
     const hit = hitUartBox(boxes, x)
     if (!hit) {
