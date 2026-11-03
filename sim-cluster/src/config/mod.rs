@@ -292,8 +292,13 @@ mod tests {
 
     #[test]
     fn example_yaml_files_load() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../example/config");
-        FrontendConfig::load(&root.join("frontend.yaml")).unwrap();
-        BackendConfig::load(&root.join("backend.yaml")).unwrap();
+        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../example/config");
+        BackendConfig::load(&example.join("backend.yaml")).unwrap();
+
+        // frontend.yaml under example/ points at the Vite build output (gitignored).
+        // Load a checked-in fixture so clean checkouts do not need `npm run build`.
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/frontend.yaml");
+        let cfg = FrontendConfig::load(&fixture).unwrap();
+        assert!(cfg.web_root.join("index.html").is_file());
     }
 }
