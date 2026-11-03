@@ -83,8 +83,8 @@ function Simulation({ simId }: { simId: string }) {
       <main className="area-main pane">
         <Tabs
           tabs={[
-            { id: 'graph', label: 'Graph' },
             { id: 'wiring', label: 'Wiring' },
+            { id: 'graph', label: 'Graph' },
           ]}
           value={mainTab}
           onChange={setMainTab}
