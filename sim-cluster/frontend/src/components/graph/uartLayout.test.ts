@@ -29,6 +29,16 @@ describe('layoutUartBoxes', () => {
     expect(boxes[1].x0).toBeGreaterThan(boxes[0].x0)
   })
 
+  it('keeps a non-zero width when consecutive words share a timestamp', () => {
+    const t0 = 0
+    const t1 = 10e6
+    const boxes = layoutUartBoxes([1e6, 1e6], [0x41, 0x42], t0, t1, 0, 1000)
+    expect(boxes).toHaveLength(2)
+    expect(boxes[0].x1 - boxes[0].x0).toBeGreaterThan(0)
+    expect(boxes[1].x1 - boxes[1].x0).toBeGreaterThan(0)
+    expect(boxes[0].x0).toBeCloseTo(boxes[1].x0)
+  })
+
   it('uses the nominal frame length when the next word is farther away', () => {
     const t0 = 0
     const t1 = 10e6

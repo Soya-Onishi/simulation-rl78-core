@@ -32,10 +32,15 @@ export function layoutUartBoxes(
   for (let i = 0; i < times.length; i++) {
     const tStart = times[i]
     if (tStart > viewT1) break
-    const tEnd =
-      i + 1 < times.length
-        ? Math.min(tStart + UART_FRAME_NS, times[i + 1])
-        : tStart + UART_FRAME_NS
+    // Clip to the next strictly-later sample so same-timestamp words keep a
+    // non-zero width (they may overlap; that beats vanishing at width 0).
+    let tEnd = tStart + UART_FRAME_NS
+    for (let j = i + 1; j < times.length; j++) {
+      if (times[j] > tStart) {
+        tEnd = Math.min(tEnd, times[j])
+        break
+      }
+    }
     if (tEnd <= viewT0) continue
 
     const x0 = xOf(tStart)
