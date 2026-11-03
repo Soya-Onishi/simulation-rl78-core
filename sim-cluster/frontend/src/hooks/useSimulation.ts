@@ -108,7 +108,7 @@ export function useSimulation(simId: string) {
     let catalogReady = false
     let catalogConnecting = false
     const connectProbes = async () => {
-      if (catalogReady || catalogConnecting) return
+      if (closed || catalogReady || catalogConnecting) return
       catalogConnecting = true
       try {
         try {
@@ -119,15 +119,19 @@ export function useSimulation(simId: string) {
             return
           }
         }
+        if (closed) return
         store.clear()
         try {
           const items = await client.probeCatalog()
+          if (closed) return
           catalogReady = true
           catalogRef.current = items
           setCatalog(items)
           setWatchedState(new Set())
+          setCommandError('')
           openProbeStream()
         } catch (err) {
+          if (closed) return
           if (client.isBusy(err)) goBusyRef.current()
           else if (!(err instanceof Error && err.message.includes('not ready'))) {
             setCommandError(messageOf(err))
@@ -212,7 +216,8 @@ export function useSimulation(simId: string) {
       if (prev !== client.token) {
         // Token rotated: live streams must be re-opened with the new one.
         openStatusAndLog()
-        openProbeStream()
+        if (catalogReady) openProbeStream()
+        else void connectProbes()
       }
     })
 
