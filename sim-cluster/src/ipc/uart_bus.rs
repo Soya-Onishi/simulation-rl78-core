@@ -95,6 +95,81 @@ impl NodeUartPorts {
     }
 }
 
+/// Arbiter-side UART endpoints for cross-machine edges.
+///
+/// A cross edge has one local board and one remote board. The local board's
+/// Node already holds its own end of the SPSC service, so the arbiter opens the
+/// *other* end: a subscriber where the local board transmits (`egress`, the
+/// arbiter ships the frames to the peer) and a publisher where the local board
+/// receives (`ingress`, frames arriving from the peer are published to it).
+/// Same-machine edges are never passed here.
+pub struct ProxyUartPorts {
+    egress: HashMap<String, UartSub>,
+    ingress: HashMap<String, UartPub>,
+}
+
+impl ProxyUartPorts {
+    /// `egress` / `ingress` hold UART edges only (others are ignored).
+    pub fn open(
+        node: &Node<ipc::Service>,
+        cluster_key: &str,
+        egress: &[&DirectedEdge],
+        ingress: &[&DirectedEdge],
+    ) -> Result<Self, IpcError> {
+        let mut out = Self {
+            egress: HashMap::new(),
+            ingress: HashMap::new(),
+        };
+        for edge in egress.iter().filter(|e| e.payload == PayloadKind::Uart) {
+            let (id, name, capacity) = uart_edge_service(cluster_key, edge);
+            let sub = open_or_create_uart_subscriber(node, &name, capacity)?;
+            out.egress.insert(id, sub);
+        }
+        for edge in ingress.iter().filter(|e| e.payload == PayloadKind::Uart) {
+            let (id, name, capacity) = uart_edge_service(cluster_key, edge);
+            let puber = open_or_create_uart_publisher(node, &name, capacity)?;
+            out.ingress.insert(id, puber);
+        }
+        Ok(out)
+    }
+
+    /// Next frame the local board sent on `edge_id`, if any.
+    pub fn receive(&self, edge_id: &str) -> Result<Option<UartFrame>, IpcError> {
+        let Some(sub) = self.egress.get(edge_id) else {
+            return Ok(None);
+        };
+        Ok(sub
+            .receive()
+            .map_err(|e| IpcError::Message(format!("uart proxy recv {edge_id}: {e:?}")))?
+            .map(|sample| *sample))
+    }
+
+    /// Deliver `frame` to the local board on `edge_id`.
+    pub fn publish(&self, edge_id: &str, frame: UartFrame) -> Result<(), IpcError> {
+        let Some(puber) = self.ingress.get(edge_id) else {
+            return Err(IpcError::Message(format!(
+                "no uart proxy publisher for {edge_id}"
+            )));
+        };
+        puber
+            .send_copy(frame)
+            .map_err(|e| IpcError::Message(format!("uart proxy send {edge_id}: {e:?}")))?;
+        Ok(())
+    }
+}
+
+fn uart_edge_service(cluster_key: &str, edge: &DirectedEdge) -> (String, String, usize) {
+    let id = names::edge_id(
+        &edge.from_board,
+        &edge.from_endpoint,
+        &edge.to_board,
+        &edge.to_endpoint,
+    );
+    let name = names::uart_edge(cluster_key, &id);
+    let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
+    (id, name, capacity)
+}
+
 fn open_or_create_uart_publisher(
     node: &Node<ipc::Service>,
     name: &str,

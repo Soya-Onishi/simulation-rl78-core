@@ -88,20 +88,28 @@ pub enum LogOrigin {
 /// One log sample on the node→arbiter and arbiter→server buses.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
-pub enum ClusterLog {
-    Record {
-        /// Board hash when [`LogOrigin::Node`]; `0` for the arbiter.
-        board_hash: u64,
-        level: LogLevel,
-        origin: LogOrigin,
-        text_len: u16,
-        text: [u8; LOG_TEXT_CAP],
-    },
+pub struct ClusterLog {
+    /// Board hash when [`LogOrigin::Node`]; `0` for the arbiter.
+    board_hash: u64,
+    level: LogLevel,
+    origin: LogOrigin,
+    /// Virtual time (ns) of the producing process when the line was logged.
+    /// `0` until the process has reported a virtual time. The frontend
+    /// orders log lines of several backends by this value.
+    virtual_time_ns: u64,
+    text_len: u16,
+    text: [u8; LOG_TEXT_CAP],
 }
 
 impl ClusterLog {
     #[must_use]
-    pub fn record(level: LogLevel, origin: LogOrigin, board_hash: u64, text: &str) -> Self {
+    pub fn record(
+        level: LogLevel,
+        origin: LogOrigin,
+        board_hash: u64,
+        text: &str,
+        virtual_time_ns: u64,
+    ) -> Self {
         let fitted = fit_text(text, LOG_TEXT_CAP);
         let mut buf = [0u8; LOG_TEXT_CAP];
         buf[..fitted.len()].copy_from_slice(fitted.as_bytes());
@@ -109,44 +117,40 @@ impl ClusterLog {
             LogOrigin::Arbiter => 0,
             LogOrigin::Node => board_hash,
         };
-        Self::Record {
+        Self {
             board_hash,
             level,
             origin,
+            virtual_time_ns,
             text_len: fitted.len() as u16,
             text: buf,
         }
     }
 
     #[must_use]
+    pub fn virtual_time_ns(self) -> u64 {
+        self.virtual_time_ns
+    }
+
+    #[must_use]
     pub fn level(self) -> LogLevel {
-        match self {
-            Self::Record { level, .. } => level,
-        }
+        self.level
     }
 
     #[must_use]
     pub fn origin(self) -> LogOrigin {
-        match self {
-            Self::Record { origin, .. } => origin,
-        }
+        self.origin
     }
 
     #[must_use]
     pub fn board_hash(self) -> u64 {
-        match self {
-            Self::Record { board_hash, .. } => board_hash,
-        }
+        self.board_hash
     }
 
     #[must_use]
     pub fn text(&self) -> &str {
-        match self {
-            Self::Record { text, text_len, .. } => {
-                let n = (*text_len as usize).min(text.len());
-                std::str::from_utf8(&text[..n]).unwrap_or("")
-            }
-        }
+        let n = (self.text_len as usize).min(self.text.len());
+        std::str::from_utf8(&self.text[..n]).unwrap_or("")
     }
 
     /// `[{level}] arbiter: …` or `[{level}] node {id}: …`.
@@ -228,7 +232,7 @@ mod tests {
 
     #[test]
     fn render_names_arbiter_and_node() {
-        let arb = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 99, "Start broadcast");
+        let arb = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 99, "Start broadcast", 0);
         assert_eq!(arb.origin(), LogOrigin::Arbiter);
         assert_eq!(arb.board_hash(), 0);
         assert_eq!(
@@ -236,7 +240,7 @@ mod tests {
             "[info] arbiter: Start broadcast"
         );
 
-        let node = ClusterLog::record(LogLevel::Warn, LogOrigin::Node, 7, "duplicate Ready");
+        let node = ClusterLog::record(LogLevel::Warn, LogOrigin::Node, 7, "duplicate Ready", 0);
         assert_eq!(
             node.render(|h| if h == 7 { Some("mcu0") } else { None }),
             "[warn] node mcu0: duplicate Ready"
@@ -248,9 +252,17 @@ mod tests {
     }
 
     #[test]
+    fn record_stores_virtual_time_ns() {
+        let record = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 0, "hi", 1_500);
+        assert_eq!(record.virtual_time_ns(), 1_500);
+        assert_eq!(record.text(), "hi");
+        assert_eq!(record.level(), LogLevel::Info);
+    }
+
+    #[test]
     fn long_text_is_cut_on_a_char_boundary() {
         let text = format!("start-{}-end", "あ".repeat(80));
-        let record = ClusterLog::record(LogLevel::Debug, LogOrigin::Arbiter, 0, &text);
+        let record = ClusterLog::record(LogLevel::Debug, LogOrigin::Arbiter, 0, &text, 0);
         let shown = record.text();
         assert!(shown.len() <= LOG_TEXT_CAP);
         assert!(shown.is_char_boundary(shown.len()));

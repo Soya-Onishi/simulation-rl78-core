@@ -225,6 +225,7 @@ pub fn run_node<E: Entity>(
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
+        crate::ipc::set_log_virtual_time_ns(sim.entity().now().0);
         while let Some(msg) = control.try_recv()? {
             if let ControlToNode::StartupRecord {
                 headroom_threshold_ns: thr,
@@ -350,6 +351,7 @@ pub fn run_node<E: Entity>(
             match sim.poll() {
                 Some(Response::Stopped(reason)) => {
                     let virtual_time_ns = sim.entity().now().0;
+                    crate::ipc::set_log_virtual_time_ns(virtual_time_ns);
                     maybe_time_report(
                         &control,
                         board_hash,
@@ -473,6 +475,7 @@ fn perform_local_step<E: Entity>(
         match sim.poll() {
             Some(Response::Stopped(reason)) => {
                 let virtual_time_ns = sim.entity().now().0;
+                crate::ipc::set_log_virtual_time_ns(virtual_time_ns);
                 control.publish(&ControlToArbiter::TimeReport {
                     from: board_hash,
                     virtual_time_ns,

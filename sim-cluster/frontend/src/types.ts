@@ -20,6 +20,7 @@ export interface LogEvent {
   origin: string
   board?: string | null
   text: string
+  virtual_time_ns?: number
 }
 
 export interface ProbeCatalogItem {

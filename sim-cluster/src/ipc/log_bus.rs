@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::thread::{self, JoinHandle};
@@ -117,12 +117,13 @@ impl LogQueue {
         }
     }
 
-    fn push_text(&self, level: LogLevel, text: &str) {
+    fn push_text(&self, level: LogLevel, text: &str, virtual_time_ns: u64) {
         self.push(ClusterLog::record(
             level,
             self.origin,
             self.board_hash,
             text,
+            virtual_time_ns,
         ));
     }
 
@@ -213,6 +214,18 @@ impl Drop for ArbiterLogBus {
 
 static PROCESS_LOG: RwLock<Option<Arc<LogQueue>>> = RwLock::new(None);
 
+/// Virtual time (ns) stamped on every record this process logs from now on.
+static LOG_VIRTUAL_TIME_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Tell the log bus the producer's current virtual time.
+///
+/// The arbiter passes its time-sync ceiling; a node passes its simulator clock.
+/// Each record logged afterwards carries the latest value, which lets the
+/// frontend order lines from several backends by virtual time.
+pub fn set_log_virtual_time_ns(virtual_time_ns: u64) {
+    LOG_VIRTUAL_TIME_NS.store(virtual_time_ns, Ordering::Relaxed);
+}
+
 struct ProcessLog;
 
 impl log::Log for ProcessLog {
@@ -228,7 +241,11 @@ impl log::Log for ProcessLog {
         else {
             return;
         };
-        queue.push_text(level_from_log(record.level()), &record.args().to_string());
+        queue.push_text(
+            level_from_log(record.level()),
+            &record.args().to_string(),
+            LOG_VIRTUAL_TIME_NS.load(Ordering::Relaxed),
+        );
     }
 
     fn flush(&self) {}
@@ -520,6 +537,7 @@ mod tests {
 
         let hash = board_id_hash("mcu0");
         let _node_log = NodeLog::start(&root, &key, hash, 1).unwrap();
+        set_log_virtual_time_ns(4_242);
         log::info!("Ready");
 
         let mut got_node = false;
@@ -531,6 +549,7 @@ mod tests {
                         assert_eq!(record.board_hash(), hash);
                         assert_eq!(record.level(), LogLevel::Info);
                         assert_eq!(record.text(), "Ready");
+                        assert_eq!(record.virtual_time_ns(), 4_242);
                         got_node = true;
                     }
                     LogOrigin::Arbiter => {

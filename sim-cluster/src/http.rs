@@ -408,8 +408,7 @@ fn status_event_stream(
                                     || prev.state != status.state
                                     || prev.stop_reason != status.stop_reason
                                     || prev.nodes != status.nodes;
-                                let vt_changed =
-                                    prev.virtual_time_ns != status.virtual_time_ns;
+                                let vt_changed = prev.virtual_time_ns != status.virtual_time_ns;
                                 (fields_changed, vt_changed)
                             }
                         };

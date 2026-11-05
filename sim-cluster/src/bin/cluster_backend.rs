@@ -3,6 +3,7 @@
 use std::env;
 use std::process;
 
+use sim_cluster::backend::BackendInfo;
 use sim_cluster::config::{BackendConfig, ConfigCli};
 use sim_cluster::{ServerOptions, run_backend};
 
@@ -29,14 +30,22 @@ fn main() {
         }
     };
 
-    let opts = match ServerOptions::from_current_exe() {
+    let mut opts = match ServerOptions::from_current_exe(cfg.advertise_ip.clone()) {
         Ok(opts) => opts,
         Err(err) => {
             eprintln!("cluster-backend: {err}");
             process::exit(1);
         }
     };
-    if let Err(err) = run_backend(&cfg.listen.socket_addr(), opts) {
+    opts.time_sync_period_ms = cfg.time_sync_period_ms;
+    opts.data_udp_window = cfg.data_udp_window;
+    let info = BackendInfo {
+        max_boards: cfg.max_boards,
+        time_sync_period_ms: cfg.time_sync_period_ms,
+        data_udp_window: cfg.data_udp_window,
+        multicast_base: cfg.multicast_base.clone(),
+    };
+    if let Err(err) = run_backend(&cfg.listen.socket_addr(), opts, info) {
         eprintln!("cluster-backend: {err}");
         process::exit(1);
     }
