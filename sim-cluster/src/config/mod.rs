@@ -228,19 +228,115 @@ mod tests {
 
     #[test]
     fn backend_yaml_round_trip() {
-        let file = write_temp("backend", "listen:\n  ip: 127.0.0.1\n  port: 8091\n");
+        let file = write_temp("backend", &backend::test_backend_yaml("127.0.0.1", 8091));
         let cfg = BackendConfig::load(file.path()).unwrap();
         assert_eq!(cfg.listen.port, 8091);
+        assert_eq!(cfg.max_boards, 8);
+        assert_eq!(cfg.advertise_ip, "127.0.0.1");
+        assert_eq!(cfg.time_sync_period_ms, 100);
+        assert_eq!(cfg.data_udp_window, 32);
+        assert_eq!(cfg.multicast_base, "239.255.0.0");
     }
 
     #[test]
     fn unknown_key_is_rejected() {
-        let file = write_temp(
-            "unknown",
-            "listen:\n  ip: 127.0.0.1\n  port: 8091\nextra: 1\n",
-        );
+        let mut body = backend::test_backend_yaml("127.0.0.1", 8091);
+        body.push_str("extra: 1\n");
+        let file = write_temp("unknown", &body);
         let err = BackendConfig::load(file.path()).unwrap_err();
         assert!(err.to_string().contains("invalid YAML"), "{err}");
+    }
+
+    #[test]
+    fn max_boards_zero_rejected() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091)
+            .replace("max_boards: 8\n", "max_boards: 0\n");
+        let file = write_temp("max0", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("max_boards"), "{err}");
+    }
+
+    #[test]
+    fn advertise_ip_unspecified_rejected() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091)
+            .replace("advertise_ip: 127.0.0.1\n", "advertise_ip: 0.0.0.0\n");
+        let file = write_temp("adv0", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("advertise_ip"), "{err}");
+    }
+
+    #[test]
+    fn multicast_base_must_be_multicast() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091).replace(
+            "multicast_base: 239.255.0.0\n",
+            "multicast_base: 192.168.0.1\n",
+        );
+        let file = write_temp("mcast", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("multicast_base"), "{err}");
+    }
+
+    #[test]
+    fn missing_max_boards_rejected() {
+        let file = write_temp(
+            "missing",
+            "listen:\n  ip: 127.0.0.1\n  port: 8091\n\
+             advertise_ip: 127.0.0.1\n\
+             time_sync_period_ms: 100\n\
+             data_udp_window: 32\n\
+             multicast_base: 239.255.0.0\n",
+        );
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid YAML"), "{err}");
+        assert!(msg.contains("max_boards"), "{err}");
+    }
+
+    #[test]
+    fn time_sync_period_zero_rejected() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091)
+            .replace("time_sync_period_ms: 100\n", "time_sync_period_ms: 0\n");
+        let file = write_temp("period0", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("time_sync_period_ms"), "{err}");
+    }
+
+    #[test]
+    fn data_udp_window_zero_rejected() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091)
+            .replace("data_udp_window: 32\n", "data_udp_window: 0\n");
+        let file = write_temp("win0", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("data_udp_window"), "{err}");
+    }
+
+    #[test]
+    fn advertise_ip_non_ipv4_rejected() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091)
+            .replace("advertise_ip: 127.0.0.1\n", "advertise_ip: localhost\n");
+        let file = write_temp("adv-host", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("advertise_ip"), "{err}");
+    }
+
+    #[test]
+    fn advertise_ip_multicast_rejected() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091)
+            .replace("advertise_ip: 127.0.0.1\n", "advertise_ip: 239.255.0.1\n");
+        let file = write_temp("adv-mcast", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("advertise_ip"), "{err}");
+    }
+
+    #[test]
+    fn multicast_base_non_ipv4_rejected() {
+        let body = backend::test_backend_yaml("127.0.0.1", 8091).replace(
+            "multicast_base: 239.255.0.0\n",
+            "multicast_base: not-an-ip\n",
+        );
+        let file = write_temp("mcast-bad", &body);
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("multicast_base"), "{err}");
     }
 
     #[test]
@@ -260,22 +356,44 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_servers_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+        let yaml = dir.path().join("frontend.yaml");
+        std::fs::write(
+            &yaml,
+            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers:\n  - ip: 127.0.0.1\n    port: 8091\n  - ip: 127.0.0.1\n    port: 8092\n  - ip: 127.0.0.1\n    port: 8091\nweb_root: web\n",
+        )
+        .unwrap();
+        let err = FrontendConfig::load(&yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate endpoint 127.0.0.1:8091"), "{err}");
+        assert!(msg.contains("servers[2]"), "{err}");
+        assert!(msg.contains("servers[0]"), "{err}");
+    }
+
+    #[test]
     fn port_zero_rejected() {
-        let file = write_temp("port0", "listen:\n  ip: 127.0.0.1\n  port: 0\n");
+        let body = backend::test_backend_yaml("127.0.0.1", 0);
+        let file = write_temp("port0", &body);
         let err = BackendConfig::load(file.path()).unwrap_err();
         assert!(err.to_string().contains("port"), "{err}");
     }
 
     #[test]
     fn empty_ip_rejected() {
-        let file = write_temp("empty-ip", "listen:\n  ip: \"\"\n  port: 8091\n");
+        let body = backend::test_backend_yaml("", 8091);
+        let file = write_temp("empty-ip", &body);
         let err = BackendConfig::load(file.path()).unwrap_err();
         assert!(err.to_string().contains("ip"), "{err}");
     }
 
     #[test]
     fn hostname_is_accepted() {
-        let file = write_temp("host", "listen:\n  ip: localhost\n  port: 8091\n");
+        let body = backend::test_backend_yaml("localhost", 8091);
+        let file = write_temp("host", &body);
         let cfg = BackendConfig::load(file.path()).unwrap();
         assert_eq!(cfg.listen.ip, "localhost");
     }

@@ -62,6 +62,78 @@ impl NodeAnalogPorts {
     }
 }
 
+/// Arbiter-side analog endpoints for cross-machine edges.
+///
+/// Same split as [`ProxyUartPorts`](super::uart_bus::ProxyUartPorts): the arbiter
+/// opens the end of the SPSC service that the local board's Node does not hold
+/// (subscriber for `egress`, publisher for `ingress`). Same-machine edges are
+/// never passed here.
+pub struct ProxyAnalogPorts {
+    egress: HashMap<String, AnalogSub>,
+    ingress: HashMap<String, AnalogPub>,
+}
+
+impl ProxyAnalogPorts {
+    /// `egress` / `ingress` hold analog edges only (others are ignored).
+    pub fn open(
+        node: &Node<ipc::Service>,
+        cluster_key: &str,
+        egress: &[&DirectedEdge],
+        ingress: &[&DirectedEdge],
+    ) -> Result<Self, IpcError> {
+        let mut out = Self {
+            egress: HashMap::new(),
+            ingress: HashMap::new(),
+        };
+        for edge in egress.iter().filter(|e| e.payload == PayloadKind::Analog) {
+            let (id, name) = analog_edge_service(cluster_key, edge);
+            let sub = open_or_create_analog_subscriber(node, &name, DEFAULT_ANALOG_RING_LEN)?;
+            out.egress.insert(id, sub);
+        }
+        for edge in ingress.iter().filter(|e| e.payload == PayloadKind::Analog) {
+            let (id, name) = analog_edge_service(cluster_key, edge);
+            let puber = open_or_create_analog_publisher(node, &name, DEFAULT_ANALOG_RING_LEN)?;
+            out.ingress.insert(id, puber);
+        }
+        Ok(out)
+    }
+
+    /// Next voltage the local board sent on `edge_id`, if any.
+    pub fn receive(&self, edge_id: &str) -> Result<Option<AnalogVoltage>, IpcError> {
+        let Some(sub) = self.egress.get(edge_id) else {
+            return Ok(None);
+        };
+        Ok(sub
+            .receive()
+            .map_err(|e| IpcError::Message(format!("analog proxy recv {edge_id}: {e:?}")))?
+            .map(|sample| *sample))
+    }
+
+    /// Deliver `value` to the local board on `edge_id`.
+    pub fn publish(&self, edge_id: &str, value: AnalogVoltage) -> Result<(), IpcError> {
+        let Some(puber) = self.ingress.get(edge_id) else {
+            return Err(IpcError::Message(format!(
+                "no analog proxy publisher for {edge_id}"
+            )));
+        };
+        puber
+            .send_copy(value)
+            .map_err(|e| IpcError::Message(format!("analog proxy send {edge_id}: {e:?}")))?;
+        Ok(())
+    }
+}
+
+fn analog_edge_service(cluster_key: &str, edge: &DirectedEdge) -> (String, String) {
+    let id = names::edge_id(
+        &edge.from_board,
+        &edge.from_endpoint,
+        &edge.to_board,
+        &edge.to_endpoint,
+    );
+    let name = names::analog_edge(cluster_key, &id);
+    (id, name)
+}
+
 fn open_or_create_analog_publisher(
     node: &Node<ipc::Service>,
     name: &str,

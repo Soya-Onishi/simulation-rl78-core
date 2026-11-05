@@ -10,11 +10,13 @@ pub mod action;
 pub mod arbiter;
 pub mod backend;
 pub mod board_runtime;
+pub mod cluster_net;
 pub mod cluster_stop;
 pub mod config;
 pub mod contract;
 pub mod control;
 pub mod data_plane;
+pub mod edge_proxy;
 pub mod elf_source;
 pub mod gdb;
 pub mod host;
@@ -24,6 +26,7 @@ pub mod ipc;
 pub mod lifecycle;
 pub mod log_msg;
 pub mod node;
+pub mod orchestrate;
 pub mod probe;
 pub mod probe_hub;
 mod probe_log;
@@ -31,7 +34,10 @@ pub mod server;
 pub mod time_sync;
 pub mod topology;
 
-pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
+pub use arbiter::{
+    ArbiterError, ArbiterOptions, PeerAdvertise, run_arbiter, run_arbiter_from_path,
+    select_local_boards,
+};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
 pub use board_runtime::{
     BoardCliError, BoardError, BoardOptions, board_usage, cluster_host_stop_reason,

@@ -98,6 +98,11 @@ pub struct LogEvent {
     pub origin: String,
     pub board: Option<String>,
     pub text: String,
+    /// Virtual time (ns) of the producing process when the line was logged.
+    /// The multi-backend frontend merges lines of several backends by this value.
+    /// Absent (`0`) from backends that predate the field.
+    #[serde(default)]
+    pub virtual_time_ns: u64,
 }
 
 /// One parameter in an action catalog row. Hashes are not part of the JSON contract.

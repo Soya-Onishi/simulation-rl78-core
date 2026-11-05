@@ -94,6 +94,10 @@ pub enum ClusterLog {
         board_hash: u64,
         level: LogLevel,
         origin: LogOrigin,
+        /// Virtual time (ns) of the producing process when the line was logged.
+        /// `0` until the process has reported a virtual time. The frontend
+        /// orders log lines of several backends by this value.
+        virtual_time_ns: u64,
         text_len: u16,
         text: [u8; LOG_TEXT_CAP],
     },
@@ -113,8 +117,40 @@ impl ClusterLog {
             board_hash,
             level,
             origin,
+            virtual_time_ns: 0,
             text_len: fitted.len() as u16,
             text: buf,
+        }
+    }
+
+    /// Same record stamped with the producer's virtual time.
+    #[must_use]
+    pub fn with_virtual_time_ns(self, virtual_time_ns: u64) -> Self {
+        match self {
+            Self::Record {
+                board_hash,
+                level,
+                origin,
+                text_len,
+                text,
+                ..
+            } => Self::Record {
+                board_hash,
+                level,
+                origin,
+                virtual_time_ns,
+                text_len,
+                text,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn virtual_time_ns(self) -> u64 {
+        match self {
+            Self::Record {
+                virtual_time_ns, ..
+            } => virtual_time_ns,
         }
     }
 
@@ -245,6 +281,16 @@ mod tests {
             node.render(|_| None),
             "[warn] node unknown: duplicate Ready"
         );
+    }
+
+    #[test]
+    fn virtual_time_defaults_to_zero_and_can_be_stamped() {
+        let record = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 0, "hi");
+        assert_eq!(record.virtual_time_ns(), 0);
+        let stamped = record.with_virtual_time_ns(1_500);
+        assert_eq!(stamped.virtual_time_ns(), 1_500);
+        assert_eq!(stamped.text(), "hi");
+        assert_eq!(stamped.level(), LogLevel::Info);
     }
 
     #[test]

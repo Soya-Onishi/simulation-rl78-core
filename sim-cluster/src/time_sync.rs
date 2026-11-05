@@ -1,4 +1,7 @@
 //! Arbiter-side virtual-time ceiling: `allowed = min(reports) + margin`.
+//!
+//! With peer arbiters (multi-backend), the minimum also covers the remote
+//! arbiters' minimum reported over multicast; see [`TimeCeiling::set_remote`].
 
 use std::collections::HashMap;
 
@@ -7,6 +10,12 @@ use std::collections::HashMap;
 pub struct TimeCeiling {
     margin_ns: u64,
     reports: HashMap<String, u64>,
+    /// Minimum virtual time reported by the other arbiters; `None` without peers.
+    remote_min_ns: Option<u64>,
+    /// A peer arbiter went silent: Allowed updates are held at their last value.
+    frozen: bool,
+    /// Remote state changed since the last [`Self::take_remote_dirty`].
+    remote_dirty: bool,
 }
 
 impl TimeCeiling {
@@ -16,7 +25,13 @@ impl TimeCeiling {
         for id in board_ids {
             reports.insert(id, 0);
         }
-        Self { margin_ns, reports }
+        Self {
+            margin_ns,
+            reports,
+            remote_min_ns: None,
+            frozen: false,
+            remote_dirty: false,
+        }
     }
 
     /// Update one board's last reported virtual time (kept even while stopped).
@@ -44,10 +59,47 @@ impl TimeCeiling {
         }
     }
 
-    /// `allowed = min(reports) + margin`.
+    /// Set the other arbiters' minimum virtual time and whether Allowed
+    /// updates are frozen. Marks the ceiling dirty when either changed.
+    pub fn set_remote(&mut self, remote_min_ns: Option<u64>, frozen: bool) {
+        if self.remote_min_ns != remote_min_ns || self.frozen != frozen {
+            self.remote_dirty = true;
+        }
+        self.remote_min_ns = remote_min_ns;
+        self.frozen = frozen;
+    }
+
+    /// Minimum virtual time last reported by the other arbiters; `None` when
+    /// there are no peers (single backend).
+    #[must_use]
+    pub fn remote_min_ns(&self) -> Option<u64> {
+        self.remote_min_ns
+    }
+
+    /// `true` while Allowed updates must be held at their last value.
+    #[must_use]
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+
+    /// Whether [`Self::set_remote`] changed anything since the last call.
+    pub fn take_remote_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.remote_dirty)
+    }
+
+    /// Minimum over local boards and, when set, the remote arbiters.
+    #[must_use]
+    pub fn cluster_min_ns(&self) -> u64 {
+        match self.remote_min_ns {
+            Some(remote) => self.virtual_time_ns().min(remote),
+            None => self.virtual_time_ns(),
+        }
+    }
+
+    /// `allowed = min(local reports, remote arbiters' minimum) + margin`.
     #[must_use]
     pub fn allowed_ns(&self) -> u64 {
-        self.virtual_time_ns().saturating_add(self.margin_ns)
+        self.cluster_min_ns().saturating_add(self.margin_ns)
     }
 
     /// Natural ceiling, optionally hard-capped at `until_ns`.

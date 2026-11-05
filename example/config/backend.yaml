@@ -1,3 +1,8 @@
 listen:
   ip: 127.0.0.1
   port: 8091
+max_boards: 8
+advertise_ip: 127.0.0.1
+time_sync_period_ms: 100
+data_udp_window: 32
+multicast_base: 239.255.0.0

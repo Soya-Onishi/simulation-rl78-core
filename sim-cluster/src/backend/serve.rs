@@ -1,6 +1,7 @@
 //! Internal HTTP adapter: HTTP → [`SimulationBackend`].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
@@ -12,37 +13,59 @@ use crate::contract::{
     LogEvent, ProbeSamplesResponse, StartSimulationRequest, StatusEvent, TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
+use crate::orchestrate::{
+    Phase1CreateRequest, Phase1CreateResponse, Phase2ConnectRequest, Phase2ConnectResponse,
+};
 use crate::probe_log::{
     CoarseBatch, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
 };
 
 use super::SimulationBackend;
-use super::wire::{CsvStartBody, ExistsBody, HealthBody, HighWaterBody, ViewerTokenBody};
+use super::wire::{
+    BackendInfo, CsvStartBody, ExistsBody, HealthBody, HighWaterBody, ViewerTokenBody,
+};
 
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
     backend: Arc<dyn SimulationBackend>,
+    info: BackendInfo,
+    running_boards: Arc<AtomicU32>,
 }
 
 /// Serve the internal `/internal` API on `listen` (`host:port`).
 pub async fn serve_internal(
     listen: &str,
     backend: Arc<dyn SimulationBackend>,
+    info: BackendInfo,
+    running_boards: Arc<AtomicU32>,
 ) -> Result<(), std::io::Error> {
-    let app = router(backend);
+    let app = router(backend, info, running_boards);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let addr = listener.local_addr()?;
     eprintln!("cluster-backend listening on http://{addr}");
     axum::serve(listener, app).await
 }
 
-pub fn router(backend: Arc<dyn SimulationBackend>) -> Router {
-    let state = AppState { backend };
+pub fn router(
+    backend: Arc<dyn SimulationBackend>,
+    info: BackendInfo,
+    running_boards: Arc<AtomicU32>,
+) -> Router {
+    let state = AppState {
+        backend,
+        info,
+        running_boards,
+    };
     Router::new()
         .route("/internal/health", get(health))
         .route("/internal/simulations", post(create))
+        .route("/internal/cluster/simulations", post(create_phase1))
+        .route(
+            "/internal/cluster/simulations/{id}/connect",
+            post(connect_phase2),
+        )
         .route("/internal/simulations/{id}/start", post(start))
         .route("/internal/simulations/{id}/stop", post(stop))
         .route("/internal/simulations/{id}/reset", post(reset))
@@ -121,9 +144,14 @@ async fn blocking<T: Send + 'static>(
         .map_err(|err| ApiError::internal(err.to_string()))?
 }
 
-async fn health() -> Json<HealthBody> {
+async fn health(State(state): State<AppState>) -> Json<HealthBody> {
     Json(HealthBody {
         status: "ok".into(),
+        max_boards: state.info.max_boards,
+        running_boards: state.running_boards.load(Ordering::Relaxed),
+        time_sync_period_ms: state.info.time_sync_period_ms,
+        data_udp_window: state.info.data_udp_window,
+        multicast_base: state.info.multicast_base.clone(),
     })
 }
 
@@ -134,6 +162,31 @@ async fn create(
     let backend = state.backend.clone();
     let id = blocking(move || backend.create(body.topology)).await?;
     Ok((StatusCode::CREATED, Json(CreateSimulationResponse { id })))
+}
+
+async fn create_phase1(
+    State(state): State<AppState>,
+    Json(body): Json<Phase1CreateRequest>,
+) -> Result<(StatusCode, Json<Phase1CreateResponse>), ApiError> {
+    let backend = state.backend.clone();
+    let reply = blocking(move || backend.create_phase1(body)).await?;
+    Ok((StatusCode::CREATED, Json(reply)))
+}
+
+async fn connect_phase2(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<Phase2ConnectRequest>,
+) -> Result<Json<Phase2ConnectResponse>, ApiError> {
+    if body.id != id {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "phase-2 body id does not match path id",
+        ));
+    }
+    let backend = state.backend.clone();
+    let reply = blocking(move || backend.connect_phase2(body)).await?;
+    Ok(Json(reply))
 }
 
 async fn start(

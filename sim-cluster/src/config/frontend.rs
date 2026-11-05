@@ -48,6 +48,15 @@ impl FrontendConfig {
         for (index, server) in self.servers.iter().enumerate() {
             validate_ip_or_hostname(&server.ip, &format!("servers[{index}].ip"))?;
             validate_port(server.port, &format!("servers[{index}].port"))?;
+            if let Some(first) = self.servers[..index]
+                .iter()
+                .position(|prev| prev.ip == server.ip && prev.port == server.port)
+            {
+                return Err(ConfigError::Message(format!(
+                    "servers[{index}]: duplicate endpoint {}:{} (same as servers[{first}])",
+                    server.ip, server.port
+                )));
+            }
         }
         if !self.web_root.is_dir() {
             return Err(ConfigError::Message(format!(

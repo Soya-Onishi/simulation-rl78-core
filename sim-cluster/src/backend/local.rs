@@ -9,6 +9,9 @@ use crate::contract::{
 };
 use crate::host::HostCommand;
 use crate::inspect::{InspectReply, InspectRequest};
+use crate::orchestrate::{
+    Phase1CreateRequest, Phase1CreateResponse, Phase2ConnectRequest, Phase2ConnectResponse,
+};
 use crate::server::{Job, JobKind, JobReply};
 use crate::topology::LogicalTopology;
 
@@ -64,6 +67,26 @@ impl SimulationBackend for LocalBackend {
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for create: {other:?}"
+            ))),
+        }
+    }
+
+    fn create_phase1(&self, req: Phase1CreateRequest) -> Result<Phase1CreateResponse, ApiError> {
+        match self.rpc(JobKind::CreatePhase1(req))? {
+            JobReply::CreatedPhase1(reply) => Ok(reply),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for create phase 1: {other:?}"
+            ))),
+        }
+    }
+
+    fn connect_phase2(&self, req: Phase2ConnectRequest) -> Result<Phase2ConnectResponse, ApiError> {
+        match self.rpc(JobKind::ConnectPhase2(req))? {
+            JobReply::Phase2Connected(reply) => Ok(reply),
+            JobReply::Err(err) => Err(err),
+            other => Err(ApiError::internal(format!(
+                "unexpected worker reply for create phase 2: {other:?}"
             ))),
         }
     }

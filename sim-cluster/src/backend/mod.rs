@@ -5,18 +5,22 @@
 //! [`TcpipBackend`] talks to a remote `cluster-backend` over HTTP.
 
 mod local;
-mod serve;
+pub(crate) mod serve;
 mod tcpip;
 mod wire;
 
 pub use local::LocalBackend;
 pub use serve::serve_internal;
-pub use tcpip::{TcpipBackend, check_health};
+pub use tcpip::{TcpipBackend, check_health, fetch_health};
+pub use wire::{BackendInfo, HealthBody};
 
 use crate::contract::{
     ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent, TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
+use crate::orchestrate::{
+    Phase1CreateRequest, Phase1CreateResponse, Phase2ConnectRequest, Phase2ConnectResponse,
+};
 use crate::topology::LogicalTopology;
 
 /// Control-plane operations shared by HTTP adapters.
@@ -74,4 +78,27 @@ pub trait SimulationBackend: Send + Sync {
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError>;
     fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError>;
+
+    /// Multi-backend create phase 1: spawn the local arbiter for this backend's
+    /// boards and return its advertised endpoints. Backends that only implement
+    /// the single-process path reject this.
+    fn create_phase1(&self, _req: Phase1CreateRequest) -> Result<Phase1CreateResponse, ApiError> {
+        Err(ApiError::new(
+            501,
+            "not_implemented",
+            "two-phase create is not supported by this backend",
+        ))
+    }
+
+    /// Multi-backend create phase 2: peer endpoints and multicast group.
+    fn connect_phase2(
+        &self,
+        _req: Phase2ConnectRequest,
+    ) -> Result<Phase2ConnectResponse, ApiError> {
+        Err(ApiError::new(
+            501,
+            "not_implemented",
+            "two-phase create is not supported by this backend",
+        ))
+    }
 }

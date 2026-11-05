@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -15,7 +16,8 @@ use std::time::{Duration, Instant};
 use iceoryx2::prelude::{Node, ipc};
 
 use crate::action::{ActionRequest, ActionUpstream};
-use crate::backend::LocalBackend;
+use crate::arbiter::PeerAdvertise;
+use crate::backend::{BackendInfo, LocalBackend};
 use crate::contract::{
     ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
     StatusEvent, TopologyView, prepare_create_topology,
@@ -29,6 +31,10 @@ use crate::ipc::{
     root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
+use crate::orchestrate::{
+    ArbiterEndpoints, AssignmentTable, Phase1CreateRequest, Phase1CreateResponse,
+    Phase2ConnectRequest, Phase2ConnectResponse, validate_assignment, validate_simulation_id,
+};
 use crate::probe_log::{
     CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
     ProbeView, ProbeWatchView, json_view, record_view,
@@ -42,22 +48,37 @@ const LOG_CAP: usize = 100;
 /// Live batches kept while `/probes/stream` is between reconnects.
 const WATCH_PENDING_KEEP: usize = 64;
 
+/// How long phase 1 waits for a spawned arbiter to publish its peer endpoints.
+const ENDPOINTS_WAIT: Duration = Duration::from_secs(10);
+/// How long a deleted simulation's arbiter gets to stop its nodes and exit
+/// after `Shutdown` before its whole process group is killed.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// Options for [`spawn_worker`].
 #[derive(Clone, Debug)]
 pub struct ServerOptions {
     /// Path to the `cluster-arbiter` executable.
     pub arbiter_bin: PathBuf,
+    /// `BackendConfig.advertise_ip`: address peers use to reach this machine's arbiters.
+    pub advertise_ip: String,
+    /// `BackendConfig.time_sync_period_ms`: period of the arbiters' time-sync multicast.
+    pub time_sync_period_ms: u64,
+    /// `BackendConfig.data_udp_window`: messages in flight per peer on the arbiters' data UDP link.
+    pub data_udp_window: u32,
 }
 
 impl ServerOptions {
     /// Sibling `cluster-arbiter` next to this process.
-    pub fn from_current_exe() -> Result<Self, ServerError> {
+    pub fn from_current_exe(advertise_ip: impl Into<String>) -> Result<Self, ServerError> {
         let exe = std::env::current_exe().map_err(ServerError::Io)?;
         let exe_dir = exe
             .parent()
             .ok_or_else(|| ServerError::Message("current_exe has no parent".into()))?;
         Ok(Self {
             arbiter_bin: exe_dir.join("cluster-arbiter"),
+            advertise_ip: advertise_ip.into(),
+            time_sync_period_ms: crate::arbiter::DEFAULT_TIME_SYNC_PERIOD_MS,
+            data_udp_window: crate::cluster_net::DEFAULT_DATA_UDP_WINDOW,
         })
     }
 }
@@ -82,6 +103,7 @@ struct StoredLog {
     origin: String,
     board: Option<String>,
     text: String,
+    virtual_time_ns: u64,
 }
 
 impl StoredLog {
@@ -92,6 +114,7 @@ impl StoredLog {
             origin: self.origin.clone(),
             board: self.board.clone(),
             text: self.text.clone(),
+            virtual_time_ns: self.virtual_time_ns,
         }
     }
 }
@@ -106,6 +129,8 @@ pub struct Job {
 #[derive(Debug)]
 pub enum JobKind {
     Create(LogicalTopology),
+    CreatePhase1(Phase1CreateRequest),
+    ConnectPhase2(Phase2ConnectRequest),
     Command {
         id: String,
         cmd: HostCommand,
@@ -200,6 +225,8 @@ pub enum JobReply {
     Created {
         id: String,
     },
+    CreatedPhase1(Phase1CreateResponse),
+    Phase2Connected(Phase2ConnectResponse),
     Accepted,
     Deleted,
     Exists(bool),
@@ -224,13 +251,15 @@ pub enum JobReply {
 
 struct World {
     sims: HashMap<String, Simulation>,
+    running_boards: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// `BackendConfig.max_boards`: upper bound on boards running on this backend.
+    max_boards: u32,
 }
 
 type IoxNode = Node<ipc::Service>;
 
 struct Simulation {
     id: String,
-    topo_path: PathBuf,
     topology: TopologyView,
     child: Option<Child>,
     host: ServerHostPort,
@@ -241,6 +270,14 @@ struct Simulation {
     logs: VecDeque<StoredLog>,
     next_seq: u64,
     boards: HashMap<u64, String>,
+    /// Boards this backend's arbiter runs (all topology boards unless phase 1 split them).
+    local_board_count: u32,
+    /// Peer sockets advertised in phase 1; `None` for a single-backend simulation.
+    local_endpoints: Option<ArbiterEndpoints>,
+    /// Phase-2 payload (peers and multicast group), also handed to the arbiter via `phase2_path`.
+    peer_link: Option<Phase2ConnectRequest>,
+    /// File the arbiter watches (`--phase2-in`); `Some` only for a multi-backend simulation.
+    phase2_path: Option<PathBuf>,
     inbox: ServerLogInbox,
     actions: ServerActions,
     probe_inbox: ServerProbeInbox,
@@ -255,6 +292,8 @@ struct Simulation {
     csv_job: Option<CsvJob>,
     iox_root: PathBuf,
     _iox: IoxNode,
+    /// Declared last so it is removed after every iceoryx handle above is closed.
+    _temp: TempPaths,
 }
 
 struct CsvJob {
@@ -290,7 +329,14 @@ impl ProbeWatch {
 }
 
 /// Start the worker thread and return a [`LocalBackend`] to it.
-pub fn spawn_worker(opts: ServerOptions) -> Result<std::sync::Arc<LocalBackend>, ServerError> {
+///
+/// `max_boards` is `BackendConfig.max_boards`; a create that would push
+/// `running_boards` past it is rejected with HTTP 409 before any arbiter is spawned.
+pub fn spawn_worker(
+    opts: ServerOptions,
+    running_boards: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    max_boards: u32,
+) -> Result<std::sync::Arc<LocalBackend>, ServerError> {
     if !opts.arbiter_bin.is_file() {
         return Err(ServerError::Message(format!(
             "cluster-arbiter not found at {} (build the arbiter binary first)",
@@ -298,25 +344,42 @@ pub fn spawn_worker(opts: ServerOptions) -> Result<std::sync::Arc<LocalBackend>,
         )));
     }
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || worker_loop(rx, opts));
+    thread::spawn(move || worker_loop(rx, opts, running_boards, max_boards));
     Ok(LocalBackend::new(tx))
 }
 
 /// Accept internal HTTP until the process is killed.
 ///
 /// Arbiter processes come and go; this function does not return when one exits.
-pub fn run_backend(listen: &str, opts: ServerOptions) -> Result<(), ServerError> {
-    let backend = spawn_worker(opts)?;
+pub fn run_backend(
+    listen: &str,
+    opts: ServerOptions,
+    info: BackendInfo,
+) -> Result<(), ServerError> {
+    let running_boards = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let backend = spawn_worker(opts, running_boards.clone(), info.max_boards)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(crate::backend::serve_internal(listen, backend))?;
+    rt.block_on(crate::backend::serve_internal(
+        listen,
+        backend,
+        info,
+        running_boards,
+    ))?;
     Ok(())
 }
 
-fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
+fn worker_loop(
+    rx: Receiver<Job>,
+    opts: ServerOptions,
+    running_boards: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    max_boards: u32,
+) {
     let mut world = World {
         sims: HashMap::new(),
+        running_boards,
+        max_boards,
     };
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
@@ -334,14 +397,32 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
     let reply = match job.kind {
         JobKind::Create(topo) => match prepare_create_topology(topo) {
             Err(err) => JobReply::Err(err),
-            Ok(topo) => match create_simulation(topo, opts) {
-                Ok(sim) => {
-                    let id = sim.id.clone();
-                    world.sims.insert(id.clone(), sim);
-                    JobReply::Created { id }
-                }
-                Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+            Ok(topo) => match check_board_capacity(world, topo.boards.len()) {
+                Err(err) => JobReply::Err(err),
+                Ok(()) => match create_simulation(topo, opts, None, new_cluster_key()) {
+                    Ok(sim) => JobReply::Created {
+                        id: register_simulation(world, sim),
+                    },
+                    Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+                },
             },
+        },
+        JobKind::CreatePhase1(req) => match create_phase1(world, req, opts) {
+            Ok(sim) => {
+                let endpoints = sim.local_endpoints.clone();
+                JobReply::CreatedPhase1(Phase1CreateResponse {
+                    id: register_simulation(world, sim),
+                    endpoints,
+                })
+            }
+            Err(err) => JobReply::Err(err),
+        },
+        JobKind::ConnectPhase2(req) => match world.sims.get_mut(&req.id) {
+            Some(sim) => match connect_phase2(sim, req) {
+                Ok(()) => JobReply::Phase2Connected(Phase2ConnectResponse { ok: true }),
+                Err(err) => JobReply::Err(err),
+            },
+            None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
         JobKind::Command { id, cmd } => match world.sims.get_mut(&id) {
             Some(sim) => match command_simulation(sim, cmd) {
@@ -352,7 +433,14 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         },
         JobKind::Delete { id } => match world.sims.remove(&id) {
             Some(mut sim) => {
-                let _ = send_cmd(&mut sim, HostCommand::Shutdown);
+                let boards = sim.local_board_count;
+                world
+                    .running_boards
+                    .fetch_sub(boards, std::sync::atomic::Ordering::Relaxed);
+                // Reply only after the arbiter, its nodes and the temp files
+                // are gone, so a finished DELETE leaves nothing behind.
+                sim.terminate();
+                drop(sim);
                 JobReply::Deleted
             }
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
@@ -530,12 +618,200 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
     let _ = job.reply.send(reply);
 }
 
+/// Reject a create whose `new_boards` would push `running_boards` past `max_boards`.
+///
+/// Runs before any arbiter is spawned. `running_boards` is only written from the
+/// worker thread (see [`register_simulation`] and `JobKind::Delete`), so the
+/// check and the later registration cannot interleave with another create.
+fn check_board_capacity(world: &World, new_boards: usize) -> Result<(), ApiError> {
+    let running = u64::from(
+        world
+            .running_boards
+            .load(std::sync::atomic::Ordering::Relaxed),
+    );
+    let requested = new_boards as u64;
+    if running + requested > u64::from(world.max_boards) {
+        return Err(ApiError::conflict(format!(
+            "backend capacity exceeded: {requested} board(s) requested, {running} running, max_boards is {}",
+            world.max_boards
+        )));
+    }
+    Ok(())
+}
+
+/// Insert a freshly created simulation and count its local boards as running.
+fn register_simulation(world: &mut World, sim: Simulation) -> String {
+    let id = sim.id.clone();
+    world
+        .running_boards
+        .fetch_add(sim.local_board_count, std::sync::atomic::Ordering::Relaxed);
+    world.sims.insert(id.clone(), sim);
+    id
+}
+
+/// How a phase-1 create splits the topology on this backend.
+struct Placement {
+    local_board_ids: Vec<String>,
+    /// `Some` only when other backends participate.
+    peer_advertise: Option<PeerAdvertise>,
+    /// Full board → backend placement; the arbiter derives its cross-machine edges from it.
+    assignment: AssignmentTable,
+}
+
+/// Validate a phase-1 request and spawn the local arbiter.
+fn create_phase1(
+    world: &World,
+    req: Phase1CreateRequest,
+    opts: &ServerOptions,
+) -> Result<Simulation, ApiError> {
+    // The frontend rolls back by this id even when it never sees the reply, so
+    // the simulation must be created under exactly it, and never over another.
+    validate_simulation_id(&req.id)?;
+    if world.sims.contains_key(&req.id) {
+        return Err(ApiError::conflict(format!(
+            "simulation id `{}` already exists on this backend",
+            req.id
+        )));
+    }
+    let topo = prepare_create_topology(req.topology)?;
+    validate_assignment(&topo, &req.assignment)?;
+    let local_board_ids: Vec<String> = req
+        .assignment
+        .boards_for(&req.local_backend)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if local_board_ids.is_empty() {
+        return Err(ApiError::bad_request(
+            "invalid_assignment",
+            format!("no boards assigned to backend {}", req.local_backend),
+        ));
+    }
+    // `--local-boards` is a comma-separated list.
+    if let Some(bad) = local_board_ids.iter().find(|id| id.contains(',')) {
+        return Err(ApiError::bad_request(
+            "invalid_assignment",
+            format!("board id `{bad}` must not contain a comma"),
+        ));
+    }
+    check_board_capacity(world, local_board_ids.len())?;
+    let multi = req.assignment.participating_backends().len() > 1;
+    let placement = Placement {
+        local_board_ids,
+        peer_advertise: multi.then(|| PeerAdvertise {
+            advertise_ip: opts.advertise_ip.clone(),
+            backend_key: req.local_backend.clone(),
+        }),
+        assignment: req.assignment,
+    };
+    create_simulation(topo, opts, Some(placement), req.id)
+        .map_err(|err| ApiError::internal(err.to_string()))
+}
+
+/// Record the phase-2 peer list and multicast group.
+fn connect_phase2(sim: &mut Simulation, req: Phase2ConnectRequest) -> Result<(), ApiError> {
+    if sim.peer_link.is_some() {
+        return Err(ApiError::conflict("phase 2 was already applied"));
+    }
+    check_phase2(sim.local_endpoints.as_ref(), &req)?;
+    if sim.local_endpoints.is_none() {
+        // Single backend: nothing to store.
+        return Ok(());
+    }
+    if let Some(path) = &sim.phase2_path {
+        write_phase2_file(path, &req)
+            .map_err(|err| ApiError::internal(format!("hand phase 2 to arbiter: {err}")))?;
+    }
+    eprintln!(
+        "cluster-backend {}: phase 2 accepted ({} peer(s), multicast {}:{})",
+        sim.id,
+        req.peers.len(),
+        req.multicast.ip,
+        req.multicast.port
+    );
+    sim.peer_link = Some(req);
+    Ok(())
+}
+
+/// Write via a sibling temp file and rename so the arbiter never reads partial JSON.
+fn write_phase2_file(path: &std::path::Path, req: &Phase2ConnectRequest) -> std::io::Result<()> {
+    let json = serde_json::to_vec(req).map_err(std::io::Error::other)?;
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, path)
+}
+
+/// Validate a phase-2 request against this simulation's own advertised endpoints
+/// (`None` for a single-backend simulation, which accepts only an empty peer list).
+fn check_phase2(
+    local: Option<&ArbiterEndpoints>,
+    req: &Phase2ConnectRequest,
+) -> Result<(), ApiError> {
+    let Some(local) = local else {
+        return if req.peers.is_empty() {
+            Ok(())
+        } else {
+            Err(ApiError::conflict(
+                "simulation was created without peer sockets (single backend)",
+            ))
+        };
+    };
+    if req.peers.is_empty() {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "phase 2 needs at least one peer for a multi-backend simulation",
+        ));
+    }
+    // Stamped on every time-sync packet; the wire format holds at most 255 bytes.
+    if req.cluster_key.is_empty() || req.cluster_key.len() > usize::from(u8::MAX) {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "phase 2 needs a cluster_key of 1..=255 bytes",
+        ));
+    }
+    let group_ok = req
+        .multicast
+        .ip
+        .parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|ip| ip.is_multicast());
+    if !group_ok || req.multicast.port == 0 {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            format!(
+                "invalid multicast group {}:{}",
+                req.multicast.ip, req.multicast.port
+            ),
+        ));
+    }
+    let mut seen = HashSet::new();
+    for peer in &req.peers {
+        if peer.backend == local.backend || !seen.insert(peer.backend.as_str()) {
+            return Err(ApiError::bad_request(
+                "bad_param",
+                format!("peer list repeats or includes backend {}", peer.backend),
+            ));
+        }
+        if peer.control_tcp_port == 0 || peer.data_udp_port == 0 {
+            return Err(ApiError::bad_request(
+                "bad_param",
+                format!("peer {} has a zero port", peer.backend),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn create_simulation(
     topo: LogicalTopology,
     opts: &ServerOptions,
+    placement: Option<Placement>,
+    id: String,
 ) -> Result<Simulation, ServerError> {
-    let id = new_cluster_key();
     let iox_root = root_path_for_cluster(&id);
+    // Declared before every iceoryx handle so that on any early return it is
+    // dropped after them and removes what this function created.
+    let mut temp = TempPaths::default();
+    temp.push(iox_root.clone());
     let config = isolated_config(&iox_root)?;
     let iox = create_node(&config, &format!("server-{id}"))?;
     let inbox = ServerLogInbox::create(&iox, &id)?;
@@ -547,29 +823,103 @@ fn create_simulation(
         .map_err(ServerError::Message)?;
     let topology = TopologyView::from_logical(&topo);
     let topo_path = write_temp_topology(&topo)?;
-    let child = Command::new(&opts.arbiter_bin)
-        .arg("--topology")
+    temp.push(topo_path.clone());
+    let endpoints_path = placement
+        .as_ref()
+        .is_some_and(|p| p.peer_advertise.is_some())
+        .then(|| temp_path("sim-cluster-endpoints", "json"));
+    if let Some(path) = &endpoints_path {
+        temp.push(path.clone());
+    }
+    let phase2_path = endpoints_path
+        .is_some()
+        .then(|| temp_path("sim-cluster-phase2", "json"));
+    if let Some(path) = &phase2_path {
+        temp.push(path.clone());
+        temp.push(path.with_extension("tmp"));
+    }
+    // Multi-backend only: the arbiter needs the full placement to tell
+    // cross-machine edges from same-machine ones.
+    let assignment_path = match (&placement, &endpoints_path) {
+        (Some(p), Some(_)) => {
+            let path = temp_path("sim-cluster-assignment", "json");
+            temp.push(path.clone());
+            let json = serde_json::to_vec(&p.assignment)
+                .map_err(|err| ServerError::Message(format!("encode assignment: {err}")))?;
+            fs::write(&path, json)?;
+            Some(path)
+        }
+        _ => None,
+    };
+    let mut cmd = Command::new(&opts.arbiter_bin);
+    cmd.arg("--topology")
         .arg(&topo_path)
         .arg("--cluster-key")
         .arg(&id)
         .arg("--iox-root")
-        .arg(&iox_root)
+        .arg(&iox_root);
+    if let Some(placement) = &placement {
+        cmd.arg("--local-boards")
+            .arg(placement.local_board_ids.join(","));
+        if let (Some(peer), Some(path)) = (&placement.peer_advertise, &endpoints_path) {
+            cmd.arg("--advertise-ip")
+                .arg(&peer.advertise_ip)
+                .arg("--backend-key")
+                .arg(&peer.backend_key)
+                .arg("--endpoints-out")
+                .arg(path);
+            if let Some(phase2) = &phase2_path {
+                cmd.arg("--phase2-in")
+                    .arg(phase2)
+                    .arg("--time-sync-period-ms")
+                    .arg(opts.time_sync_period_ms.to_string())
+                    .arg("--data-udp-window")
+                    .arg(opts.data_udp_window.to_string());
+            }
+            if let Some(assignment) = &assignment_path {
+                cmd.arg("--assignment-in").arg(assignment);
+            }
+        }
+    }
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
+        // Own process group: killing the group also takes down the nodes the
+        // arbiter spawned, which a plain kill of the arbiter would orphan.
+        .process_group(0)
         .spawn()?;
+    let local_endpoints = match &endpoints_path {
+        None => None,
+        Some(path) => {
+            let result = await_endpoints(&mut child, path);
+            let _ = fs::remove_file(path);
+            match result {
+                Ok(endpoints) => Some(endpoints),
+                Err(err) => {
+                    kill_process_tree(&mut child);
+                    return Err(err);
+                }
+            }
+        }
+    };
+    let local_ids: Vec<&str> = match &placement {
+        Some(p) => p.local_board_ids.iter().map(String::as_str).collect(),
+        None => topo.boards.iter().map(|b| b.id.as_str()).collect(),
+    };
     let nodes = topo
         .boards
         .iter()
+        .filter(|board| local_ids.contains(&board.id.as_str()))
         .map(|board| SessionNode {
             id: board.id.clone(),
             kind: board.kind.clone(),
             state: "starting".into(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let local_board_count = nodes.len() as u32;
     Ok(Simulation {
         id,
-        topo_path,
         topology,
         child: Some(child),
         host,
@@ -580,6 +930,10 @@ fn create_simulation(
         logs: VecDeque::new(),
         next_seq: 1,
         boards,
+        local_board_count,
+        local_endpoints,
+        peer_link: None,
+        phase2_path,
         inbox,
         actions,
         probe_inbox,
@@ -599,7 +953,39 @@ fn create_simulation(
         csv_job: None,
         iox_root,
         _iox: iox,
+        _temp: temp,
     })
+}
+
+/// Wait for the arbiter to write its bound peer endpoints (see `--endpoints-out`).
+fn await_endpoints(
+    child: &mut Child,
+    path: &std::path::Path,
+) -> Result<ArbiterEndpoints, ServerError> {
+    let deadline = Instant::now() + ENDPOINTS_WAIT;
+    loop {
+        match fs::read(path) {
+            Ok(bytes) => {
+                return serde_json::from_slice(&bytes).map_err(|err| {
+                    ServerError::Message(format!("invalid arbiter endpoints file: {err}"))
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(ServerError::Io(err)),
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(ServerError::Message(format!(
+                "cluster-arbiter exited ({status}) before advertising peer endpoints"
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(ServerError::Message(format!(
+                "cluster-arbiter did not advertise peer endpoints within {}s",
+                ENDPOINTS_WAIT.as_secs()
+            )));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiError> {
@@ -1194,12 +1580,14 @@ fn poll_simulation(sim: &mut Simulation) {
             Ok(Some(status)) => {
                 let code = status.code().unwrap_or(-1);
                 sim.state = "exited".into();
+                let virtual_time_ns = sim.virtual_time_ns;
                 append_log(
                     sim,
                     "info",
                     "server",
                     None,
                     &format!("arbiter exited ({code})"),
+                    virtual_time_ns,
                 );
                 sim.child = None;
             }
@@ -1228,10 +1616,18 @@ fn push_log(sim: &mut Simulation, record: &ClusterLog) {
         record.origin().as_str(),
         board,
         record.text(),
+        record.virtual_time_ns(),
     );
 }
 
-fn append_log(sim: &mut Simulation, level: &str, origin: &str, board: Option<String>, text: &str) {
+fn append_log(
+    sim: &mut Simulation,
+    level: &str,
+    origin: &str,
+    board: Option<String>,
+    text: &str,
+    virtual_time_ns: u64,
+) {
     let seq = sim.next_seq;
     sim.next_seq = sim.next_seq.saturating_add(1);
     sim.logs.push_back(StoredLog {
@@ -1240,6 +1636,7 @@ fn append_log(sim: &mut Simulation, level: &str, origin: &str, board: Option<Str
         origin: origin.to_string(),
         board,
         text: text.to_string(),
+        virtual_time_ns,
     });
     while sim.logs.len() > LOG_CAP {
         sim.logs.pop_front();
@@ -1256,20 +1653,365 @@ fn temp_path(prefix: &str, ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}.{ext}", new_cluster_key()))
 }
 
+impl Simulation {
+    /// Stop the arbiter and everything it started, then wait until it is reaped.
+    ///
+    /// Sends `Shutdown` so the arbiter can stop its nodes itself and waits up to
+    /// [`SHUTDOWN_GRACE`]. If it does not exit in time (for example it is still
+    /// waiting for nodes to become ready and does not read host commands), the
+    /// whole process group is killed. Safe to call more than once.
+    fn terminate(&mut self) {
+        self.terminate_within(SHUTDOWN_GRACE);
+    }
+
+    fn terminate_within(&mut self, grace: Duration) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = send_cmd(self, HostCommand::Shutdown);
+        if !wait_for_exit(&mut child, grace) {
+            kill_process_tree(&mut child);
+        }
+    }
+}
+
 impl Drop for Simulation {
     fn drop(&mut self) {
-        let _ = send_cmd(self, HostCommand::Shutdown);
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        // Temp files and the iceoryx root are removed by `_temp` afterwards.
+        self.terminate();
+    }
+}
+
+/// Poll until `child` exits; `false` when `timeout` elapsed first.
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            // Cannot tell whether it runs; let the caller kill it.
+            Err(_) => return false,
         }
-        let _ = fs::remove_file(&self.topo_path);
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// SIGKILL the arbiter's process group (arbiter plus nodes), then reap the arbiter.
+///
+/// The arbiter is spawned with `process_group(0)`, so its pid is the group id.
+/// The child has not been reaped yet, so the pid cannot have been reused.
+fn kill_process_tree(child: &mut Child) {
+    if let Ok(pgid) = i32::try_from(child.id()) {
+        // SAFETY: `kill` has no memory-safety preconditions; a negative pid
+        // addresses the process group.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Files and directories removed when dropped (best effort, in push order).
+#[derive(Default)]
+struct TempPaths(Vec<PathBuf>);
+
+impl TempPaths {
+    fn push(&mut self, path: PathBuf) {
+        self.0.push(path);
+    }
+}
+
+impl Drop for TempPaths {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(path);
+            } else {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrate::MulticastGroup;
+
+    fn endpoints(backend: &str, tcp: u16, udp: u16) -> ArbiterEndpoints {
+        ArbiterEndpoints {
+            backend: backend.into(),
+            advertise_ip: "127.0.0.1".into(),
+            control_tcp_port: tcp,
+            data_udp_port: udp,
+        }
+    }
+
+    fn phase2(peers: Vec<ArbiterEndpoints>, ip: &str, port: u16) -> Phase2ConnectRequest {
+        Phase2ConnectRequest {
+            id: "sim".into(),
+            cluster_key: "sim".into(),
+            peers,
+            multicast: MulticastGroup {
+                ip: ip.into(),
+                port,
+            },
+        }
+    }
+
+    fn capacity_world(running: u32, max_boards: u32) -> World {
+        World {
+            sims: HashMap::new(),
+            running_boards: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(running)),
+            max_boards,
+        }
+    }
+
+    /// Options whose arbiter does not exist: any attempt to spawn fails with 500,
+    /// so a 409 proves the capacity check ran before the spawn.
+    fn missing_arbiter_opts() -> ServerOptions {
+        ServerOptions {
+            arbiter_bin: PathBuf::from("/nonexistent/cluster-arbiter"),
+            advertise_ip: "127.0.0.1".into(),
+            time_sync_period_ms: 100,
+            data_udp_window: 32,
+        }
+    }
+
+    fn two_board_topology() -> LogicalTopology {
+        let board = |id: &str| crate::topology::BoardSpec {
+            id: id.into(),
+            kind: "rl78".into(),
+            elf: None,
+            endpoints: vec![],
+        };
+        LogicalTopology {
+            boards: vec![board("a"), board("b")],
+            edges: vec![],
+            margin_ns: 1000,
+            headroom_threshold_ns: 200,
+            ready_timeout_ms: 10_000,
+        }
+    }
+
+    fn dispatch_reply(world: &mut World, kind: JobKind) -> JobReply {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dispatch_job(
+            world,
+            Job {
+                kind,
+                reply: reply_tx,
+            },
+            &missing_arbiter_opts(),
+        );
+        reply_rx.recv().expect("dispatch_job replies")
+    }
+
+    fn expect_conflict(reply: JobReply) {
+        match reply {
+            JobReply::Err(err) => {
+                assert_eq!(err.status, 409, "{err:?}");
+                assert_eq!(err.code, "conflict");
+                assert!(err.message.contains("max_boards"), "{}", err.message);
+            }
+            other => panic!("expected 409 conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_capacity_allows_up_to_max_boards() {
+        assert!(check_board_capacity(&capacity_world(0, 2), 2).is_ok());
+        assert!(check_board_capacity(&capacity_world(1, 2), 1).is_ok());
+        assert_eq!(
+            check_board_capacity(&capacity_world(1, 2), 2)
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(
+            check_board_capacity(&capacity_world(2, 2), 1)
+                .unwrap_err()
+                .status,
+            409
+        );
+    }
+
+    #[test]
+    fn create_rejects_when_max_boards_would_be_exceeded() {
+        // 1 running + 2 requested > max 2.
+        let mut world = capacity_world(1, 2);
+        let reply = dispatch_reply(&mut world, JobKind::Create(two_board_topology()));
+        expect_conflict(reply);
+        assert!(world.sims.is_empty());
+    }
+
+    #[test]
+    fn create_phase1_rejects_when_max_boards_would_be_exceeded() {
+        // 1 running + 2 local boards > max 2.
+        let mut world = capacity_world(1, 2);
+        let reply = dispatch_reply(&mut world, JobKind::CreatePhase1(phase1_request("sim-1")));
+        expect_conflict(reply);
+        assert!(world.sims.is_empty());
+    }
+
+    fn phase1_request(id: &str) -> Phase1CreateRequest {
+        use crate::orchestrate::{AssignmentTable, BoardAssignment};
+        Phase1CreateRequest {
+            id: id.into(),
+            topology: two_board_topology(),
+            assignment: AssignmentTable {
+                entries: ["a", "b"]
+                    .into_iter()
+                    .map(|board_id| BoardAssignment {
+                        board_id: board_id.into(),
+                        backend: "127.0.0.1:8091".into(),
+                    })
+                    .collect(),
+            },
+            local_backend: "127.0.0.1:8091".into(),
+        }
+    }
+
+    #[test]
+    fn create_phase1_rejects_an_unsafe_simulation_id_before_spawning() {
+        for bad in ["", "a/b", "..", "sim 1", "x\n", &"a".repeat(129)] {
+            let mut world = capacity_world(0, 8);
+            match dispatch_reply(&mut world, JobKind::CreatePhase1(phase1_request(bad))) {
+                JobReply::Err(err) => {
+                    assert_eq!(err.status, 400, "id {bad:?}: {err:?}");
+                    assert_eq!(err.code, "invalid_id", "id {bad:?}");
+                }
+                other => panic!("id {bad:?}: expected 400, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn create_phase1_uses_the_requested_id_and_rejects_a_duplicate() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-arbiter.sh");
+        fs::write(&script, "#!/bin/sh\nsleep 300 &\nwait\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let opts = ServerOptions {
+            arbiter_bin: script,
+            advertise_ip: "127.0.0.1".into(),
+            time_sync_period_ms: 100,
+            data_udp_window: 32,
+        };
+        let mut world = capacity_world(0, 8);
+        let run = |world: &mut World, id: &str| {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            dispatch_job(
+                world,
+                Job {
+                    kind: JobKind::CreatePhase1(phase1_request(id)),
+                    reply: reply_tx,
+                },
+                &opts,
+            );
+            reply_rx.recv().expect("dispatch_job replies")
+        };
+
+        match run(&mut world, "frontend-chosen-0") {
+            JobReply::CreatedPhase1(reply) => assert_eq!(reply.id, "frontend-chosen-0"),
+            other => panic!("expected created simulation, got {other:?}"),
+        }
+        assert!(world.sims.contains_key("frontend-chosen-0"));
+
+        match run(&mut world, "frontend-chosen-0") {
+            JobReply::Err(err) => {
+                assert_eq!(err.status, 409, "{err:?}");
+                assert!(err.message.contains("already exists"), "{err:?}");
+            }
+            other => panic!("expected 409 for a duplicate id, got {other:?}"),
+        }
+        // The existing simulation is untouched by the rejected duplicate.
+        assert_eq!(world.sims.len(), 1);
+
+        for sim in world.sims.values_mut() {
+            sim.terminate_within(Duration::from_millis(200));
+        }
+    }
+
+    #[test]
+    fn create_within_max_boards_reaches_arbiter_spawn() {
+        // 0 running + 2 requested == max 2 passes the check; the missing arbiter
+        // then fails the spawn with a non-409 error.
+        let mut world = capacity_world(0, 2);
+        match dispatch_reply(&mut world, JobKind::Create(two_board_topology())) {
+            JobReply::Err(err) => assert_ne!(err.status, 409, "{err:?}"),
+            other => panic!("expected spawn failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_phase2_file_is_complete_json_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("phase2.json");
+        let req = phase2(vec![endpoints("b:1", 20, 21)], "239.255.0.1", 47000);
+        write_phase2_file(&path, &req).unwrap();
+        let back: Phase2ConnectRequest = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(back.cluster_key, req.cluster_key);
+        assert_eq!(back.peers, req.peers);
+        assert_eq!(back.multicast, req.multicast);
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn phase2_single_backend_accepts_only_empty_peers() {
+        assert!(check_phase2(None, &phase2(vec![], "239.255.0.0", 47000)).is_ok());
+        let err = check_phase2(
+            None,
+            &phase2(vec![endpoints("b:1", 1, 2)], "239.255.0.0", 47000),
+        )
+        .unwrap_err();
+        assert_eq!(err.status, 409);
+    }
+
+    #[test]
+    fn phase2_multi_backend_validates_peers_and_group() {
+        let local = endpoints("a:1", 10, 11);
+        let ok = phase2(vec![endpoints("b:1", 20, 21)], "239.255.0.1", 47000);
+        assert!(check_phase2(Some(&local), &ok).is_ok());
+
+        let cases = [
+            phase2(vec![], "239.255.0.1", 47000),
+            phase2(vec![endpoints("b:1", 20, 21)], "10.0.0.1", 47000),
+            phase2(vec![endpoints("b:1", 20, 21)], "239.255.0.1", 0),
+            phase2(vec![endpoints("a:1", 20, 21)], "239.255.0.1", 47000),
+            phase2(
+                vec![endpoints("b:1", 20, 21), endpoints("b:1", 22, 23)],
+                "239.255.0.1",
+                47000,
+            ),
+            phase2(vec![endpoints("b:1", 0, 21)], "239.255.0.1", 47000),
+        ];
+        for req in cases {
+            let err = check_phase2(Some(&local), &req).unwrap_err();
+            assert_eq!(err.status, 400, "{req:?}");
+        }
+
+        // The shared cluster_key is stamped on every time-sync packet.
+        for bad_key in [String::new(), "k".repeat(256)] {
+            let req = Phase2ConnectRequest {
+                cluster_key: bad_key,
+                ..ok.clone()
+            };
+            let err = check_phase2(Some(&local), &req).unwrap_err();
+            assert_eq!(err.status, 400, "{req:?}");
+        }
+        let longest = Phase2ConnectRequest {
+            cluster_key: "k".repeat(255),
+            ..ok
+        };
+        assert!(check_phase2(Some(&local), &longest).is_ok());
+    }
 
     #[test]
     fn topology_dsl_unittests() {
@@ -1344,5 +2086,120 @@ mod tests {
             watch.pending.back().map(|batch| batch.seq),
             Some(WATCH_PENDING_KEEP as u64 + 2)
         );
+    }
+
+    /// `true` while `pid` is a live (non-zombie) process.
+    fn process_alive(pid: u32) -> bool {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // Format: `pid (comm) state ...`; comm may contain spaces.
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with('Z')),
+            Err(_) => false,
+        }
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn temp_paths_remove_files_and_directories_on_drop() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("iox-root");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested/inspect.sock"), b"x").unwrap();
+        let file = base.path().join("topology.json");
+        fs::write(&file, b"{}").unwrap();
+
+        let mut temp = TempPaths::default();
+        temp.push(dir.clone());
+        temp.push(file.clone());
+        temp.push(base.path().join("never-created"));
+        drop(temp);
+
+        assert!(!dir.exists());
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn kill_process_tree_also_kills_grandchildren() {
+        use std::io::Read;
+
+        // The shell stands in for the arbiter; `sleep` for a node it started.
+        let mut shell = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 300 & echo $!; wait")
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut out = shell.stdout.take().unwrap();
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        while out.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+            line.push(byte[0]);
+        }
+        let grandchild: u32 = String::from_utf8(line).unwrap().trim().parse().unwrap();
+        assert!(process_alive(grandchild));
+
+        kill_process_tree(&mut shell);
+
+        assert!(
+            shell.try_wait().unwrap().is_some(),
+            "arbiter must be reaped"
+        );
+        wait_until("grandchild to die", || !process_alive(grandchild));
+    }
+
+    #[test]
+    fn terminating_a_simulation_removes_its_processes_and_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("node.pid");
+        let script = dir.path().join("fake-arbiter.sh");
+        // Ignores the host Shutdown command, like an arbiter still waiting for
+        // its nodes, and leaves one child process behind.
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 300 &\necho $! > {}\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let opts = ServerOptions {
+            arbiter_bin: script,
+            advertise_ip: "127.0.0.1".into(),
+            time_sync_period_ms: 100,
+            data_udp_window: 32,
+        };
+
+        let mut sim =
+            create_simulation(two_board_topology(), &opts, None, new_cluster_key()).unwrap();
+        let iox_root = sim.iox_root.clone();
+        assert!(iox_root.is_dir());
+        wait_until("fake node pid", || {
+            fs::read_to_string(&pid_file).is_ok_and(|s| s.trim().parse::<u32>().is_ok())
+        });
+        let node_pid: u32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(process_alive(node_pid));
+
+        sim.terminate_within(Duration::from_millis(200));
+        assert!(sim.child.is_none());
+        drop(sim);
+
+        wait_until("node to die", || !process_alive(node_pid));
+        assert!(!iox_root.exists(), "iceoryx root must be removed");
     }
 }
