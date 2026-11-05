@@ -88,19 +88,17 @@ pub enum LogOrigin {
 /// One log sample on the node→arbiter and arbiter→server buses.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
-pub enum ClusterLog {
-    Record {
-        /// Board hash when [`LogOrigin::Node`]; `0` for the arbiter.
-        board_hash: u64,
-        level: LogLevel,
-        origin: LogOrigin,
-        /// Virtual time (ns) of the producing process when the line was logged.
-        /// `0` until the process has reported a virtual time. The frontend
-        /// orders log lines of several backends by this value.
-        virtual_time_ns: u64,
-        text_len: u16,
-        text: [u8; LOG_TEXT_CAP],
-    },
+pub struct ClusterLog {
+    /// Board hash when [`LogOrigin::Node`]; `0` for the arbiter.
+    board_hash: u64,
+    level: LogLevel,
+    origin: LogOrigin,
+    /// Virtual time (ns) of the producing process when the line was logged.
+    /// `0` until the process has reported a virtual time. The frontend
+    /// orders log lines of several backends by this value.
+    virtual_time_ns: u64,
+    text_len: u16,
+    text: [u8; LOG_TEXT_CAP],
 }
 
 impl ClusterLog {
@@ -119,7 +117,7 @@ impl ClusterLog {
             LogOrigin::Arbiter => 0,
             LogOrigin::Node => board_hash,
         };
-        Self::Record {
+        Self {
             board_hash,
             level,
             origin,
@@ -131,42 +129,28 @@ impl ClusterLog {
 
     #[must_use]
     pub fn virtual_time_ns(self) -> u64 {
-        match self {
-            Self::Record {
-                virtual_time_ns, ..
-            } => virtual_time_ns,
-        }
+        self.virtual_time_ns
     }
 
     #[must_use]
     pub fn level(self) -> LogLevel {
-        match self {
-            Self::Record { level, .. } => level,
-        }
+        self.level
     }
 
     #[must_use]
     pub fn origin(self) -> LogOrigin {
-        match self {
-            Self::Record { origin, .. } => origin,
-        }
+        self.origin
     }
 
     #[must_use]
     pub fn board_hash(self) -> u64 {
-        match self {
-            Self::Record { board_hash, .. } => board_hash,
-        }
+        self.board_hash
     }
 
     #[must_use]
     pub fn text(&self) -> &str {
-        match self {
-            Self::Record { text, text_len, .. } => {
-                let n = (*text_len as usize).min(text.len());
-                std::str::from_utf8(&text[..n]).unwrap_or("")
-            }
-        }
+        let n = (self.text_len as usize).min(self.text.len());
+        std::str::from_utf8(&self.text[..n]).unwrap_or("")
     }
 
     /// `[{level}] arbiter: …` or `[{level}] node {id}: …`.
