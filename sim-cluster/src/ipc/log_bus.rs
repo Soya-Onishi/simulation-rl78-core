@@ -117,11 +117,14 @@ impl LogQueue {
         }
     }
 
-    fn push_text(&self, level: LogLevel, text: &str) {
-        self.push(
-            ClusterLog::record(level, self.origin, self.board_hash, text)
-                .with_virtual_time_ns(LOG_VIRTUAL_TIME_NS.load(Ordering::Relaxed)),
-        );
+    fn push_text(&self, level: LogLevel, text: &str, virtual_time_ns: u64) {
+        self.push(ClusterLog::record(
+            level,
+            self.origin,
+            self.board_hash,
+            text,
+            virtual_time_ns,
+        ));
     }
 
     fn push(&self, record: ClusterLog) {
@@ -238,7 +241,11 @@ impl log::Log for ProcessLog {
         else {
             return;
         };
-        queue.push_text(level_from_log(record.level()), &record.args().to_string());
+        queue.push_text(
+            level_from_log(record.level()),
+            &record.args().to_string(),
+            LOG_VIRTUAL_TIME_NS.load(Ordering::Relaxed),
+        );
     }
 
     fn flush(&self) {}

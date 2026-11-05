@@ -105,7 +105,13 @@ pub enum ClusterLog {
 
 impl ClusterLog {
     #[must_use]
-    pub fn record(level: LogLevel, origin: LogOrigin, board_hash: u64, text: &str) -> Self {
+    pub fn record(
+        level: LogLevel,
+        origin: LogOrigin,
+        board_hash: u64,
+        text: &str,
+        virtual_time_ns: u64,
+    ) -> Self {
         let fitted = fit_text(text, LOG_TEXT_CAP);
         let mut buf = [0u8; LOG_TEXT_CAP];
         buf[..fitted.len()].copy_from_slice(fitted.as_bytes());
@@ -117,31 +123,9 @@ impl ClusterLog {
             board_hash,
             level,
             origin,
-            virtual_time_ns: 0,
+            virtual_time_ns,
             text_len: fitted.len() as u16,
             text: buf,
-        }
-    }
-
-    /// Same record stamped with the producer's virtual time.
-    #[must_use]
-    pub fn with_virtual_time_ns(self, virtual_time_ns: u64) -> Self {
-        match self {
-            Self::Record {
-                board_hash,
-                level,
-                origin,
-                text_len,
-                text,
-                ..
-            } => Self::Record {
-                board_hash,
-                level,
-                origin,
-                virtual_time_ns,
-                text_len,
-                text,
-            },
         }
     }
 
@@ -264,7 +248,7 @@ mod tests {
 
     #[test]
     fn render_names_arbiter_and_node() {
-        let arb = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 99, "Start broadcast");
+        let arb = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 99, "Start broadcast", 0);
         assert_eq!(arb.origin(), LogOrigin::Arbiter);
         assert_eq!(arb.board_hash(), 0);
         assert_eq!(
@@ -272,7 +256,7 @@ mod tests {
             "[info] arbiter: Start broadcast"
         );
 
-        let node = ClusterLog::record(LogLevel::Warn, LogOrigin::Node, 7, "duplicate Ready");
+        let node = ClusterLog::record(LogLevel::Warn, LogOrigin::Node, 7, "duplicate Ready", 0);
         assert_eq!(
             node.render(|h| if h == 7 { Some("mcu0") } else { None }),
             "[warn] node mcu0: duplicate Ready"
@@ -284,19 +268,17 @@ mod tests {
     }
 
     #[test]
-    fn virtual_time_defaults_to_zero_and_can_be_stamped() {
-        let record = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 0, "hi");
-        assert_eq!(record.virtual_time_ns(), 0);
-        let stamped = record.with_virtual_time_ns(1_500);
-        assert_eq!(stamped.virtual_time_ns(), 1_500);
-        assert_eq!(stamped.text(), "hi");
-        assert_eq!(stamped.level(), LogLevel::Info);
+    fn record_stores_virtual_time_ns() {
+        let record = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 0, "hi", 1_500);
+        assert_eq!(record.virtual_time_ns(), 1_500);
+        assert_eq!(record.text(), "hi");
+        assert_eq!(record.level(), LogLevel::Info);
     }
 
     #[test]
     fn long_text_is_cut_on_a_char_boundary() {
         let text = format!("start-{}-end", "あ".repeat(80));
-        let record = ClusterLog::record(LogLevel::Debug, LogOrigin::Arbiter, 0, &text);
+        let record = ClusterLog::record(LogLevel::Debug, LogOrigin::Arbiter, 0, &text, 0);
         let shown = record.text();
         assert!(shown.len() <= LOG_TEXT_CAP);
         assert!(shown.is_char_boundary(shown.len()));
