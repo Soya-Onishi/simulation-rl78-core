@@ -302,6 +302,24 @@ class Topology(ABC):
         return edges
 
 
+def _reject_duplicate_edges(edges: list[dict[str, Any]]) -> None:
+    """Reject duplicate leaf endpoints across the flattened edge list.
+
+    Matches sim-cluster validation: ``(from.path, from.port, to.path, to.port)``.
+    """
+    seen: set[tuple[str, str, str, str]] = set()
+    for edge in edges:
+        src = edge["from"]
+        dst = edge["to"]
+        key = (src["path"], src["port"], dst["path"], dst["port"])
+        if key in seen:
+            raise ValueError(
+                "duplicate edge "
+                f"'{src['path']}:{src['port']}' -> '{dst['path']}:{dst['port']}'"
+            )
+        seen.add(key)
+
+
 _SIMULATION_MARKER = "__topology_dsl_simulation__"
 
 
@@ -328,9 +346,11 @@ class SimulationConfig:
         if not self.topology.is_built:
             self.topology.run_build()
         boards = self.topology.collect_boards()
+        edges = self.topology.collect_edges()
+        _reject_duplicate_edges(edges)
         out: dict[str, Any] = {
             "boards": [b.to_dict() for b in boards],
-            "edges": self.topology.collect_edges(),
+            "edges": edges,
             "margin_ns": self.margin_ns,
             "headroom_threshold_ns": self.headroom_threshold_ns,
         }

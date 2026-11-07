@@ -156,6 +156,21 @@ class HierarchyToDictTests(unittest.TestCase):
                 topology=Dup(name="demo"),
             ).to_dict()
 
+    def test_rejects_duplicate_leaf_edge_across_hierarchy(self) -> None:
+        class Parent(Topology):
+            def build(self) -> None:
+                left = self._add_child(PairTopo(name="left"))
+                # Same leaf pair as PairTopo's internal a.tx -> b.rx, via exports.
+                self._connect(left.port("tx"), left.port("rx"))
+
+        with self.assertRaises(ValueError) as ctx:
+            SimulationConfig(
+                margin_ns=1,
+                headroom_threshold_ns=1,
+                topology=Parent(name="sys"),
+            ).to_dict()
+        self.assertIn("duplicate edge", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
