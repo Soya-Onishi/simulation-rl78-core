@@ -434,7 +434,7 @@ mod tests {
                 virtual_time_ns: 0,
                 stop_reason: None,
                 nodes: vec![SessionNode {
-                    id: "mcu-a".into(),
+                    id: crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a")),
                     kind: "rl78".into(),
                     state: "stopped".into(),
                 }],
@@ -581,6 +581,7 @@ mod tests {
         });
 
         let backend = TcpipBackend::new(&base);
+        let board_hex = crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a"));
         check_health(
             "127.0.0.1",
             url::Url::parse(&base).unwrap().port().unwrap(),
@@ -597,7 +598,11 @@ mod tests {
         assert_eq!(backend.status(&id).unwrap().id, "sim-1");
         let topo = backend.topology(&id).unwrap();
         assert_eq!(topo.boards.len(), 1);
-        assert_eq!(topo.boards[0].id, "mcu-a");
+        assert_eq!(topo.boards[0].label, "mcu-a");
+        assert_eq!(
+            topo.boards[0].id,
+            crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a"))
+        );
         assert!(topo.boards[0].kind == "rl78");
         assert!(backend.logs_after(&id, 0).unwrap().is_empty());
         assert_eq!(backend.log_high_water(&id).unwrap(), 7);
@@ -606,7 +611,7 @@ mod tests {
             .invoke_action(
                 &id,
                 InvokeActionRequest {
-                    board_id: "mcu-a".into(),
+                    board_id: board_hex.clone(),
                     device: "sw".into(),
                     action: "press".into(),
                     params: Default::default(),
@@ -618,7 +623,7 @@ mod tests {
             .probe_watch_put(
                 &id,
                 vec![ProbeRef {
-                    board: "mcu-a".into(),
+                    board: board_hex.clone(),
                     name: "p0".into(),
                 }],
             )
@@ -641,7 +646,7 @@ mod tests {
         assert!(backend.csv_poll(&id, req_id).unwrap().done);
         backend.csv_status(&id, req_id).unwrap();
         backend
-            .probe_samples(&id, "mcu-a", "p0", None, None)
+            .probe_samples(&id, &board_hex, "p0", None, None)
             .unwrap();
         let token = backend.viewer_attach(&id).unwrap();
         backend.viewer_check(&id, &token).unwrap();
@@ -649,9 +654,9 @@ mod tests {
         assert_eq!(busy.code, "viewer_busy");
         backend.viewer_detach(&id, &token).unwrap();
         backend
-            .inspect(&id, "mcu-a", InspectRequest::ReadRegs)
+            .inspect(&id, &board_hex, InspectRequest::ReadRegs)
             .unwrap();
-        backend.step(&id, "mcu-a").unwrap();
+        backend.step(&id, &board_hex).unwrap();
         backend.shutdown(&id).unwrap();
 
         let missing = backend.status("missing").unwrap_err();
@@ -660,8 +665,11 @@ mod tests {
     }
 
     #[test]
-    fn tcpip_encodes_slash_in_board_id_path() {
+    fn tcpip_board_path_uses_public_hex_id() {
+        // Path encoding still percent-encodes `/` if a segment ever contains it.
         assert_eq!(encode_path_segment("sys/left/a"), "sys%2Fleft%2Fa");
+        let board_hex = crate::ipc::format_id_hex(crate::ipc::board_id_hash("sys/left/a"));
+        assert_eq!(encode_path_segment(&board_hex), board_hex);
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -683,10 +691,10 @@ mod tests {
 
         let backend = TcpipBackend::new(&base);
         backend
-            .inspect("sim-1", "sys/left/a", InspectRequest::ReadRegs)
+            .inspect("sim-1", &board_hex, InspectRequest::ReadRegs)
             .unwrap();
-        assert_eq!(*mock.last.lock().unwrap(), "inspect:sys/left/a");
-        backend.step("sim-1", "sys/left/a").unwrap();
-        assert_eq!(*mock.last.lock().unwrap(), "step:sys/left/a");
+        assert_eq!(*mock.last.lock().unwrap(), format!("inspect:{board_hex}"));
+        backend.step("sim-1", &board_hex).unwrap();
+        assert_eq!(*mock.last.lock().unwrap(), format!("step:{board_hex}"));
     }
 }

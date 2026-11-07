@@ -25,7 +25,7 @@ use crate::inspect::{InspectReply, InspectRequest, inspect_rpc, inspect_sock_pat
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
     ServerActions, ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox,
-    board_hash_table, board_id_hash, create_node, isolated_config, new_cluster_key,
+    board_id_hash, create_node, format_id_hex, isolated_config, new_cluster_key, parse_id_hex,
     root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
@@ -33,7 +33,7 @@ use crate::probe_log::{
     CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
     ProbeView, ProbeWatchView, json_view, record_view,
 };
-use crate::topology::{LogicalTopology, TopologyError};
+use crate::topology::{LogicalTopology, TopologyError, build_topology_hashes};
 
 /// Live SSE readers start at the high-water mark, so this only covers logs
 /// that arrive between polls.
@@ -493,34 +493,32 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             None => JobReply::Accepted,
         },
         JobKind::Inspect { id, board_id, req } => match world.sims.get(&id) {
-            Some(sim) => {
-                if !sim.nodes.iter().any(|node| node.id == board_id) {
-                    JobReply::Err(ApiError::not_found("unknown board"))
-                } else {
-                    let path = inspect_sock_path(&sim.iox_root, &board_id);
+            Some(sim) => match resolve_board_hex(sim, &board_id) {
+                Ok((_, label)) => {
+                    let path = inspect_sock_path(&sim.iox_root, &label);
                     match inspect_rpc(&path, &req) {
                         Ok(reply) => JobReply::Inspect(reply),
                         Err(err) => JobReply::Err(ApiError::internal(err)),
                     }
                 }
-            }
+                Err(err) => JobReply::Err(err),
+            },
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
         JobKind::Step { id, board_id } => match world.sims.get_mut(&id) {
             Some(sim) => {
                 if sim.state == "exited" {
                     JobReply::Err(ApiError::conflict("arbiter has exited"))
-                } else if !sim.nodes.iter().any(|node| node.id == board_id) {
-                    JobReply::Err(ApiError::not_found("unknown board"))
                 } else {
-                    match send_cmd(
-                        sim,
-                        HostCommand::Step {
-                            board_hash: board_id_hash(&board_id),
+                    match resolve_board_hex(sim, &board_id) {
+                        Ok((board_hash, _)) => match send_cmd(
+                            sim,
+                            HostCommand::Step { board_hash },
+                        ) {
+                            Ok(()) => JobReply::Accepted,
+                            Err(err) => JobReply::Err(ApiError::internal(err)),
                         },
-                    ) {
-                        Ok(()) => JobReply::Accepted,
-                        Err(err) => JobReply::Err(ApiError::internal(err)),
+                        Err(err) => JobReply::Err(err),
                     }
                 }
             }
@@ -543,8 +541,8 @@ fn create_simulation(
     let actions = ServerActions::create(&iox, &id, topo.boards.len())?;
     let probe_inbox = ServerProbeInbox::create(&iox, &id)?;
     let probe_ctrl = ServerProbeCtrl::create(&iox, &id, topo.boards.len())?;
-    let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
-        .map_err(ServerError::Message)?;
+    let hashes = build_topology_hashes(&topo).map_err(|err| ServerError::Message(err.to_string()))?;
+    let boards = hashes.boards;
     let topology = TopologyView::from_logical(&topo);
     let topo_path = write_temp_topology(&topo)?;
     let child = Command::new(&opts.arbiter_bin)
@@ -613,13 +611,39 @@ fn send_cmd(sim: &mut Simulation, cmd: HostCommand) -> Result<(), String> {
     sim.host.publish_cmd(cmd).map_err(|err| err.to_string())
 }
 
+/// Parse a public board id (16-digit hex) and resolve it to (hash, human label).
+fn resolve_board_hex(sim: &Simulation, board_hex: &str) -> Result<(u64, String), ApiError> {
+    let Some(hash) = parse_id_hex(board_hex) else {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "board_id must be a 16-digit lowercase hex string",
+        ));
+    };
+    let Some(label) = sim.boards.get(&hash).cloned() else {
+        return Err(ApiError::not_found("unknown board"));
+    };
+    Ok((hash, label))
+}
+
+fn public_nodes(sim: &Simulation) -> Vec<SessionNode> {
+    sim.nodes
+        .iter()
+        .map(|node| SessionNode {
+            id: format_id_hex(board_id_hash(&node.id)),
+            kind: node.kind.clone(),
+            state: node.state.clone(),
+        })
+        .collect()
+}
+
+
 fn status_event(sim: &Simulation) -> StatusEvent {
     StatusEvent {
         id: sim.id.clone(),
         state: sim.state.clone(),
         virtual_time_ns: sim.virtual_time_ns,
         stop_reason: sim.stop_reason.clone(),
-        nodes: sim.nodes.clone(),
+        nodes: public_nodes(sim),
     }
 }
 
@@ -627,10 +651,7 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(
     if sim.state == "exited" {
         return Err(ApiError::conflict("arbiter has exited"));
     }
-    let board_hash = sim_kernel::id_hash(&request.board_id);
-    if !sim.boards.contains_key(&board_hash) {
-        return Err(ApiError::not_found("unknown board"));
-    }
+    let (board_hash, _) = resolve_board_hex(sim, &request.board_id)?;
     if !sim.action_catalog_ready {
         return Err(ApiError::conflict("action catalog is not ready"));
     }
@@ -683,11 +704,15 @@ fn poll_actions(sim: &mut Simulation) {
     loop {
         match sim.actions.try_upstream() {
             Ok(Some(ActionUpstream::Advertise(sample))) => {
-                let Some(board_id) = sim.boards.get(&sample.from).cloned() else {
+                let Some(board_label) = sim.boards.get(&sample.from).cloned() else {
                     continue;
                 };
-                match AdvertisedAction::new(&board_id, &sample) {
-                    Ok(body) => upsert_catalog(sim, body),
+                let board_hex = format_id_hex(sample.from);
+                match AdvertisedAction::new(&board_hex, &sample) {
+                    Ok(mut body) => {
+                        body.board_label = board_label;
+                        upsert_catalog(sim, body);
+                    }
                     Err(err) => {
                         eprintln!("cluster-backend {}: action advertise: {err}", sim.id);
                     }
@@ -803,7 +828,8 @@ fn probe_catalog_items(sim: &Simulation) -> Result<Vec<ProbeCatalogItem>, ApiErr
         .probe_catalog
         .values()
         .map(|point| ProbeCatalogItem {
-            board: point.board_id.clone(),
+            board: format_id_hex(board_id_hash(&point.board_id)),
+            board_label: point.board_id.clone(),
             probe: point.name.clone(),
             kind: point.kind.as_str().to_string(),
         })
@@ -816,11 +842,10 @@ fn resolve_probes(sim: &Simulation, probes: &[ProbeRef]) -> Result<Vec<u64>, Api
     require_catalog(sim)?;
     let mut ids = Vec::with_capacity(probes.len());
     for probe in probes {
-        let Some((id, _)) = sim
-            .probe_catalog
-            .iter()
-            .find(|(_, point)| point.board_id == probe.board && point.name == probe.name)
-        else {
+        let (board_hash, _) = resolve_board_hex(sim, &probe.board)?;
+        let Some((id, _)) = sim.probe_catalog.iter().find(|(_, point)| {
+            board_id_hash(&point.board_id) == board_hash && point.name == probe.name
+        }) else {
             return Err(ApiError::not_found(format!(
                 "unknown probe {}/{}",
                 probe.board, probe.name
@@ -1210,12 +1235,17 @@ fn poll_simulation(sim: &mut Simulation) {
 }
 
 fn push_log(sim: &mut Simulation, record: &ClusterLog) {
-    let board = if record.origin() == LogOrigin::Node {
+    let board_label = if record.origin() == LogOrigin::Node {
         sim.boards.get(&record.board_hash()).cloned()
     } else {
         None
     };
-    let who = board.as_deref().unwrap_or(record.origin().as_str());
+    let board = board_label
+        .as_ref()
+        .map(|_| format_id_hex(record.board_hash()));
+    let who = board_label
+        .as_deref()
+        .unwrap_or(record.origin().as_str());
     println!(
         "[{}] [{}] {who}: {}",
         sim.id,
@@ -1296,11 +1326,22 @@ mod tests {
     fn advertised(board_id: &str, device: &str, action: &str) -> AdvertisedAction {
         AdvertisedAction {
             board_id: board_id.into(),
+            board_label: board_id.into(),
             device: device.into(),
             action: action.into(),
             description: String::new(),
             params: Vec::new(),
         }
+    }
+
+    #[test]
+    fn public_board_id_must_be_lowercase_hex() {
+        assert!(parse_id_hex("mcu-a").is_none());
+        assert!(parse_id_hex("0x93d65dc54fda57c6").is_none());
+        assert!(parse_id_hex("93D65DC54FDA57C6").is_none());
+        assert!(parse_id_hex("93d65dc54fda57c").is_none());
+        let good = format_id_hex(board_id_hash("mcu-a"));
+        assert_eq!(parse_id_hex(&good), Some(board_id_hash("mcu-a")));
     }
 
     #[test]

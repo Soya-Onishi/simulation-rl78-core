@@ -23,6 +23,8 @@ pub fn prepare_create_topology(topology: LogicalTopology) -> Result<LogicalTopol
     topology
         .validate()
         .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
+    crate::topology::build_topology_hashes(&topology)
+        .map_err(|err| ApiError::bad_request("invalid_topology", err.to_string()))?;
     for board in &topology.boards {
         if let Some(elf) = &board.elf {
             elf_source::check_http_create_spec(elf).map_err(|err| {
@@ -116,10 +118,13 @@ pub struct AdvertisedActionParam {
     pub default: Option<f64>,
 }
 
-/// One action a client can invoke. Identity fields are strings.
+/// One action a client can invoke. `board_id` is the public 16-digit hex id.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AdvertisedAction {
     pub board_id: String,
+    /// Human-readable board id from the topology definition.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub board_label: String,
     pub device: String,
     pub action: String,
     pub description: String,
@@ -159,36 +164,100 @@ pub struct ProbeSamplesResponse {
     pub samples: Vec<ProbeSampleJson>,
 }
 
+/// One endpoint in `GET /api/simulation/{id}/topology`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyEndpointView {
+    /// `xxh3_64` of the endpoint name as 16-digit hex.
+    pub name: String,
+    /// Human-readable endpoint name from the topology definition.
+    pub label: String,
+    pub direction: crate::topology::EndpointDirection,
+    pub payload: crate::topology::PayloadKind,
+}
+
+/// One hop in a topology edge view (`path` / `port` are public hex ids).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyPortRefView {
+    pub path: String,
+    pub path_label: String,
+    pub port: String,
+    pub port_label: String,
+}
+
+/// One directed edge in `GET /api/simulation/{id}/topology`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyEdgeView {
+    pub from: TopologyPortRefView,
+    pub to: TopologyPortRefView,
+    pub route: Vec<TopologyPortRefView>,
+    pub payload: crate::topology::PayloadKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uart_ring_len: Option<u32>,
+}
+
 /// One board in `GET /api/simulation/{id}/topology` (no `elf`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyBoardView {
+    /// `xxh3_64` of `boards[].id` as 16-digit hex.
     pub id: String,
+    /// Human-readable `boards[].id` from the topology definition.
+    pub label: String,
     pub kind: String,
-    pub endpoints: Vec<crate::topology::EndpointSpec>,
+    pub endpoints: Vec<TopologyEndpointView>,
 }
 
 /// Wiring-diagram topology without firmware blobs or timing knobs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyView {
     pub boards: Vec<TopologyBoardView>,
-    pub edges: Vec<crate::topology::DirectedEdge>,
+    pub edges: Vec<TopologyEdgeView>,
 }
 
 impl TopologyView {
-    /// Drop `elf` and margin fields from a create-time topology.
+    /// Drop `elf` and margin fields; emit public hex ids with display labels.
     #[must_use]
     pub fn from_logical(topo: &LogicalTopology) -> Self {
+        use crate::ipc::{board_id_hash, format_id_hex, port_id_hash};
+        use crate::topology::PortRef;
+
+        let port_ref = |r: &PortRef| TopologyPortRefView {
+            path: format_id_hex(board_id_hash(&r.path)),
+            path_label: r.path.clone(),
+            port: format_id_hex(port_id_hash(&r.port)),
+            port_label: r.port.clone(),
+        };
+
         Self {
             boards: topo
                 .boards
                 .iter()
                 .map(|board| TopologyBoardView {
-                    id: board.id.clone(),
+                    id: format_id_hex(board_id_hash(&board.id)),
+                    label: board.id.clone(),
                     kind: board.kind.clone(),
-                    endpoints: board.endpoints.clone(),
+                    endpoints: board
+                        .endpoints
+                        .iter()
+                        .map(|ep| TopologyEndpointView {
+                            name: format_id_hex(port_id_hash(&ep.name)),
+                            label: ep.name.clone(),
+                            direction: ep.direction,
+                            payload: ep.payload,
+                        })
+                        .collect(),
                 })
                 .collect(),
-            edges: topo.edges.clone(),
+            edges: topo
+                .edges
+                .iter()
+                .map(|edge| TopologyEdgeView {
+                    from: port_ref(&edge.from),
+                    to: port_ref(&edge.to),
+                    route: edge.route.iter().map(port_ref).collect(),
+                    payload: edge.payload,
+                    uart_ring_len: edge.uart_ring_len,
+                })
+                .collect(),
         }
     }
 }
@@ -289,7 +358,8 @@ impl std::error::Error for ApiError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest, prepare_create_topology,
+        ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest, TopologyView,
+        prepare_create_topology,
     };
     use crate::topology::LogicalTopology;
 
@@ -343,6 +413,18 @@ mod tests {
             assert_eq!(topo.boards[0].elf.as_deref(), Some(elf));
         }
         assert!(prepare_create_topology(one_board(None)).is_ok());
+    }
+
+    #[test]
+    fn topology_view_emits_hex_ids_with_labels() {
+        let view = TopologyView::from_logical(&one_board(None));
+        assert_eq!(view.boards[0].label, "a");
+        assert_eq!(
+            view.boards[0].id,
+            crate::ipc::format_id_hex(crate::ipc::board_id_hash("a"))
+        );
+        assert_eq!(view.boards[0].id.len(), 16);
+        assert!(crate::ipc::parse_id_hex(&view.boards[0].id).is_some());
     }
 
     #[test]

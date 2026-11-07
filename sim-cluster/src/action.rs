@@ -286,6 +286,7 @@ impl AdvertisedAction {
         }
         Ok(AdvertisedAction {
             board_id: board_id.to_string(),
+            board_label: String::new(),
             device,
             action,
             description: unpack(&sample.description, sample.description_len),

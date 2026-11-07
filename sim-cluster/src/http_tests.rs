@@ -47,7 +47,7 @@ impl SimulationBackend for TopoMock {
             virtual_time_ns: 0,
             stop_reason: None,
             nodes: vec![SessionNode {
-                id: "mcu-a".into(),
+                id: crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a")),
                 kind: "rl78".into(),
                 state: "stopped".into(),
             }],
@@ -217,7 +217,11 @@ fn simulation_topology_returns_boards_without_elf() {
         let bytes = res.body_mut().read_to_vec().unwrap();
         let view: TopologyView = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(view.boards.len(), 1);
-        assert_eq!(view.boards[0].id, "mcu-a");
+        assert_eq!(view.boards[0].label, "mcu-a");
+        assert_eq!(
+            view.boards[0].id,
+            crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a"))
+        );
         assert_eq!(view.boards[0].kind, "rl78");
         assert!(view.edges.is_empty());
         let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

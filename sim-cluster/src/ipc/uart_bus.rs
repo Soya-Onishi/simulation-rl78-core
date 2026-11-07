@@ -21,8 +21,8 @@ type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
 /// TX and RX both use `open_or_create` with identical SPSC QoS derived from the
 /// topology; whichever side arrives first creates the service and holds the port.
 pub struct NodeUartPorts {
-    pub producers: HashMap<String, UartPub>,
-    pub consumers: HashMap<String, UartSub>,
+    pub producers: HashMap<u64, UartPub>,
+    pub consumers: HashMap<u64, UartSub>,
 }
 
 impl NodeUartPorts {
@@ -44,7 +44,7 @@ impl NodeUartPorts {
                 &edge.to.path,
                 &edge.to.port,
             );
-            let svc_name = names::uart_edge(cluster_key, &id);
+            let svc_name = names::uart_edge(cluster_key, id);
             let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
             if edge.from.path == board_id {
                 let puber = open_or_create_uart_publisher(node, &svc_name, capacity)?;
@@ -60,13 +60,13 @@ impl NodeUartPorts {
         })
     }
 
-    pub fn try_send(&self, edge_id: &str, frame: UartFrame) -> Result<(), IpcError> {
-        let Some(puber) = self.producers.get(edge_id) else {
-            return Err(IpcError::Message(format!("no producer for {edge_id}")));
+    pub fn try_send(&self, edge_id: u64, frame: UartFrame) -> Result<(), IpcError> {
+        let Some(puber) = self.producers.get(&edge_id) else {
+            return Err(IpcError::Message(format!("no producer for {edge_id:#x}")));
         };
         puber
             .send_copy(frame)
-            .map_err(|e| IpcError::Message(format!("uart send {edge_id}: {e:?}")))?;
+            .map_err(|e| IpcError::Message(format!("uart send {edge_id:#x}: {e:?}")))?;
         Ok(())
     }
 
@@ -74,21 +74,21 @@ impl NodeUartPorts {
     pub fn drain_all(
         &self,
         limit_per_edge: usize,
-    ) -> Result<Vec<(String, Vec<UartFrame>)>, IpcError> {
+    ) -> Result<Vec<(u64, Vec<UartFrame>)>, IpcError> {
         let mut out = Vec::new();
         for (id, sub) in &self.consumers {
             let mut frames = Vec::new();
             for _ in 0..limit_per_edge {
                 match sub
                     .receive()
-                    .map_err(|e| IpcError::Message(format!("uart recv {id}: {e:?}")))?
+                    .map_err(|e| IpcError::Message(format!("uart recv {id:#x}: {e:?}")))?
                 {
                     Some(sample) => frames.push(*sample),
                     None => break,
                 }
             }
             if !frames.is_empty() {
-                out.push((id.clone(), frames));
+                out.push((*id, frames));
             }
         }
         Ok(out)
@@ -216,7 +216,7 @@ mod tests {
             data_bits: 8,
             ..UartFrame::default()
         };
-        porta.try_send(&edge, frame).unwrap();
+        porta.try_send(edge, frame).unwrap();
         let mut got = None;
         for _ in 0..100 {
             let drained = portb.drain_all(8).unwrap();

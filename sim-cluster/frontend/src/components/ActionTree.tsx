@@ -106,15 +106,20 @@ function ActionItem({
 
 export default function ActionTree({ actions, actionsError, running, onInvoke, onReload }: Props) {
   const tree = useMemo(() => {
-    const boards = new Map<string, Map<string, ActionRow[]>>()
+    const boards = new Map<string, { label: string; devices: Map<string, ActionRow[]> }>()
     for (const row of actions) {
-      let devices = boards.get(row.board_id)
-      if (!devices) boards.set(row.board_id, (devices = new Map()))
-      const list = devices.get(row.device)
+      let entry = boards.get(row.board_id)
+      if (!entry) {
+        entry = { label: row.board_label || row.board_id, devices: new Map() }
+        boards.set(row.board_id, entry)
+      }
+      const list = entry.devices.get(row.device)
       if (list) list.push(row)
-      else devices.set(row.device, [row])
+      else entry.devices.set(row.device, [row])
     }
-    return [...boards.entries()].map(([board, devices]) => [board, [...devices.entries()]] as const)
+    return [...boards.entries()].map(
+      ([board, { label, devices }]) => [board, label, [...devices.entries()]] as const,
+    )
   }, [actions])
 
   return (
@@ -129,10 +134,10 @@ export default function ActionTree({ actions, actionsError, running, onInvoke, o
         <p className="meta pad">アクションはまだありません。スタート後にボードが公開します。</p>
       ) : (
         <ul className="tree">
-          {tree.map(([board, devices]) => (
+          {tree.map(([board, label, devices]) => (
             <li key={board}>
               <details open>
-                <summary>{board}</summary>
+                <summary title={board}>{label}</summary>
                 <ul className="tree">
                   {devices.map(([device, rows]) => (
                     <li key={device}>

@@ -23,7 +23,7 @@ use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::elf_source;
 use crate::inspect::InspectServer;
 use crate::ipc::{
-    IpcError, NodeActions, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node,
+    IpcError, NodeActions, NodeControl, NodeLog, board_id_hash, create_node,
     isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
@@ -316,9 +316,10 @@ pub fn run_node<E: Entity>(
     let board_hash = board_id_hash(board_id);
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
+    let hashes = crate::topology::build_topology_hashes(&topo)
+        .map_err(|err| BoardError::Message(err.to_string()))?;
     let board = find_board(&topo, board_id)?;
-    let boards =
-        board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).map_err(BoardError::Message)?;
+    let boards = hashes.boards;
 
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;

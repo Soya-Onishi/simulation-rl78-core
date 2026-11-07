@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import xxhash
 from topology_dsl import SimulationConfig, embed_local_elfs
 
 from systemtest.client import ClusterClient, ViewerHold, default_base_url
@@ -20,6 +21,11 @@ from systemtest.uart import UartStream
 OUT_ENV = "SYSTEMTEST_OUT"
 WAIT_STALL_S = 10.0
 WAIT_POLL_S = 0.1
+
+
+def board_id_hex(board_id: str) -> str:
+    """Public API board id: xxh3_64 of the topology board id as 16-digit hex."""
+    return f"{xxhash.xxh3_64_intdigest(board_id.encode('utf-8')):016x}"
 
 
 def out_dir() -> Path:
@@ -133,7 +139,7 @@ class Simulation:
                 converted[name] = float(value.nanoseconds)
             else:
                 converted[name] = float(value)
-        self._client.invoke_action(self._id, board_id, device, action, converted)
+        self._client.invoke_action(self._id, board_id_hex(board_id), device, action, converted)
 
     def wait(self, duration: Duration) -> None:
         until_ns = self.virtual_time_ns + duration.nanoseconds
@@ -205,7 +211,7 @@ class Simulation:
         self._client.catalog(self._id)
 
     def _latest(self, board: str, probe: str, kind: str) -> dict[str, Any] | None:
-        payload = self._client.samples(self._id, board, probe)
+        payload = self._client.samples(self._id, board_id_hex(board), probe)
         self._raise_truncated(payload)
         samples = payload.get("samples") or []
         if not samples:
@@ -228,7 +234,7 @@ class Simulation:
         )
         payload = self._client.samples(
             self._id,
-            board,
+            board_id_hex(board),
             probe,
             from_ns=0 if last_vt is None else last_vt,
             to_ns=self.virtual_time_ns,

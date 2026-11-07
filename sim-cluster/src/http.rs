@@ -871,6 +871,12 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
     if gdb_connected(state, id) {
         return Err(ApiError::conflict("gdb is connected"));
     }
+    if crate::ipc::parse_id_hex(board_id).is_none() {
+        return Err(ApiError::bad_request(
+            "bad_param",
+            "board_id must be a 16-digit lowercase hex string",
+        ));
+    }
 
     let status = state.backend.status(id)?;
     match status

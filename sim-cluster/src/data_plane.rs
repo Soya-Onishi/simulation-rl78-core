@@ -58,19 +58,19 @@ struct UartTxLane {
 }
 
 struct PendingRx {
-    edge_id: String,
+    edge_id: u64,
     ep: String,
     sub: UartSub,
 }
 
 struct PendingTx {
     ep: String,
-    edge_ids: Vec<String>,
+    edge_ids: Vec<u64>,
 }
 
 /// UART edge↔endpoint mapping opened before board ports exist.
 pub struct UartDataPlaneMap {
-    producers: HashMap<String, UartPub>,
+    producers: HashMap<u64, UartPub>,
     pending_rx: Vec<PendingRx>,
     pending_tx: Vec<PendingTx>,
     required_ins: HashSet<String>,
@@ -91,7 +91,7 @@ impl UartDataPlaneMap {
         } = NodeUartPorts::open_for_board(node, cluster_key, board_id, topo_edges)?;
 
         let mut pending_rx = Vec::new();
-        let mut tx_ep_to_edges: HashMap<String, Vec<String>> = HashMap::new();
+        let mut tx_ep_to_edges: HashMap<String, Vec<u64>> = HashMap::new();
 
         for edge in topo_edges {
             if edge.payload != PayloadKind::Uart {
@@ -109,7 +109,9 @@ impl UartDataPlaneMap {
             ) {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
-                        return Err(IpcError::Message(format!("missing uart consumer for {id}")));
+                        return Err(IpcError::Message(format!(
+                            "missing uart consumer for {id:#x}"
+                        )));
                     };
                     pending_rx.push(PendingRx {
                         edge_id: id,
@@ -133,11 +135,11 @@ impl UartDataPlaneMap {
             .collect();
 
         // Keep only producers still needed for pending TX edges.
-        let needed: HashSet<&str> = pending_tx
+        let needed: HashSet<u64> = pending_tx
             .iter()
-            .flat_map(|t| t.edge_ids.iter().map(String::as_str))
+            .flat_map(|t| t.edge_ids.iter().copied())
             .collect();
-        producers.retain(|id, _| needed.contains(id.as_str()));
+        producers.retain(|id, _| needed.contains(id));
 
         let mut required_ins = HashSet::new();
         let mut required_outs = HashSet::new();
@@ -211,7 +213,7 @@ impl UartDataPlaneMap {
             let mut pubs = Vec::with_capacity(pending.edge_ids.len());
             for edge_id in pending.edge_ids {
                 let puber = self.producers.remove(&edge_id).ok_or_else(|| {
-                    DataPlaneError::Message(format!("missing uart producer for {edge_id}"))
+                    DataPlaneError::Message(format!("missing uart producer for {edge_id:#x}"))
                 })?;
                 pubs.push(puber);
             }
@@ -295,19 +297,19 @@ struct AnalogTxLane {
 }
 
 struct AnalogPendingRx {
-    edge_id: String,
+    edge_id: u64,
     ep: String,
     sub: AnalogSub,
 }
 
 struct AnalogPendingTx {
     ep: String,
-    edge_ids: Vec<String>,
+    edge_ids: Vec<u64>,
 }
 
 /// Analog edge↔endpoint mapping opened before board ports exist.
 pub struct AnalogDataPlaneMap {
-    producers: HashMap<String, AnalogPub>,
+    producers: HashMap<u64, AnalogPub>,
     pending_rx: Vec<AnalogPendingRx>,
     pending_tx: Vec<AnalogPendingTx>,
     required_ins: HashSet<String>,
@@ -328,7 +330,7 @@ impl AnalogDataPlaneMap {
         } = NodeAnalogPorts::open_for_board(node, cluster_key, board_id, topo_edges)?;
 
         let mut pending_rx = Vec::new();
-        let mut tx_ep_to_edges: HashMap<String, Vec<String>> = HashMap::new();
+        let mut tx_ep_to_edges: HashMap<String, Vec<u64>> = HashMap::new();
 
         for edge in topo_edges {
             if edge.payload != PayloadKind::Analog {
@@ -347,7 +349,7 @@ impl AnalogDataPlaneMap {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
                         return Err(IpcError::Message(format!(
-                            "missing analog consumer for {id}"
+                            "missing analog consumer for {id:#x}"
                         )));
                     };
                     pending_rx.push(AnalogPendingRx {
@@ -371,11 +373,11 @@ impl AnalogDataPlaneMap {
             .map(|(ep, edge_ids)| AnalogPendingTx { ep, edge_ids })
             .collect();
 
-        let needed: HashSet<&str> = pending_tx
+        let needed: HashSet<u64> = pending_tx
             .iter()
-            .flat_map(|t| t.edge_ids.iter().map(String::as_str))
+            .flat_map(|t| t.edge_ids.iter().copied())
             .collect();
-        producers.retain(|id, _| needed.contains(id.as_str()));
+        producers.retain(|id, _| needed.contains(id));
 
         let mut required_ins = HashSet::new();
         let mut required_outs = HashSet::new();
@@ -449,7 +451,7 @@ impl AnalogDataPlaneMap {
             let mut pubs = Vec::with_capacity(pending.edge_ids.len());
             for edge_id in pending.edge_ids {
                 let puber = self.producers.remove(&edge_id).ok_or_else(|| {
-                    DataPlaneError::Message(format!("missing analog producer for {edge_id}"))
+                    DataPlaneError::Message(format!("missing analog producer for {edge_id:#x}"))
                 })?;
                 pubs.push(puber);
             }

@@ -88,6 +88,8 @@ pub fn run_arbiter_with_topology(
     opts: &ArbiterOptions,
     topo: &LogicalTopology,
 ) -> Result<(), ArbiterError> {
+    crate::topology::build_topology_hashes(topo)
+        .map_err(|err| ArbiterError::Message(err.to_string()))?;
     ensure_node_bins(opts, topo)?;
     run_host_session(opts, topo)
 }

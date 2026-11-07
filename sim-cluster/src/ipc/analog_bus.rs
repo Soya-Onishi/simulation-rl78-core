@@ -21,8 +21,8 @@ type AnalogSub = Subscriber<ipc::Service, AnalogVoltage, ()>;
 
 /// Node analog endpoints for this board.
 pub struct NodeAnalogPorts {
-    pub producers: HashMap<String, AnalogPub>,
-    pub consumers: HashMap<String, AnalogSub>,
+    pub producers: HashMap<u64, AnalogPub>,
+    pub consumers: HashMap<u64, AnalogSub>,
 }
 
 impl NodeAnalogPorts {
@@ -44,7 +44,7 @@ impl NodeAnalogPorts {
                 &edge.to.path,
                 &edge.to.port,
             );
-            let svc_name = names::analog_edge(cluster_key, &id);
+            let svc_name = names::analog_edge(cluster_key, id);
             if edge.from.path == board_id {
                 let puber =
                     open_or_create_analog_publisher(node, &svc_name, DEFAULT_ANALOG_RING_LEN)?;

@@ -91,7 +91,10 @@ pub struct ProbeRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeCatalogItem {
+    /// Board public id (16-digit hex).
     pub board: String,
+    /// Human-readable board id from the topology definition.
+    pub board_label: String,
     pub probe: String,
     pub kind: String,
 }
@@ -384,7 +387,12 @@ impl ProbeLog {
 fn probe_names(catalog: &HashMap<u64, ProbePointName>, probe_id: u64) -> (String, String) {
     catalog
         .get(&probe_id)
-        .map(|point| (point.board_id.clone(), point.name.clone()))
+        .map(|point| {
+            (
+                crate::ipc::format_id_hex(crate::ipc::board_id_hash(&point.board_id)),
+                point.name.clone(),
+            )
+        })
         .unwrap_or_else(|| (String::new(), format!("{:016x}", probe_id)))
 }
 
@@ -493,7 +501,9 @@ pub fn csv_header() -> String {
 #[must_use]
 pub fn csv_record_line(catalog: &[ProbePointName], rec: &ProbeRecord) -> String {
     let point = catalog.iter().find(|point| point.probe_id == rec.probe_id);
-    let board = point.map(|p| p.board_id.as_str()).unwrap_or("");
+    let board = point
+        .map(|p| crate::ipc::format_id_hex(crate::ipc::board_id_hash(&p.board_id)))
+        .unwrap_or_default();
     let probe = point.map(|p| p.name.as_str()).unwrap_or("");
     let probe = if probe.is_empty() {
         format!("{:016x}", rec.probe_id)
@@ -503,7 +513,7 @@ pub fn csv_record_line(catalog: &[ProbePointName], rec: &ProbeRecord) -> String 
     format!(
         "{},{},{},{},{}\n",
         rec.virtual_time_ns,
-        csv_field(board),
+        csv_field(&board),
         csv_field(&probe),
         rec.kind.as_str(),
         csv_field(&display_value(rec.kind, rec.value)),
@@ -610,9 +620,10 @@ mod tests {
             &loaded,
             ProbeRange::parse(None, None).unwrap(),
         );
-        assert!(csv.contains("1,board,p1,digital,HiZ\n"));
-        assert!(csv.contains("2,board,p1,digital,High\n"));
-        assert!(csv.contains("3,board,p1,digital,Low\n"));
+        let board_hex = crate::ipc::format_id_hex(crate::ipc::board_id_hash("board"));
+        assert!(csv.contains(&format!("1,{board_hex},p1,digital,HiZ\n")));
+        assert!(csv.contains(&format!("2,{board_hex},p1,digital,High\n")));
+        assert!(csv.contains(&format!("3,{board_hex},p1,digital,Low\n")));
         let hi = csv.find("High").unwrap();
         let low = csv.find("Low").unwrap();
         assert!(hi < low);
@@ -644,7 +655,10 @@ mod tests {
         catalog.insert(1, point(1, ProbeKind::Analog));
         let sample = json_view(&catalog, &rec(1, 9, ProbeKind::Analog, 3300));
         assert_eq!(sample.virtual_time_ns, 9);
-        assert_eq!(sample.board, "board");
+        assert_eq!(
+            sample.board,
+            crate::ipc::format_id_hex(crate::ipc::board_id_hash("board"))
+        );
         assert_eq!(sample.probe, "p1");
         assert_eq!(sample.kind, "analog");
         assert_eq!(sample.value, serde_json::json!(3300));

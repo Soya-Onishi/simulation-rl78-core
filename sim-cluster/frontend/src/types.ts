@@ -24,6 +24,7 @@ export interface LogEvent {
 
 export interface ProbeCatalogItem {
   board: string
+  board_label: string
   probe: string
   kind: ProbeKind
 }
@@ -53,6 +54,7 @@ export interface ActionParam {
 
 export interface ActionRow {
   board_id: string
+  board_label?: string
   device: string
   action: string
   description: string
@@ -61,22 +63,31 @@ export interface ActionRow {
 
 export interface TopologyEndpoint {
   name: string
+  label: string
   direction: 'in' | 'out'
   payload: ProbeKind
 }
 
 export interface TopologyBoard {
   id: string
+  label: string
   kind: string
   endpoints: TopologyEndpoint[]
 }
 
+export interface TopologyPortRef {
+  path: string
+  path_label: string
+  port: string
+  port_label: string
+}
+
 export interface TopologyEdge {
-  from_board: string
-  from_endpoint: string
-  to_board: string
-  to_endpoint: string
+  from: TopologyPortRef
+  to: TopologyPortRef
+  route: TopologyPortRef[]
   payload: ProbeKind
+  uart_ring_len?: number | null
 }
 
 export interface Topology {

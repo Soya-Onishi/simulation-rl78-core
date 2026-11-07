@@ -361,7 +361,7 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
                   title={`${key} (${item.kind})`}
                   style={{ borderLeftColor: color }}
                 >
-                  <span className="lane-board">{item.board}</span>
+                  <span className="lane-board">{item.board_label || item.board}</span>
                   <span className="lane-probe">{item.probe}</span>
                 </div>
                 {item.kind === 'analog' ? (
