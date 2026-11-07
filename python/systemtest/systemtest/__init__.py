@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from topology_dsl import Board, SimulationConfig, Topology, simulation
+from topology_dsl import Board, SimulationConfig, Topology
 
 from systemtest.duration import Duration
 from systemtest.errors import (
@@ -28,7 +28,6 @@ __all__ = [
     "TruncatedError",
     "WaitError",
     "sim_case",
-    "simulation",
 ]
 
 

@@ -46,7 +46,7 @@ def nested_config(*, left_elf: str | None = None) -> SimulationConfig:
     )
 
 
-class HierarchyEmitTests(unittest.TestCase):
+class HierarchyToDictTests(unittest.TestCase):
     def test_full_ids_and_route(self) -> None:
         out = nested_config(left_elf="https://example.test/a.elf").to_dict()
         ids = {b["id"] for b in out["boards"]}
@@ -125,6 +125,31 @@ class HierarchyEmitTests(unittest.TestCase):
         second = nested_config(left_elf="https://example.test/a.elf").to_dict()
         self.assertEqual(first["boards"], second["boards"])
         self.assertEqual(first["edges"], second["edges"])
+
+    def test_to_dict_is_idempotent(self) -> None:
+        cfg = nested_config(left_elf="https://example.test/a.elf")
+        first = cfg.to_dict()
+        second = cfg.to_dict()
+        self.assertEqual(first, second)
+        first["boards"][0]["elf"] = "mutated"
+        self.assertNotEqual(second["boards"][0].get("elf"), "mutated")
+
+    def test_rejects_duplicate_connect(self) -> None:
+        class Dup(Topology):
+            def build(self) -> None:
+                a = self.board("a")
+                b = self.board("b")
+                a.endpoint("tx", direction="out", payload="uart")
+                b.endpoint("rx", direction="in", payload="uart")
+                self.connect(a.port("tx"), b.port("rx"))
+                self.connect(a.port("tx"), b.port("rx"))
+
+        with self.assertRaises(ValueError):
+            SimulationConfig(
+                margin_ns=1,
+                headroom_threshold_ns=1,
+                topology=Dup(name="demo"),
+            ).to_dict()
 
 
 if __name__ == "__main__":

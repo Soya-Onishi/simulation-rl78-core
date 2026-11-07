@@ -162,6 +162,7 @@ impl LogicalTopology {
             }
         }
 
+        let mut edge_keys = HashSet::new();
         for edge in &self.edges {
             if edge.route.is_empty() {
                 return Err(TopologyError::Invalid(
@@ -177,6 +178,18 @@ impl LogicalTopology {
                 return Err(TopologyError::Invalid(
                     "edge route[last] must equal to".into(),
                 ));
+            }
+            let key = (
+                edge.from.path.clone(),
+                edge.from.port.clone(),
+                edge.to.path.clone(),
+                edge.to.port.clone(),
+            );
+            if !edge_keys.insert(key) {
+                return Err(TopologyError::Invalid(format!(
+                    "duplicate edge '{}:{}' -> '{}:{}'",
+                    edge.from.path, edge.from.port, edge.to.path, edge.to.port
+                )));
             }
             let from = self
                 .boards
@@ -351,6 +364,44 @@ mod tests {
         let text = topo.to_json_string().unwrap();
         let again = parse_logical_topology(&text).unwrap();
         assert_eq!(topo, again);
+    }
+
+    #[test]
+    fn rejects_duplicate_leaf_edge() {
+        let text = r#"{
+          "boards": [
+            {"id":"a","kind":"rl78","endpoints":[
+              {"name":"tx","direction":"out","payload":"uart"}
+            ]},
+            {"id":"b","kind":"rl78","endpoints":[
+              {"name":"rx","direction":"in","payload":"uart"}
+            ]}
+          ],
+          "edges": [
+            {
+              "from": {"path":"a","port":"tx"},
+              "to": {"path":"b","port":"rx"},
+              "route": [
+                {"path":"a","port":"tx"},
+                {"path":"b","port":"rx"}
+              ],
+              "payload":"uart"
+            },
+            {
+              "from": {"path":"a","port":"tx"},
+              "to": {"path":"b","port":"rx"},
+              "route": [
+                {"path":"a","port":"tx"},
+                {"path":"b","port":"rx"}
+              ],
+              "payload":"uart"
+            }
+          ],
+          "margin_ns": 1,
+          "headroom_threshold_ns": 1
+        }"#;
+        let err = parse_logical_topology(text).unwrap_err();
+        assert!(err.to_string().contains("duplicate edge"));
     }
 
     #[test]

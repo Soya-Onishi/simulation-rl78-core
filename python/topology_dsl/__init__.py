@@ -13,6 +13,7 @@ simulation URL.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import runpy
@@ -66,6 +67,8 @@ class Board:
     _endpoints: dict[str, PortRef] = field(default_factory=dict, repr=False)
 
     def endpoint(self, name: str, *, direction: Direction, payload: Payload) -> PortRef:
+        if not name:
+            raise ValueError(f"board {self.id!r}: endpoint name must not be empty")
         if name in self._endpoints:
             raise ValueError(f"board {self.id!r}: duplicate endpoint {name!r}")
         ref = PortRef(
@@ -213,6 +216,24 @@ class Topology(ABC):
             raise ValueError("connect payload mismatch between endpoints")
         if src.leaf.path == dst.leaf.path:
             raise ValueError("connect must link two different boards")
+        leaf_key = (
+            src.leaf.path,
+            src.leaf.port,
+            dst.leaf.path,
+            dst.leaf.port,
+        )
+        for existing in self._edges:
+            if (
+                existing["from"]["path"],
+                existing["from"]["port"],
+                existing["to"]["path"],
+                existing["to"]["port"],
+            ) == leaf_key:
+                raise ValueError(
+                    "duplicate connect between "
+                    f"{src.leaf.path!r}:{src.leaf.port!r} and "
+                    f"{dst.leaf.path!r}:{dst.leaf.port!r}"
+                )
         route_locs = [*src.chain, *reversed(dst.chain)]
         edge: dict[str, Any] = {
             "from": src.leaf.to_dict(),
@@ -242,10 +263,12 @@ class Topology(ABC):
 
     def _is_visible(self, ref: PortRef) -> bool:
         last = ref.chain[-1]
-        for board in self._boards.values():
+        if len(ref.chain) == 1:
+            local = last.path.rsplit("/", 1)[-1]
+            board = self._boards.get(local)
             if (
-                last.path == board.id
-                and len(ref.chain) == 1
+                board is not None
+                and board.id == last.path
                 and last.port in board._endpoints
             ):
                 return True
@@ -267,6 +290,9 @@ class Topology(ABC):
         return edges
 
 
+_SIMULATION_MARKER = "__topology_dsl_simulation__"
+
+
 @dataclass
 class SimulationConfig:
     """Timing settings plus the root ``Topology`` for one simulation."""
@@ -275,11 +301,20 @@ class SimulationConfig:
     headroom_threshold_ns: int
     topology: Topology
     ready_timeout_ms: int | None = None
+    _cached: dict[str, Any] | None = field(default=None, init=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
+        """Build the topology once and return flat simulation JSON (idempotent).
+
+        Returns a deep copy so callers (e.g. ``embed_local_elfs``) can mutate
+        the dict without corrupting the cached value.
+        """
+        if self._cached is not None:
+            return copy.deepcopy(self._cached)
         if self.topology._parent is not None:
             raise RuntimeError("SimulationConfig.topology must be a top-level Topology")
-        self.topology._run_build()
+        if not self.topology._built:
+            self.topology._run_build()
         boards = self.topology._collect_boards()
         out: dict[str, Any] = {
             "boards": [b.to_dict() for b in boards],
@@ -289,18 +324,39 @@ class SimulationConfig:
         }
         if self.ready_timeout_ms is not None:
             out["ready_timeout_ms"] = self.ready_timeout_ms
-        return out
-
-
-_SIMULATION_FNS: list[Callable[[], SimulationConfig]] = []
+        self._cached = out
+        return copy.deepcopy(out)
 
 
 def simulation(
     fn: Callable[[], SimulationConfig],
 ) -> Callable[[], SimulationConfig]:
     """Mark a topology factory for CLI discovery (exactly one per script)."""
-    _SIMULATION_FNS.append(fn)
+    setattr(fn, _SIMULATION_MARKER, True)
     return fn
+
+
+def _is_simulation_factory(obj: object) -> bool:
+    return callable(obj) and bool(getattr(obj, _SIMULATION_MARKER, False))
+
+
+def _simulation_factories_in_namespace(
+    ns: dict[str, Any],
+) -> list[Callable[[], SimulationConfig]]:
+    """Collect ``@simulation`` factories defined by the loaded script itself."""
+    found: list[Callable[[], SimulationConfig]] = []
+    seen: set[int] = set()
+    for obj in ns.values():
+        if not _is_simulation_factory(obj):
+            continue
+        if getattr(obj, "__module__", None) != "__main__":
+            continue
+        key = id(obj)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(obj)  # type: ignore[arg-type]
+    return found
 
 
 DEFAULT_SERVER = "http://127.0.0.1:8090"
@@ -316,21 +372,21 @@ def _usage(code: int) -> None:
     raise SystemExit(code)
 
 
-def _load_emitted(path: str) -> dict[str, Any]:
-    _SIMULATION_FNS.clear()
-    runpy.run_path(path, run_name="__main__")
-    if len(_SIMULATION_FNS) == 0:
+def _load_config_dict(path: str) -> dict[str, Any]:
+    ns = runpy.run_path(path, run_name="__main__")
+    factories = _simulation_factories_in_namespace(ns)
+    if len(factories) == 0:
         raise SystemExit(
             "topology script has no @simulation function; "
             "define exactly one () -> SimulationConfig factory"
         )
-    if len(_SIMULATION_FNS) > 1:
-        names = ", ".join(getattr(fn, "__name__", repr(fn)) for fn in _SIMULATION_FNS)
+    if len(factories) > 1:
+        names = ", ".join(getattr(fn, "__name__", repr(fn)) for fn in factories)
         raise SystemExit(
-            f"topology script has {len(_SIMULATION_FNS)} @simulation functions "
+            f"topology script has {len(factories)} @simulation functions "
             f"({names}); define exactly one"
         )
-    config = _SIMULATION_FNS[0]()
+    config = factories[0]()
     if not isinstance(config, SimulationConfig):
         raise SystemExit(
             "@simulation function must return SimulationConfig, "
@@ -435,7 +491,7 @@ def _cmd_run(argv: list[str]) -> None:
     if len(argv) != 1 or argv[0] in ("-h", "--help"):
         _usage(0 if argv and argv[0] in ("-h", "--help") else 2)
     path = _require_script(argv[0])
-    print(json.dumps(_load_emitted(path), indent=2, sort_keys=False))
+    print(json.dumps(_load_config_dict(path), indent=2, sort_keys=False))
 
 
 def _parse_create(argv: list[str]) -> tuple[str, str | None, bool]:
@@ -472,7 +528,7 @@ def _parse_create(argv: list[str]) -> tuple[str, str | None, bool]:
 def _cmd_create(argv: list[str]) -> None:
     path, cli_server, open_browser = _parse_create(argv)
     path = _require_script(path)
-    topology = embed_local_elfs(_load_emitted(path))
+    topology = embed_local_elfs(_load_config_dict(path))
     server = resolve_server(cli_server)
     sim_id = post_simulation(server, topology)
     page = f"{server}/{sim_id}"
