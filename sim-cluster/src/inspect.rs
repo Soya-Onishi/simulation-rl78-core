@@ -13,8 +13,8 @@ pub const MEM_CHUNK: u32 = 1024;
 
 /// Socket path under the cluster iceoryx root.
 #[must_use]
-pub fn inspect_sock_path(iox_root: &Path, board_hash: u64) -> PathBuf {
-    iox_root.join(format!("inspect-{board_hash:016x}.sock"))
+pub fn inspect_sock_path(iox_root: &Path, board_hash: crate::ipc::HashedId<u64>) -> PathBuf {
+    iox_root.join(format!("inspect-{board_hash}.sock"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub struct InspectServer {
 }
 
 impl InspectServer {
-    pub fn bind(iox_root: &Path, board_hash: u64) -> std::io::Result<Self> {
+    pub fn bind(iox_root: &Path, board_hash: crate::ipc::HashedId<u64>) -> std::io::Result<Self> {
         let path = inspect_sock_path(iox_root, board_hash);
         let _ = std::fs::remove_file(&path);
         if let Some(parent) = path.parent() {

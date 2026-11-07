@@ -9,6 +9,7 @@ use crate::contract::{
 };
 use crate::host::HostCommand;
 use crate::inspect::{InspectReply, InspectRequest};
+use crate::ipc::HashedId;
 use crate::server::{Job, JobKind, JobReply};
 use crate::topology::LogicalTopology;
 
@@ -279,14 +280,14 @@ impl SimulationBackend for LocalBackend {
     fn probe_samples(
         &self,
         id: &str,
-        board: &str,
+        board: HashedId<u64>,
         probe: &str,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Result<crate::contract::ProbeSamplesResponse, ApiError> {
         match self.rpc(JobKind::ProbeSamples {
             id: id.to_string(),
-            board: board.to_string(),
+            board,
             probe: probe.to_string(),
             from_ns,
             to_ns,
@@ -337,12 +338,12 @@ impl SimulationBackend for LocalBackend {
     fn inspect(
         &self,
         id: &str,
-        board_id: &str,
+        board_id: HashedId<u64>,
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
         match self.rpc(JobKind::Inspect {
             id: id.to_string(),
-            board_id: board_id.to_string(),
+            board_id,
             req,
         })? {
             JobReply::Inspect(reply) => Ok(reply),
@@ -353,10 +354,10 @@ impl SimulationBackend for LocalBackend {
         }
     }
 
-    fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError> {
+    fn step(&self, id: &str, board_id: HashedId<u64>) -> Result<(), ApiError> {
         match self.rpc(JobKind::Step {
             id: id.to_string(),
-            board_id: board_id.to_string(),
+            board_id,
         })? {
             JobReply::Accepted => Ok(()),
             JobReply::Err(err) => Err(err),

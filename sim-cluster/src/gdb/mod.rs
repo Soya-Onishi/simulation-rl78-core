@@ -18,10 +18,11 @@ use gdbstub::target::Target;
 
 use crate::backend::SimulationBackend;
 use crate::contract::GdbSessionInfo;
+use crate::ipc::HashedId;
 use target::{ClusterGdbTarget, map_status_reason};
 
 pub struct GdbSlot {
-    pub board_id: String,
+    pub board_id: HashedId<u64>,
     pub port: u16,
     pub host: String,
     pub user: String,
@@ -34,7 +35,7 @@ pub struct GdbSlot {
 impl GdbSlot {
     pub fn info(&self) -> GdbSessionInfo {
         GdbSessionInfo {
-            board_id: self.board_id.clone(),
+            board_id: self.board_id,
             host: self.host.clone(),
             port: self.port,
             user: self.user.clone(),
@@ -78,7 +79,7 @@ pub fn process_user() -> String {
 pub fn spawn_slot(
     backend: Arc<dyn SimulationBackend>,
     sim_id: String,
-    board_id: String,
+    board_id: HashedId<u64>,
     host: String,
 ) -> io::Result<GdbSlot> {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
@@ -90,7 +91,7 @@ pub fn spawn_slot(
     let shutdown_t = shutdown.clone();
     let connected_t = connected.clone();
     let active_t = active.clone();
-    let board_t = board_id.clone();
+    let board_t = board_id;
     let handle = thread::Builder::new()
         .name("gdb".into())
         .spawn(move || {
@@ -120,7 +121,7 @@ pub fn spawn_slot(
 fn gdb_accept_loop(
     backend: Arc<dyn SimulationBackend>,
     sim_id: String,
-    board_id: String,
+    board_id: HashedId<u64>,
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
@@ -139,8 +140,7 @@ fn gdb_accept_loop(
                     *slot = Some(clone);
                 }
                 connected.store(true, Ordering::SeqCst);
-                let mut target =
-                    ClusterGdbTarget::new(backend.clone(), sim_id.clone(), board_id.clone());
+                let mut target = ClusterGdbTarget::new(backend.clone(), sim_id.clone(), board_id);
                 let _ = target.clear_session_breakpoints();
                 let gdb = GdbStub::new(stream);
                 let _ = gdb.run_blocking::<ClusterGdbEventLoop>(&mut target);

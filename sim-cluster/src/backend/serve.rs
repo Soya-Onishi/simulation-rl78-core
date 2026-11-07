@@ -10,6 +10,7 @@ use axum::{Json, Router};
 use crate::contract::{
     ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
     LogEvent, ProbeSamplesResponse, StartSimulationRequest, StatusEvent, TopologyView,
+    parse_hashed_id,
 };
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{
@@ -339,9 +340,10 @@ async fn probe_samples(
     Query(query): Query<SamplesQuery>,
 ) -> Result<Json<ProbeSamplesResponse>, ApiError> {
     let backend = state.backend.clone();
+    let board = parse_hashed_id(&query.board, "board")?;
     Ok(Json(
         blocking(move || {
-            backend.probe_samples(&id, &query.board, &query.probe, query.from_ns, query.to_ns)
+            backend.probe_samples(&id, board, &query.probe, query.from_ns, query.to_ns)
         })
         .await?,
     ))
@@ -388,8 +390,9 @@ async fn inspect(
     Json(req): Json<InspectRequest>,
 ) -> Result<Json<InspectReply>, ApiError> {
     let backend = state.backend.clone();
+    let board_id = parse_hashed_id(&path.board_id, "board_id")?;
     Ok(Json(
-        blocking(move || backend.inspect(&path.id, &path.board_id, req)).await?,
+        blocking(move || backend.inspect(&path.id, board_id, req)).await?,
     ))
 }
 
@@ -398,6 +401,7 @@ async fn step(
     Path(path): Path<BoardPath>,
 ) -> Result<StatusCode, ApiError> {
     let backend = state.backend.clone();
-    blocking(move || backend.step(&path.id, &path.board_id)).await?;
+    let board_id = parse_hashed_id(&path.board_id, "board_id")?;
+    blocking(move || backend.step(&path.id, board_id)).await?;
     Ok(StatusCode::OK)
 }

@@ -9,7 +9,7 @@ use crate::ipc::NodeControl;
 /// Returns `Ok(true)` if [`ControlToArbiter::HostStop`] was sent.
 pub fn notify_host_stop(
     control: &NodeControl,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     reason: &str,
 ) -> Result<bool, BoardError> {
     let Some(reason) = HostStopReason::from_label(reason) else {

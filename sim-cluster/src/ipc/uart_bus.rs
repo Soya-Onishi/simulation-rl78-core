@@ -13,6 +13,8 @@ use sim_kernel::UartFrame;
 use super::names;
 use super::runtime::IpcError;
 
+type EdgeFrames = (crate::ipc::HashedId<u64>, Vec<UartFrame>);
+
 type UartPub = Publisher<ipc::Service, UartFrame, ()>;
 type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
 
@@ -21,8 +23,8 @@ type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
 /// TX and RX both use `open_or_create` with identical SPSC QoS derived from the
 /// topology; whichever side arrives first creates the service and holds the port.
 pub struct NodeUartPorts {
-    pub producers: HashMap<u64, UartPub>,
-    pub consumers: HashMap<u64, UartSub>,
+    pub producers: HashMap<crate::ipc::HashedId<u64>, UartPub>,
+    pub consumers: HashMap<crate::ipc::HashedId<u64>, UartSub>,
 }
 
 impl NodeUartPorts {
@@ -60,28 +62,29 @@ impl NodeUartPorts {
         })
     }
 
-    pub fn try_send(&self, edge_id: u64, frame: UartFrame) -> Result<(), IpcError> {
+    pub fn try_send(
+        &self,
+        edge_id: crate::ipc::HashedId<u64>,
+        frame: UartFrame,
+    ) -> Result<(), IpcError> {
         let Some(puber) = self.producers.get(&edge_id) else {
-            return Err(IpcError::Message(format!("no producer for {edge_id:#x}")));
+            return Err(IpcError::Message(format!("no producer for {edge_id}")));
         };
         puber
             .send_copy(frame)
-            .map_err(|e| IpcError::Message(format!("uart send {edge_id:#x}: {e:?}")))?;
+            .map_err(|e| IpcError::Message(format!("uart send {edge_id}: {e:?}")))?;
         Ok(())
     }
 
     /// Non-blocking drain of all consumer edges.
-    pub fn drain_all(
-        &self,
-        limit_per_edge: usize,
-    ) -> Result<Vec<(u64, Vec<UartFrame>)>, IpcError> {
+    pub fn drain_all(&self, limit_per_edge: usize) -> Result<Vec<EdgeFrames>, IpcError> {
         let mut out = Vec::new();
         for (id, sub) in &self.consumers {
             let mut frames = Vec::new();
             for _ in 0..limit_per_edge {
                 match sub
                     .receive()
-                    .map_err(|e| IpcError::Message(format!("uart recv {id:#x}: {e:?}")))?
+                    .map_err(|e| IpcError::Message(format!("uart recv {id}: {e:?}")))?
                 {
                     Some(sample) => frames.push(*sample),
                     None => break,

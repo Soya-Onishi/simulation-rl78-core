@@ -61,13 +61,13 @@ pub struct GdbSshCommand {
 /// Body for `POST /api/simulation/{id}/gdb`.
 #[derive(Debug, Deserialize)]
 pub struct AttachGdbRequest {
-    pub board_id: String,
+    pub board_id: crate::ipc::HashedId<u64>,
 }
 
 /// Live gdbserver slot advertised by the web layer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GdbSessionInfo {
-    pub board_id: String,
+    pub board_id: crate::ipc::HashedId<u64>,
     pub host: String,
     pub port: u16,
     pub user: String,
@@ -98,7 +98,7 @@ pub struct LogEvent {
     pub seq: u64,
     pub level: String,
     pub origin: String,
-    pub board: Option<String>,
+    pub board: Option<crate::ipc::HashedId<u64>>,
     pub text: String,
 }
 
@@ -121,7 +121,7 @@ pub struct AdvertisedActionParam {
 /// One action a client can invoke. `board_id` is the public 16-digit hex id.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AdvertisedAction {
-    pub board_id: String,
+    pub board_id: crate::ipc::HashedId<u64>,
     /// Human-readable board id from the topology definition.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub board_label: String,
@@ -140,7 +140,7 @@ pub struct ActionList {
 /// `POST /api/simulation/{id}/actions` body.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InvokeActionRequest {
-    pub board_id: String,
+    pub board_id: crate::ipc::HashedId<u64>,
     pub device: String,
     pub action: String,
     #[serde(default)]
@@ -151,7 +151,7 @@ pub struct InvokeActionRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProbeSampleJson {
     pub virtual_time_ns: u64,
-    pub board: String,
+    pub board: crate::ipc::HashedId<u64>,
     pub probe: String,
     pub kind: String,
     pub value: serde_json::Value,
@@ -167,8 +167,8 @@ pub struct ProbeSamplesResponse {
 /// One endpoint in `GET /api/simulation/{id}/topology`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyEndpointView {
-    /// `xxh3_64` of the endpoint name as 16-digit hex.
-    pub name: String,
+    /// `xxh3_64` of the endpoint name (serde: 16-digit hex).
+    pub name: crate::ipc::HashedId<u64>,
     /// Human-readable endpoint name from the topology definition.
     pub label: String,
     pub direction: crate::topology::EndpointDirection,
@@ -178,9 +178,9 @@ pub struct TopologyEndpointView {
 /// One hop in a topology edge view (`path` / `port` are public hex ids).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyPortRefView {
-    pub path: String,
+    pub path: crate::ipc::HashedId<u64>,
     pub path_label: String,
-    pub port: String,
+    pub port: crate::ipc::HashedId<u64>,
     pub port_label: String,
 }
 
@@ -198,8 +198,8 @@ pub struct TopologyEdgeView {
 /// One board in `GET /api/simulation/{id}/topology` (no `elf`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyBoardView {
-    /// `xxh3_64` of `boards[].id` as 16-digit hex.
-    pub id: String,
+    /// `xxh3_64` of `boards[].id` (serde: 16-digit hex).
+    pub id: crate::ipc::HashedId<u64>,
     /// Human-readable `boards[].id` from the topology definition.
     pub label: String,
     pub kind: String,
@@ -217,13 +217,13 @@ impl TopologyView {
     /// Drop `elf` and margin fields; emit public hex ids with display labels.
     #[must_use]
     pub fn from_logical(topo: &LogicalTopology) -> Self {
-        use crate::ipc::{board_id_hash, format_id_hex, port_id_hash};
+        use crate::ipc::{board_id_hash, port_id_hash};
         use crate::topology::PortRef;
 
         let port_ref = |r: &PortRef| TopologyPortRefView {
-            path: format_id_hex(board_id_hash(&r.path)),
+            path: board_id_hash(&r.path),
             path_label: r.path.clone(),
-            port: format_id_hex(port_id_hash(&r.port)),
+            port: port_id_hash(&r.port),
             port_label: r.port.clone(),
         };
 
@@ -232,14 +232,14 @@ impl TopologyView {
                 .boards
                 .iter()
                 .map(|board| TopologyBoardView {
-                    id: format_id_hex(board_id_hash(&board.id)),
+                    id: board_id_hash(&board.id),
                     label: board.id.clone(),
                     kind: board.kind.clone(),
                     endpoints: board
                         .endpoints
                         .iter()
                         .map(|ep| TopologyEndpointView {
-                            name: format_id_hex(port_id_hash(&ep.name)),
+                            name: port_id_hash(&ep.name),
                             label: ep.name.clone(),
                             direction: ep.direction,
                             payload: ep.payload,
@@ -347,6 +347,16 @@ impl ApiError {
     }
 }
 
+/// Parse a public 16-digit lowercase hex id from a path or query string.
+pub fn parse_hashed_id(text: &str, field: &str) -> Result<crate::ipc::HashedId<u64>, ApiError> {
+    text.parse().map_err(|_| {
+        ApiError::bad_request(
+            "bad_param",
+            format!("{field} must be a 16-digit lowercase hex string"),
+        )
+    })
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.message, self.code)
@@ -359,7 +369,7 @@ impl std::error::Error for ApiError {}
 mod tests {
     use super::{
         ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest, TopologyView,
-        prepare_create_topology,
+        parse_hashed_id, prepare_create_topology,
     };
     use crate::topology::LogicalTopology;
 
@@ -419,12 +429,16 @@ mod tests {
     fn topology_view_emits_hex_ids_with_labels() {
         let view = TopologyView::from_logical(&one_board(None));
         assert_eq!(view.boards[0].label, "a");
-        assert_eq!(
-            view.boards[0].id,
-            crate::ipc::format_id_hex(crate::ipc::board_id_hash("a"))
-        );
-        assert_eq!(view.boards[0].id.len(), 16);
-        assert!(crate::ipc::parse_id_hex(&view.boards[0].id).is_some());
+        assert_eq!(view.boards[0].id, crate::ipc::board_id_hash("a"));
+        assert_eq!(view.boards[0].id.to_string().len(), 16);
+    }
+
+    #[test]
+    fn parse_hashed_id_rejects_bad_hex() {
+        assert!(parse_hashed_id("ABCDEF0123456789", "board_id").is_err());
+        assert!(parse_hashed_id("0x0123456789abcdef", "board_id").is_err());
+        let ok = crate::ipc::board_id_hash("mcu-a");
+        assert_eq!(parse_hashed_id(&ok.to_string(), "board_id").unwrap(), ok);
     }
 
     #[test]
@@ -434,14 +448,14 @@ mod tests {
             samples: vec![
                 ProbeSampleJson {
                     virtual_time_ns: 1,
-                    board: "a".into(),
+                    board: crate::ipc::board_id_hash("a"),
                     probe: "p01".into(),
                     kind: "digital".into(),
                     value: serde_json::json!("High"),
                 },
                 ProbeSampleJson {
                     virtual_time_ns: 2,
-                    board: "a".into(),
+                    board: crate::ipc::board_id_hash("a"),
                     probe: "uart0".into(),
                     kind: "uart".into(),
                     value: serde_json::json!(65),

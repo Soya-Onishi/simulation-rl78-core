@@ -34,11 +34,13 @@ pub enum NodeEffect {
     Reset,
     /// Replace the probe emit set for `board_hash` (ignore if it is not this node).
     ProbeWatch {
-        board_hash: u64,
-        probe_ids: Vec<u64>,
+        board_hash: crate::ipc::HashedId<u64>,
+        probe_ids: Vec<crate::ipc::HashedId<u64>>,
     },
     /// Execute one kernel [`sim_kernel::Command::Step`] if `board_hash` matches.
-    GdbStep { board_hash: u64 },
+    GdbStep {
+        board_hash: crate::ipc::HashedId<u64>,
+    },
     /// Log-only; state is unchanged aside from the warning.
     Warn(String),
 }
@@ -124,8 +126,14 @@ pub enum PeerState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerEffect {
     Warn(String),
-    TimeReport { from: u64, virtual_time_ns: u64 },
-    HostStop { from: u64, reason: HostStopReason },
+    TimeReport {
+        from: crate::ipc::HashedId<u64>,
+        virtual_time_ns: u64,
+    },
+    HostStop {
+        from: crate::ipc::HashedId<u64>,
+        reason: HostStopReason,
+    },
 }
 
 impl PeerState {
@@ -140,7 +148,7 @@ impl PeerState {
             (PeerState::Ready, ControlToArbiter::Ready { from }) => (
                 PeerState::Ready,
                 Some(PeerEffect::Warn(format!(
-                    "duplicate Ready from {from:#x}; ignoring"
+                    "duplicate Ready from {from}; ignoring"
                 ))),
             ),
             (
@@ -305,9 +313,16 @@ mod tests {
 
     #[test]
     fn node_gdb_step_from_stopped() {
-        let (n, eff) = NodeState::Stopped.on_message(ControlToNode::GdbStep { board_hash: 7 });
+        let (n, eff) = NodeState::Stopped.on_message(ControlToNode::GdbStep {
+            board_hash: crate::ipc::HashedId::new(7),
+        });
         assert_eq!(n, NodeState::Stopped);
-        assert_eq!(eff, Some(NodeEffect::GdbStep { board_hash: 7 }));
+        assert_eq!(
+            eff,
+            Some(NodeEffect::GdbStep {
+                board_hash: crate::ipc::HashedId::new(7)
+            })
+        );
     }
 
     #[test]
@@ -359,9 +374,9 @@ mod tests {
     #[test]
     fn node_probe_watch_does_not_change_state() {
         let (n, eff) = NodeState::Running.on_message(ControlToNode::ProbeWatch {
-            board_hash: 1,
+            board_hash: crate::ipc::HashedId::new(1),
             count: 0,
-            probe_ids: [0; crate::probe::MAX_PROBES_PER_BOARD],
+            probe_ids: [crate::ipc::HashedId::new(0); crate::probe::MAX_PROBES_PER_BOARD],
         });
         assert_eq!(n, NodeState::Running);
         assert!(matches!(

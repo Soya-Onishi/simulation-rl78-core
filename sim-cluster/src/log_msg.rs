@@ -10,6 +10,8 @@ use std::fmt;
 
 use iceoryx2::prelude::ZeroCopySend;
 
+use crate::ipc::HashedId;
+
 /// UTF-8 payload capacity of one [`ClusterLog`] (bytes).
 ///
 /// Longer text is truncated on a char boundary in [`ClusterLog::record`].
@@ -91,7 +93,7 @@ pub enum LogOrigin {
 pub enum ClusterLog {
     Record {
         /// Board hash when [`LogOrigin::Node`]; `0` for the arbiter.
-        board_hash: u64,
+        board_hash: HashedId<u64>,
         level: LogLevel,
         origin: LogOrigin,
         text_len: u16,
@@ -101,12 +103,17 @@ pub enum ClusterLog {
 
 impl ClusterLog {
     #[must_use]
-    pub fn record(level: LogLevel, origin: LogOrigin, board_hash: u64, text: &str) -> Self {
+    pub fn record(
+        level: LogLevel,
+        origin: LogOrigin,
+        board_hash: HashedId<u64>,
+        text: &str,
+    ) -> Self {
         let fitted = fit_text(text, LOG_TEXT_CAP);
         let mut buf = [0u8; LOG_TEXT_CAP];
         buf[..fitted.len()].copy_from_slice(fitted.as_bytes());
         let board_hash = match origin {
-            LogOrigin::Arbiter => 0,
+            LogOrigin::Arbiter => HashedId::new(0),
             LogOrigin::Node => board_hash,
         };
         Self::Record {
@@ -133,7 +140,7 @@ impl ClusterLog {
     }
 
     #[must_use]
-    pub fn board_hash(self) -> u64 {
+    pub fn board_hash(self) -> HashedId<u64> {
         match self {
             Self::Record { board_hash, .. } => board_hash,
         }
@@ -151,7 +158,10 @@ impl ClusterLog {
 
     /// `[{level}] arbiter: …` or `[{level}] node {id}: …`.
     #[must_use]
-    pub fn render<'a>(&self, board_name: impl Fn(u64) -> Option<&'a str>) -> String {
+    pub fn render<'a>(
+        &self,
+        board_name: impl Fn(crate::ipc::HashedId<u64>) -> Option<&'a str>,
+    ) -> String {
         let who = match self.origin() {
             LogOrigin::Arbiter => "arbiter".to_string(),
             LogOrigin::Node => {
@@ -182,7 +192,11 @@ impl LogConsole {
         self.verbosity
     }
 
-    pub fn accept<'a>(&self, record: &ClusterLog, board_name: impl Fn(u64) -> Option<&'a str>) {
+    pub fn accept<'a>(
+        &self,
+        record: &ClusterLog,
+        board_name: impl Fn(crate::ipc::HashedId<u64>) -> Option<&'a str>,
+    ) {
         if !self.verbosity.permits(record.level()) {
             return;
         }
@@ -228,17 +242,31 @@ mod tests {
 
     #[test]
     fn render_names_arbiter_and_node() {
-        let arb = ClusterLog::record(LogLevel::Info, LogOrigin::Arbiter, 99, "Start broadcast");
+        let arb = ClusterLog::record(
+            LogLevel::Info,
+            LogOrigin::Arbiter,
+            HashedId::new(99),
+            "Start broadcast",
+        );
         assert_eq!(arb.origin(), LogOrigin::Arbiter);
-        assert_eq!(arb.board_hash(), 0);
+        assert_eq!(arb.board_hash(), HashedId::new(0));
         assert_eq!(
             arb.render(|_| Some("nope")),
             "[info] arbiter: Start broadcast"
         );
 
-        let node = ClusterLog::record(LogLevel::Warn, LogOrigin::Node, 7, "duplicate Ready");
+        let node = ClusterLog::record(
+            LogLevel::Warn,
+            LogOrigin::Node,
+            HashedId::new(7),
+            "duplicate Ready",
+        );
         assert_eq!(
-            node.render(|h| if h == 7 { Some("mcu0") } else { None }),
+            node.render(|h| if h == HashedId::new(7) {
+                Some("mcu0")
+            } else {
+                None
+            }),
             "[warn] node mcu0: duplicate Ready"
         );
         assert_eq!(
@@ -250,7 +278,8 @@ mod tests {
     #[test]
     fn long_text_is_cut_on_a_char_boundary() {
         let text = format!("start-{}-end", "あ".repeat(80));
-        let record = ClusterLog::record(LogLevel::Debug, LogOrigin::Arbiter, 0, &text);
+        let record =
+            ClusterLog::record(LogLevel::Debug, LogOrigin::Arbiter, HashedId::new(0), &text);
         let shown = record.text();
         assert!(shown.len() <= LOG_TEXT_CAP);
         assert!(shown.is_char_boundary(shown.len()));

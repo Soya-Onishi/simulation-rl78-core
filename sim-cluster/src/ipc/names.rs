@@ -62,22 +62,26 @@ pub fn action_a2s(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/action/a2s")
 }
 
-/// Service name for one directed UART edge (`edge_id` is already `xxh3_64`).
+/// Service name for one directed UART edge (`edge_id` is already hashed).
 #[must_use]
-pub fn uart_edge(cluster_key: &str, edge_id: u64) -> String {
-    format!("sim-cluster/{cluster_key}/uart/{edge_id:016x}")
+pub fn uart_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
+    format!("sim-cluster/{cluster_key}/uart/{edge_id}")
 }
 
-/// Service name for one directed analog edge (`edge_id` is already `xxh3_64`).
+/// Service name for one directed analog edge (`edge_id` is already hashed).
 #[must_use]
-pub fn analog_edge(cluster_key: &str, edge_id: u64) -> String {
-    format!("sim-cluster/{cluster_key}/analog/{edge_id:016x}")
+pub fn analog_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
+    format!("sim-cluster/{cluster_key}/analog/{edge_id}")
 }
 
 /// Service name for one board probe point.
 #[must_use]
-pub fn probe(cluster_key: &str, board_hash: u64, name_hash: u64) -> String {
-    format!("sim-cluster/{cluster_key}/probe/{board_hash:016x}/{name_hash:016x}")
+pub fn probe(
+    cluster_key: &str,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
+) -> String {
+    format!("sim-cluster/{cluster_key}/probe/{board_hash}/{name_hash}")
 }
 
 /// Service name: arbiter → server live probe samples.
@@ -148,7 +152,12 @@ pub fn probe_csv_a2s(cluster_key: &str) -> String {
 
 /// Runtime edge id: `xxh3_64` of `{from_board}:{from_ep}->{to_board}:{to_ep}`.
 #[must_use]
-pub fn edge_id(from_board: &str, from_ep: &str, to_board: &str, to_ep: &str) -> u64 {
+pub fn edge_id(
+    from_board: &str,
+    from_ep: &str,
+    to_board: &str,
+    to_ep: &str,
+) -> crate::ipc::HashedId<u64> {
     edge_id_hash(from_board, from_ep, to_board, to_ep)
 }
 
@@ -182,9 +191,13 @@ mod tests {
 
     #[test]
     fn probe_service_names_are_stable() {
-        let a = probe("k", 1, 2);
-        assert_eq!(a, probe("k", 1, 2));
-        assert_ne!(probe("k", 1, 2), probe("k", 1, 3));
+        use crate::ipc::HashedId;
+        let a = probe("k", HashedId::new(1), HashedId::new(2));
+        assert_eq!(a, probe("k", HashedId::new(1), HashedId::new(2)));
+        assert_ne!(
+            probe("k", HashedId::new(1), HashedId::new(2)),
+            probe("k", HashedId::new(1), HashedId::new(3))
+        );
         assert!(a.contains("/probe/"));
     }
 }

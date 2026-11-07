@@ -15,7 +15,6 @@ use crate::host::{HostCommand, SessionNode, SessionStatus};
 use super::names;
 use super::runtime::IpcError;
 
-const ID_CAP: usize = 64;
 const KIND_CAP: usize = 32;
 const NODE_CAP: usize = 32;
 
@@ -23,11 +22,16 @@ const NODE_CAP: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub enum HostCommandWire {
-    Start { has_until: u8, until_ns: u64 },
+    Start {
+        has_until: u8,
+        until_ns: u64,
+    },
     Stop,
     Reset,
     Shutdown,
-    Step { board_hash: u64 },
+    Step {
+        board_hash: crate::ipc::HashedId<u64>,
+    },
 }
 
 impl HostCommandWire {
@@ -96,8 +100,7 @@ impl HostPeerWire {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 struct HostNodeWire {
-    id: [u8; ID_CAP],
-    id_len: u16,
+    id: crate::ipc::HashedId<u64>,
     kind: [u8; KIND_CAP],
     kind_len: u16,
     peer: HostPeerWire,
@@ -106,8 +109,7 @@ struct HostNodeWire {
 impl Default for HostNodeWire {
     fn default() -> Self {
         Self {
-            id: [0; ID_CAP],
-            id_len: 0,
+            id: crate::ipc::HashedId::ZERO,
             kind: [0; KIND_CAP],
             kind_len: 0,
             peer: HostPeerWire::Unknown,
@@ -132,11 +134,9 @@ impl HostStatusWire {
         let mut nodes = [HostNodeWire::default(); NODE_CAP];
         let count = status.nodes.len().min(NODE_CAP);
         for (slot, node) in nodes.iter_mut().zip(status.nodes.iter()).take(count) {
-            let mut id = [0u8; ID_CAP];
             let mut kind = [0u8; KIND_CAP];
             *slot = HostNodeWire {
-                id_len: pack_into(&node.id, &mut id),
-                id,
+                id: node.id,
                 kind_len: pack_into(&node.kind, &mut kind),
                 kind,
                 peer: HostPeerWire::from_label(&node.state),
@@ -161,7 +161,7 @@ impl HostStatusWire {
         let nodes = self.nodes[..count]
             .iter()
             .map(|node| SessionNode {
-                id: unpack(&node.id, node.id_len),
+                id: node.id,
                 kind: unpack(&node.kind, node.kind_len),
                 state: node.peer.label().to_string(),
             })
@@ -340,7 +340,7 @@ mod tests {
             virtual_time_ns: 42,
             stop_reason: None,
             nodes: vec![SessionNode {
-                id: "board-a".into(),
+                id: crate::ipc::board_id_hash("board-a"),
                 kind: "rl78".into(),
                 state: "running".into(),
             }],
@@ -371,7 +371,9 @@ mod tests {
             HostCommand::Stop,
             HostCommand::Reset,
             HostCommand::Shutdown,
-            HostCommand::Step { board_hash: 9 },
+            HostCommand::Step {
+                board_hash: crate::ipc::HashedId::new(9),
+            },
         ] {
             assert_eq!(HostCommandWire::from_cmd(cmd).to_cmd(), cmd);
         }

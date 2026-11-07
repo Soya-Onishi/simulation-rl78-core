@@ -268,10 +268,10 @@ pub fn parse_logical_topology(text: &str) -> Result<LogicalTopology, TopologyErr
 /// Reverse lookups for path / port / edge hashes computed at topology load.
 #[derive(Clone, Debug)]
 pub struct TopologyHashes {
-    pub boards: std::collections::HashMap<u64, String>,
-    pub paths: std::collections::HashMap<u64, String>,
-    pub ports: std::collections::HashMap<u64, String>,
-    pub edges: std::collections::HashMap<u64, String>,
+    pub boards: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
+    pub paths: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
+    pub ports: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
+    pub edges: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
 }
 
 /// Hash every path, port name, and leaf edge id; fail on distinct-string collisions.
@@ -320,7 +320,8 @@ pub fn build_topology_hashes(topo: &LogicalTopology) -> Result<TopologyHashes, T
             )
         })
         .collect();
-    let edges = edge_hash_table(logical.iter().map(String::as_str)).map_err(TopologyError::Invalid)?;
+    let edges =
+        edge_hash_table(logical.iter().map(String::as_str)).map_err(TopologyError::Invalid)?;
 
     Ok(TopologyHashes {
         boards,
@@ -396,7 +397,11 @@ mod tests {
         let hashes = build_topology_hashes(&topo).unwrap();
         assert_eq!(hashes.boards.len(), 2);
         assert_eq!(hashes.edges.len(), 2);
-        assert!(hashes.ports.contains_key(&crate::ipc::port_id_hash("uart0_tx")));
+        assert!(
+            hashes
+                .ports
+                .contains_key(&crate::ipc::port_id_hash("uart0_tx"))
+        );
     }
 
     #[test]

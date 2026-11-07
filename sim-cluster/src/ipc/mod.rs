@@ -17,7 +17,7 @@ pub use action_bus::{ArbiterNodeActions, ArbiterServerActions, NodeActions, Serv
 pub use analog_bus::NodeAnalogPorts;
 pub use control_bus::{ArbiterControl, NodeControl};
 pub use hash::{
-    board_hash_table, board_id_hash, edge_hash_table, edge_id_hash, format_id_hex, parse_id_hex,
+    HashedId, Hexable, board_hash_table, board_id_hash, edge_hash_table, edge_id_hash,
     path_hash_table, port_hash_table, port_id_hash, probe_id_hash, probe_name_hash,
 };
 pub use host_bus::{ArbiterHostPort, ServerHostPort};

@@ -21,8 +21,8 @@ type AnalogSub = Subscriber<ipc::Service, AnalogVoltage, ()>;
 
 /// Node analog endpoints for this board.
 pub struct NodeAnalogPorts {
-    pub producers: HashMap<u64, AnalogPub>,
-    pub consumers: HashMap<u64, AnalogSub>,
+    pub producers: HashMap<crate::ipc::HashedId<u64>, AnalogPub>,
+    pub consumers: HashMap<crate::ipc::HashedId<u64>, AnalogSub>,
 }
 
 impl NodeAnalogPorts {

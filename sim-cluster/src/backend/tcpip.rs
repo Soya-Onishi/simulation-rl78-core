@@ -314,7 +314,7 @@ impl SimulationBackend for TcpipBackend {
     fn probe_samples(
         &self,
         id: &str,
-        board: &str,
+        board: crate::ipc::HashedId<u64>,
         probe: &str,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
@@ -357,18 +357,18 @@ impl SimulationBackend for TcpipBackend {
     fn inspect(
         &self,
         id: &str,
-        board_id: &str,
+        board_id: crate::ipc::HashedId<u64>,
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
-        let board = encode_path_segment(board_id);
+        let board = encode_path_segment(&board_id.to_string());
         read_json(self.post_json(
             &format!("/internal/simulations/{id}/boards/{board}/inspect"),
             &req,
         )?)
     }
 
-    fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError> {
-        let board = encode_path_segment(board_id);
+    fn step(&self, id: &str, board_id: crate::ipc::HashedId<u64>) -> Result<(), ApiError> {
+        let board = encode_path_segment(&board_id.to_string());
         drop_body(self.post(&format!("/internal/simulations/{id}/boards/{board}/step"))?)
     }
 }
@@ -434,7 +434,7 @@ mod tests {
                 virtual_time_ns: 0,
                 stop_reason: None,
                 nodes: vec![SessionNode {
-                    id: crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a")),
+                    id: crate::ipc::board_id_hash("mcu-a"),
                     kind: "rl78".into(),
                     state: "stopped".into(),
                 }],
@@ -485,7 +485,7 @@ mod tests {
             Ok((
                 3,
                 vec![ProbePointName {
-                    probe_id: 1,
+                    probe_id: crate::ipc::HashedId::new(1),
                     board_hash: crate::ipc::board_id_hash("mcu-a"),
                     board_label: "mcu-a".into(),
                     name: "p0".into(),
@@ -496,7 +496,7 @@ mod tests {
         fn csv_poll(&self, _id: &str, _request_id: u64) -> Result<CsvPoll, ApiError> {
             Ok(CsvPoll {
                 records: vec![ProbeRecord {
-                    probe_id: 1,
+                    probe_id: crate::ipc::HashedId::new(1),
                     virtual_time_ns: 0,
                     kind: ProbeKind::Digital,
                     value: 1,
@@ -512,7 +512,7 @@ mod tests {
         fn probe_samples(
             &self,
             _id: &str,
-            _board: &str,
+            _board: crate::ipc::HashedId<u64>,
             _probe: &str,
             _from_ns: Option<u64>,
             _to_ns: Option<u64>,
@@ -538,13 +538,13 @@ mod tests {
         fn inspect(
             &self,
             _id: &str,
-            board_id: &str,
+            board_id: crate::ipc::HashedId<u64>,
             _req: InspectRequest,
         ) -> Result<InspectReply, ApiError> {
             *self.last.lock().unwrap() = format!("inspect:{board_id}");
             Ok(InspectReply::Ok)
         }
-        fn step(&self, _id: &str, board_id: &str) -> Result<(), ApiError> {
+        fn step(&self, _id: &str, board_id: crate::ipc::HashedId<u64>) -> Result<(), ApiError> {
             *self.last.lock().unwrap() = format!("step:{board_id}");
             Ok(())
         }
@@ -582,7 +582,7 @@ mod tests {
         });
 
         let backend = TcpipBackend::new(&base);
-        let board_hex = crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a"));
+        let board_hex = crate::ipc::board_id_hash("mcu-a");
         check_health(
             "127.0.0.1",
             url::Url::parse(&base).unwrap().port().unwrap(),
@@ -600,10 +600,7 @@ mod tests {
         let topo = backend.topology(&id).unwrap();
         assert_eq!(topo.boards.len(), 1);
         assert_eq!(topo.boards[0].label, "mcu-a");
-        assert_eq!(
-            topo.boards[0].id,
-            crate::ipc::format_id_hex(crate::ipc::board_id_hash("mcu-a"))
-        );
+        assert_eq!(topo.boards[0].id, crate::ipc::board_id_hash("mcu-a"));
         assert!(topo.boards[0].kind == "rl78");
         assert!(backend.logs_after(&id, 0).unwrap().is_empty());
         assert_eq!(backend.log_high_water(&id).unwrap(), 7);
@@ -612,7 +609,7 @@ mod tests {
             .invoke_action(
                 &id,
                 InvokeActionRequest {
-                    board_id: board_hex.clone(),
+                    board_id: board_hex,
                     device: "sw".into(),
                     action: "press".into(),
                     params: Default::default(),
@@ -624,7 +621,7 @@ mod tests {
             .probe_watch_put(
                 &id,
                 vec![ProbeRef {
-                    board: board_hex.clone(),
+                    board: board_hex,
                     name: "p0".into(),
                 }],
             )
@@ -647,7 +644,7 @@ mod tests {
         assert!(backend.csv_poll(&id, req_id).unwrap().done);
         backend.csv_status(&id, req_id).unwrap();
         backend
-            .probe_samples(&id, &board_hex, "p0", None, None)
+            .probe_samples(&id, board_hex, "p0", None, None)
             .unwrap();
         let token = backend.viewer_attach(&id).unwrap();
         backend.viewer_check(&id, &token).unwrap();
@@ -655,9 +652,9 @@ mod tests {
         assert_eq!(busy.code, "viewer_busy");
         backend.viewer_detach(&id, &token).unwrap();
         backend
-            .inspect(&id, &board_hex, InspectRequest::ReadRegs)
+            .inspect(&id, board_hex, InspectRequest::ReadRegs)
             .unwrap();
-        backend.step(&id, &board_hex).unwrap();
+        backend.step(&id, board_hex).unwrap();
         backend.shutdown(&id).unwrap();
 
         let missing = backend.status("missing").unwrap_err();
@@ -669,8 +666,11 @@ mod tests {
     fn tcpip_board_path_uses_public_hex_id() {
         // Path encoding still percent-encodes `/` if a segment ever contains it.
         assert_eq!(encode_path_segment("sys/left/a"), "sys%2Fleft%2Fa");
-        let board_hex = crate::ipc::format_id_hex(crate::ipc::board_id_hash("sys/left/a"));
-        assert_eq!(encode_path_segment(&board_hex), board_hex);
+        let board_hex = crate::ipc::board_id_hash("sys/left/a");
+        assert_eq!(
+            encode_path_segment(&board_hex.to_string()),
+            board_hex.to_string()
+        );
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -692,10 +692,10 @@ mod tests {
 
         let backend = TcpipBackend::new(&base);
         backend
-            .inspect("sim-1", &board_hex, InspectRequest::ReadRegs)
+            .inspect("sim-1", board_hex, InspectRequest::ReadRegs)
             .unwrap();
         assert_eq!(*mock.last.lock().unwrap(), format!("inspect:{board_hex}"));
-        backend.step("sim-1", &board_hex).unwrap();
+        backend.step("sim-1", board_hex).unwrap();
         assert_eq!(*mock.last.lock().unwrap(), format!("step:{board_hex}"));
     }
 }

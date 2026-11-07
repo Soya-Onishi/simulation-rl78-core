@@ -25,8 +25,7 @@ use crate::inspect::{InspectReply, InspectRequest, inspect_rpc, inspect_sock_pat
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
     ServerActions, ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox,
-    board_id_hash, create_node, format_id_hex, isolated_config, new_cluster_key, parse_id_hex,
-    root_path_for_cluster,
+    board_id_hash, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
@@ -80,7 +79,7 @@ struct StoredLog {
     seq: u64,
     level: String,
     origin: String,
-    board: Option<String>,
+    board: Option<crate::ipc::HashedId<u64>>,
     text: String,
 }
 
@@ -90,7 +89,7 @@ impl StoredLog {
             seq: self.seq,
             level: self.level.clone(),
             origin: self.origin.clone(),
-            board: self.board.clone(),
+            board: self.board,
             text: self.text.clone(),
         }
     }
@@ -164,7 +163,7 @@ pub enum JobKind {
     },
     ProbeSamples {
         id: String,
-        board: String,
+        board: crate::ipc::HashedId<u64>,
         probe: String,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
@@ -185,12 +184,12 @@ pub enum JobKind {
     },
     Inspect {
         id: String,
-        board_id: String,
+        board_id: crate::ipc::HashedId<u64>,
         req: InspectRequest,
     },
     Step {
         id: String,
-        board_id: String,
+        board_id: crate::ipc::HashedId<u64>,
     },
 }
 
@@ -240,12 +239,12 @@ struct Simulation {
     nodes: Vec<SessionNode>,
     logs: VecDeque<StoredLog>,
     next_seq: u64,
-    boards: HashMap<u64, String>,
+    boards: HashMap<crate::ipc::HashedId<u64>, String>,
     inbox: ServerLogInbox,
     actions: ServerActions,
     probe_inbox: ServerProbeInbox,
     probe_ctrl: ServerProbeCtrl,
-    probe_catalog: HashMap<u64, ProbePointName>,
+    probe_catalog: HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
     catalog_ready: bool,
     action_catalog_ready: bool,
     watch: ProbeWatch,
@@ -259,7 +258,7 @@ struct Simulation {
 
 struct CsvJob {
     request_id: u64,
-    expected: HashSet<u64>,
+    expected: HashSet<crate::ipc::HashedId<u64>>,
     pending: Vec<ProbeRecord>,
     truncated: bool,
     failed: bool,
@@ -269,7 +268,7 @@ struct CsvJob {
 
 struct ProbeWatch {
     probes: Vec<ProbeRef>,
-    probe_ids: Vec<u64>,
+    probe_ids: Vec<crate::ipc::HashedId<u64>>,
     next_seq: u64,
     pending: VecDeque<CoarseBatch>,
 }
@@ -455,7 +454,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             from_ns,
             to_ns,
         } => match world.sims.get_mut(&id) {
-            Some(sim) => match query_samples(sim, &board, &probe, from_ns, to_ns) {
+            Some(sim) => match query_samples(sim, board, &probe, from_ns, to_ns) {
                 Ok(body) => JobReply::ProbeSamples(body),
                 Err(err) => JobReply::Err(err),
             },
@@ -493,7 +492,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             None => JobReply::Accepted,
         },
         JobKind::Inspect { id, board_id, req } => match world.sims.get(&id) {
-            Some(sim) => match resolve_board_hex(sim, &board_id) {
+            Some(sim) => match resolve_board_hex(sim, board_id) {
                 Ok((board_hash, _)) => {
                     let path = inspect_sock_path(&sim.iox_root, board_hash);
                     match inspect_rpc(&path, &req) {
@@ -510,7 +509,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
                 if sim.state == "exited" {
                     JobReply::Err(ApiError::conflict("arbiter has exited"))
                 } else {
-                    match resolve_board_hex(sim, &board_id) {
+                    match resolve_board_hex(sim, board_id) {
                         Ok((board_hash, _)) => {
                             match send_cmd(sim, HostCommand::Step { board_hash }) {
                                 Ok(()) => JobReply::Accepted,
@@ -560,7 +559,7 @@ fn create_simulation(
         .boards
         .iter()
         .map(|board| SessionNode {
-            id: board.id.clone(),
+            id: board_id_hash(&board.id),
             kind: board.kind.clone(),
             state: "starting".into(),
         })
@@ -611,29 +610,19 @@ fn send_cmd(sim: &mut Simulation, cmd: HostCommand) -> Result<(), String> {
     sim.host.publish_cmd(cmd).map_err(|err| err.to_string())
 }
 
-/// Parse a public board id (16-digit hex) and resolve it to (hash, human label).
-fn resolve_board_hex(sim: &Simulation, board_hex: &str) -> Result<(u64, String), ApiError> {
-    let Some(hash) = parse_id_hex(board_hex) else {
-        return Err(ApiError::bad_request(
-            "bad_param",
-            "board_id must be a 16-digit lowercase hex string",
-        ));
-    };
-    let Some(label) = sim.boards.get(&hash).cloned() else {
+/// Resolve a public board id to (hash, human label).
+fn resolve_board_hex(
+    sim: &Simulation,
+    board_id: crate::ipc::HashedId<u64>,
+) -> Result<(crate::ipc::HashedId<u64>, String), ApiError> {
+    let Some(label) = sim.boards.get(&board_id).cloned() else {
         return Err(ApiError::not_found("unknown board"));
     };
-    Ok((hash, label))
+    Ok((board_id, label))
 }
 
 fn public_nodes(sim: &Simulation) -> Vec<SessionNode> {
-    sim.nodes
-        .iter()
-        .map(|node| SessionNode {
-            id: format_id_hex(board_id_hash(&node.id)),
-            kind: node.kind.clone(),
-            state: node.state.clone(),
-        })
-        .collect()
+    sim.nodes.clone()
 }
 
 fn status_event(sim: &Simulation) -> StatusEvent {
@@ -650,25 +639,25 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(
     if sim.state == "exited" {
         return Err(ApiError::conflict("arbiter has exited"));
     }
-    let (board_hash, _) = resolve_board_hex(sim, &request.board_id)?;
+    let (board_hash, _) = resolve_board_hex(sim, request.board_id)?;
     if !sim.action_catalog_ready {
         return Err(ApiError::conflict("action catalog is not ready"));
     }
     if let Some(err) = catalog_invoke_error(&sim.catalog, request) {
         return Err(err);
     }
-    let raw: Vec<(u64, f64)> = request
+    let raw: Vec<(crate::ipc::HashedId<u64>, f64)> = request
         .params
         .iter()
-        .map(|(name, value)| (sim_kernel::id_hash(name), *value))
+        .map(|(name, value)| (crate::ipc::HashedId::new(sim_kernel::id_hash(name)), *value))
         .collect();
     let request_id = sim.next_request_id;
     sim.next_request_id = sim.next_request_id.saturating_add(1);
     let sample = ActionRequest::new(
         request_id,
         board_hash,
-        sim_kernel::id_hash(&request.device),
-        sim_kernel::id_hash(&request.action),
+        crate::ipc::HashedId::new(sim_kernel::id_hash(&request.device)),
+        crate::ipc::HashedId::new(sim_kernel::id_hash(&request.action)),
         &raw,
     )
     .map_err(|_| ApiError::bad_request("bad_param", "invalid action parameter"))?;
@@ -824,7 +813,7 @@ fn probe_catalog_items(sim: &Simulation) -> Result<Vec<ProbeCatalogItem>, ApiErr
         .probe_catalog
         .values()
         .map(|point| ProbeCatalogItem {
-            board: format_id_hex(point.board_hash),
+            board: point.board_hash,
             board_label: point.board_label.clone(),
             probe: point.name.clone(),
             kind: point.kind.as_str().to_string(),
@@ -834,11 +823,14 @@ fn probe_catalog_items(sim: &Simulation) -> Result<Vec<ProbeCatalogItem>, ApiErr
     Ok(items)
 }
 
-fn resolve_probes(sim: &Simulation, probes: &[ProbeRef]) -> Result<Vec<u64>, ApiError> {
+fn resolve_probes(
+    sim: &Simulation,
+    probes: &[ProbeRef],
+) -> Result<Vec<crate::ipc::HashedId<u64>>, ApiError> {
     require_catalog(sim)?;
     let mut ids = Vec::with_capacity(probes.len());
     for probe in probes {
-        let (board_hash, _) = resolve_board_hex(sim, &probe.board)?;
+        let (board_hash, _) = resolve_board_hex(sim, probe.board)?;
         let Some((id, _)) = sim
             .probe_catalog
             .iter()
@@ -914,7 +906,7 @@ fn snapshot_watch(sim: &mut Simulation) -> Result<CoarseBatch, ApiError> {
 }
 
 fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
-    let mut by_board: HashMap<u64, HashSet<u64>> = sim
+    let mut by_board: HashMap<crate::ipc::HashedId<u64>, HashSet<crate::ipc::HashedId<u64>>> = sim
         .boards
         .keys()
         .copied()
@@ -926,7 +918,7 @@ fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
         }
     }
     for (board_hash, ids) in by_board {
-        let ids: Vec<u64> = ids.into_iter().collect();
+        let ids: Vec<crate::ipc::HashedId<u64>> = ids.into_iter().collect();
         sim.probe_ctrl
             .publish_watch(ProbeWatchWire::new(board_hash, &ids))
             .map_err(|err| ApiError::internal(err.to_string()))?;
@@ -936,15 +928,16 @@ fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
 
 fn query_latest(
     sim: &mut Simulation,
-    probe_ids: &[u64],
+    probe_ids: &[crate::ipc::HashedId<u64>],
 ) -> Result<(Vec<ProbeRecord>, bool), ApiError> {
-    let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut by_board: HashMap<crate::ipc::HashedId<u64>, Vec<crate::ipc::HashedId<u64>>> =
+        HashMap::new();
     for id in probe_ids {
         if let Some(point) = sim.probe_catalog.get(id) {
             by_board.entry(point.board_hash).or_default().push(*id);
         }
     }
-    let expected: HashSet<u64> = by_board.keys().copied().collect();
+    let expected: HashSet<crate::ipc::HashedId<u64>> = by_board.keys().copied().collect();
     if expected.is_empty() {
         return Ok((Vec::new(), false));
     }
@@ -959,16 +952,17 @@ fn query_latest(
 
 fn query_range(
     sim: &mut Simulation,
-    probe_ids: &[u64],
+    probe_ids: &[crate::ipc::HashedId<u64>],
     range: ProbeRange,
 ) -> Result<(Vec<ProbeRecord>, bool), ApiError> {
-    let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut by_board: HashMap<crate::ipc::HashedId<u64>, Vec<crate::ipc::HashedId<u64>>> =
+        HashMap::new();
     for id in probe_ids {
         if let Some(point) = sim.probe_catalog.get(id) {
             by_board.entry(point.board_hash).or_default().push(*id);
         }
     }
-    let expected: HashSet<u64> = by_board.keys().copied().collect();
+    let expected: HashSet<crate::ipc::HashedId<u64>> = by_board.keys().copied().collect();
     if expected.is_empty() {
         return Ok((Vec::new(), false));
     }
@@ -989,22 +983,19 @@ fn query_range(
 
 fn query_samples(
     sim: &mut Simulation,
-    board: &str,
+    board: crate::ipc::HashedId<u64>,
     probe: &str,
     from_ns: Option<u64>,
     to_ns: Option<u64>,
 ) -> Result<ProbeSamplesResponse, ApiError> {
     require_catalog(sim)?;
-    if board.is_empty() || probe.is_empty() {
-        return Err(ApiError::bad_request(
-            "bad_param",
-            "board and probe are required",
-        ));
+    if probe.is_empty() {
+        return Err(ApiError::bad_request("bad_param", "probe is required"));
     }
     let ids = resolve_probes(
         sim,
         &[ProbeRef {
-            board: board.to_string(),
+            board,
             name: probe.to_string(),
         }],
     )?;
@@ -1035,14 +1026,15 @@ fn start_csv(
     {
         return Err(ApiError::conflict("csv export is busy"));
     }
-    let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut by_board: HashMap<crate::ipc::HashedId<u64>, Vec<crate::ipc::HashedId<u64>>> =
+        HashMap::new();
     for point in sim.probe_catalog.values() {
         by_board
             .entry(point.board_hash)
             .or_default()
             .push(point.probe_id);
     }
-    let expected: HashSet<u64> = by_board.keys().copied().collect();
+    let expected: HashSet<crate::ipc::HashedId<u64>> = by_board.keys().copied().collect();
     let done = expected.is_empty();
     let request_id = next_probe_request(sim);
     for (board_hash, ids) in by_board {
@@ -1145,7 +1137,7 @@ fn next_probe_request(sim: &mut Simulation) -> u64 {
 fn collect_query(
     sim: &mut Simulation,
     request_id: u64,
-    mut expected: HashSet<u64>,
+    mut expected: HashSet<crate::ipc::HashedId<u64>>,
     timeout: Duration,
 ) -> Result<(Vec<ProbeRecord>, bool), ApiError> {
     let deadline = Instant::now() + timeout;
@@ -1231,9 +1223,7 @@ fn push_log(sim: &mut Simulation, record: &ClusterLog) {
     } else {
         None
     };
-    let board = board_label
-        .as_ref()
-        .map(|_| format_id_hex(record.board_hash()));
+    let board = board_label.as_ref().map(|_| record.board_hash());
     let who = board_label.as_deref().unwrap_or(record.origin().as_str());
     println!(
         "[{}] [{}] {who}: {}",
@@ -1250,7 +1240,13 @@ fn push_log(sim: &mut Simulation, record: &ClusterLog) {
     );
 }
 
-fn append_log(sim: &mut Simulation, level: &str, origin: &str, board: Option<String>, text: &str) {
+fn append_log(
+    sim: &mut Simulation,
+    level: &str,
+    origin: &str,
+    board: Option<crate::ipc::HashedId<u64>>,
+    text: &str,
+) {
     let seq = sim.next_seq;
     sim.next_seq = sim.next_seq.saturating_add(1);
     sim.logs.push_back(StoredLog {
@@ -1305,7 +1301,7 @@ mod tests {
 
     fn invoke_request(board_id: &str, device: &str, action: &str) -> InvokeActionRequest {
         InvokeActionRequest {
-            board_id: board_id.into(),
+            board_id: board_id_hash(board_id),
             device: device.into(),
             action: action.into(),
             params: Default::default(),
@@ -1314,7 +1310,7 @@ mod tests {
 
     fn advertised(board_id: &str, device: &str, action: &str) -> AdvertisedAction {
         AdvertisedAction {
-            board_id: board_id.into(),
+            board_id: board_id_hash(board_id),
             board_label: board_id.into(),
             device: device.into(),
             action: action.into(),
@@ -1325,12 +1321,30 @@ mod tests {
 
     #[test]
     fn public_board_id_must_be_lowercase_hex() {
-        assert!(parse_id_hex("mcu-a").is_none());
-        assert!(parse_id_hex("0x93d65dc54fda57c6").is_none());
-        assert!(parse_id_hex("93D65DC54FDA57C6").is_none());
-        assert!(parse_id_hex("93d65dc54fda57c").is_none());
-        let good = format_id_hex(board_id_hash("mcu-a"));
-        assert_eq!(parse_id_hex(&good), Some(board_id_hash("mcu-a")));
+        assert!("mcu-a".parse::<crate::ipc::HashedId<u64>>().ok().is_none());
+        assert!(
+            "0x93d65dc54fda57c6"
+                .parse::<crate::ipc::HashedId<u64>>()
+                .ok()
+                .is_none()
+        );
+        assert!(
+            "93D65DC54FDA57C6"
+                .parse::<crate::ipc::HashedId<u64>>()
+                .ok()
+                .is_none()
+        );
+        assert!(
+            "93d65dc54fda57c"
+                .parse::<crate::ipc::HashedId<u64>>()
+                .ok()
+                .is_none()
+        );
+        let good = board_id_hash("mcu-a").to_string();
+        assert_eq!(
+            good.parse::<crate::ipc::HashedId<u64>>().ok(),
+            Some(board_id_hash("mcu-a"))
+        );
     }
 
     #[test]

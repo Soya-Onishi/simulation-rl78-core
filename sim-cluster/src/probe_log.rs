@@ -56,8 +56,8 @@ impl ProbeKind {
 /// responses use [`ProbeCatalogItem`] with a 16-digit hex `board` string instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbePointName {
-    pub probe_id: u64,
-    pub board_hash: u64,
+    pub probe_id: crate::ipc::HashedId<u64>,
+    pub board_hash: crate::ipc::HashedId<u64>,
     /// Human-readable board id from the topology (JSON / errors only).
     pub board_label: String,
     pub name: String,
@@ -68,7 +68,7 @@ pub struct ProbePointName {
 /// data word, or analog millivolts (`µV / 1000`, clamped to `u16`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeRecord {
-    pub probe_id: u64,
+    pub probe_id: crate::ipc::HashedId<u64>,
     pub virtual_time_ns: u64,
     pub kind: ProbeKind,
     pub value: u16,
@@ -77,7 +77,7 @@ pub struct ProbeRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeView {
     pub virtual_time_ns: u64,
-    pub board: String,
+    pub board: crate::ipc::HashedId<u64>,
     pub probe: String,
     pub kind: String,
     pub value: String,
@@ -91,14 +91,14 @@ pub struct CoarseBatch {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeRef {
-    pub board: String,
+    pub board: crate::ipc::HashedId<u64>,
     pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeCatalogItem {
     /// Board public id (16-digit hex).
-    pub board: String,
+    pub board: crate::ipc::HashedId<u64>,
     /// Human-readable board id from the topology definition.
     pub board_label: String,
     pub probe: String,
@@ -179,29 +179,29 @@ pub struct ProbeExport {
 
 pub struct ProbeLog {
     cap: usize,
-    catalog: HashMap<u64, ProbePointName>,
-    memory: HashMap<u64, VecDeque<ProbeRecord>>,
+    catalog: HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
+    memory: HashMap<crate::ipc::HashedId<u64>, VecDeque<ProbeRecord>>,
     spill_path: PathBuf,
     spill: Option<File>,
     truncated: bool,
     running: bool,
     coarse_since: Instant,
-    digital_last: HashMap<u64, ProbeRecord>,
-    analog_last: HashMap<u64, ProbeRecord>,
+    digital_last: HashMap<crate::ipc::HashedId<u64>, ProbeRecord>,
+    analog_last: HashMap<crate::ipc::HashedId<u64>, ProbeRecord>,
     uart_window: Vec<ProbeRecord>,
-    latest: HashMap<u64, ProbeRecord>,
+    latest: HashMap<crate::ipc::HashedId<u64>, ProbeRecord>,
 }
 
 impl ProbeLog {
     #[must_use]
-    pub fn open(sim_id: &str, board_hash: u64) -> Self {
+    pub fn open(sim_id: &str, board_hash: crate::ipc::HashedId<u64>) -> Self {
         Self::with_cap(sim_id, board_hash, PROBE_MEM_CAP)
     }
 
     #[must_use]
-    pub fn with_cap(sim_id: &str, board_hash: u64, cap: usize) -> Self {
+    pub fn with_cap(sim_id: &str, board_hash: crate::ipc::HashedId<u64>, cap: usize) -> Self {
         let spill_path =
-            std::env::temp_dir().join(format!("sim-cluster-probes-{sim_id}-{board_hash:016x}.bin"));
+            std::env::temp_dir().join(format!("sim-cluster-probes-{sim_id}-{board_hash}.bin"));
         Self {
             cap: cap.max(1),
             catalog: HashMap::new(),
@@ -279,7 +279,7 @@ impl ProbeLog {
     }
 
     #[must_use]
-    pub fn latest_of(&self, ids: &[u64]) -> Vec<ProbeRecord> {
+    pub fn latest_of(&self, ids: &[crate::ipc::HashedId<u64>]) -> Vec<ProbeRecord> {
         let mut records: Vec<ProbeRecord> = ids
             .iter()
             .filter_map(|id| self.latest.get(id).copied())
@@ -323,13 +323,13 @@ impl ProbeLog {
         })
     }
 
-    fn at_cap(&self, probe_id: u64) -> bool {
+    fn at_cap(&self, probe_id: crate::ipc::HashedId<u64>) -> bool {
         self.memory
             .get(&probe_id)
             .is_some_and(|queue| queue.len() >= self.cap)
     }
 
-    fn spill_oldest(&mut self, probe_id: u64) -> bool {
+    fn spill_oldest(&mut self, probe_id: crate::ipc::HashedId<u64>) -> bool {
         let Some(oldest) = self
             .memory
             .get_mut(&probe_id)
@@ -389,20 +389,21 @@ impl ProbeLog {
     }
 }
 
-fn probe_names(catalog: &HashMap<u64, ProbePointName>, probe_id: u64) -> (String, String) {
+fn probe_names(
+    catalog: &HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
+    probe_id: crate::ipc::HashedId<u64>,
+) -> (crate::ipc::HashedId<u64>, String) {
     catalog
         .get(&probe_id)
-        .map(|point| {
-            (
-                crate::ipc::format_id_hex(point.board_hash),
-                point.name.clone(),
-            )
-        })
-        .unwrap_or_else(|| (String::new(), format!("{:016x}", probe_id)))
+        .map(|point| (point.board_hash, point.name.clone()))
+        .unwrap_or_else(|| (crate::ipc::HashedId::new(0), probe_id.to_string()))
 }
 
 #[must_use]
-pub fn record_view(catalog: &HashMap<u64, ProbePointName>, record: &ProbeRecord) -> ProbeView {
+pub fn record_view(
+    catalog: &HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
+    record: &ProbeRecord,
+) -> ProbeView {
     let (board, probe) = probe_names(catalog, record.probe_id);
     ProbeView {
         virtual_time_ns: record.virtual_time_ns,
@@ -447,7 +448,7 @@ pub fn json_value(kind: ProbeKind, value: u16) -> serde_json::Value {
 /// One `/probes/samples` row. Names come from the catalog; uart/analog values stay numbers.
 #[must_use]
 pub fn json_view(
-    catalog: &HashMap<u64, ProbePointName>,
+    catalog: &HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
     record: &ProbeRecord,
 ) -> crate::contract::ProbeSampleJson {
     let (board, probe) = probe_names(catalog, record.probe_id);
@@ -484,7 +485,9 @@ fn read_spill(path: &Path, file_len: u64) -> io::Result<Vec<ProbeRecord>> {
     let mut offset = 0;
     while offset + SPILL_REC <= filled {
         let virtual_time_ns = u64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap());
-        let probe_id = u64::from_le_bytes(buf[offset + 8..offset + 16].try_into().unwrap());
+        let probe_id = crate::ipc::HashedId::new(u64::from_le_bytes(
+            buf[offset + 8..offset + 16].try_into().unwrap(),
+        ));
         let kind = ProbeKind::from_wire(buf[offset + 16]).unwrap_or(ProbeKind::Digital);
         let value = u16::from_le_bytes(buf[offset + 17..offset + 19].try_into().unwrap());
         records.push(ProbeRecord {
@@ -506,12 +509,10 @@ pub fn csv_header() -> String {
 #[must_use]
 pub fn csv_record_line(catalog: &[ProbePointName], rec: &ProbeRecord) -> String {
     let point = catalog.iter().find(|point| point.probe_id == rec.probe_id);
-    let board = point
-        .map(|p| crate::ipc::format_id_hex(p.board_hash))
-        .unwrap_or_default();
+    let board = point.map(|p| p.board_hash.to_string()).unwrap_or_default();
     let probe = point.map(|p| p.name.as_str()).unwrap_or("");
     let probe = if probe.is_empty() {
-        format!("{:016x}", rec.probe_id)
+        rec.probe_id.to_string()
     } else {
         probe.to_string()
     };
@@ -553,17 +554,17 @@ fn csv_field(text: &str) -> String {
 mod tests {
     use super::*;
 
-    fn point(id: u64, kind: ProbeKind) -> ProbePointName {
+    fn point(id: crate::ipc::HashedId<u64>, kind: ProbeKind) -> ProbePointName {
         ProbePointName {
             probe_id: id,
             board_hash: crate::ipc::board_id_hash("board"),
             board_label: "board".into(),
-            name: format!("p{id}"),
+            name: format!("p{}", id.get()),
             kind,
         }
     }
 
-    fn rec(id: u64, vt: u64, kind: ProbeKind, value: u16) -> ProbeRecord {
+    fn rec(id: crate::ipc::HashedId<u64>, vt: u64, kind: ProbeKind, value: u16) -> ProbeRecord {
         ProbeRecord {
             probe_id: id,
             virtual_time_ns: vt,
@@ -586,13 +587,18 @@ mod tests {
     #[test]
     fn coarse_keeps_last_digital_and_every_uart_word() {
         let mut log = ProbeLog::with_cap("coarse-test", crate::ipc::board_id_hash("board"), 8);
-        log.note_catalog(point(1, ProbeKind::Digital));
-        log.note_catalog(point(2, ProbeKind::Uart));
+        log.note_catalog(point(crate::ipc::HashedId::new(1), ProbeKind::Digital));
+        log.note_catalog(point(crate::ipc::HashedId::new(2), ProbeKind::Uart));
         log.set_running(true);
-        log.push(rec(1, 10, ProbeKind::Digital, 2));
-        log.push(rec(1, 20, ProbeKind::Digital, 1));
-        log.push(rec(2, 15, ProbeKind::Uart, 0x41));
-        log.push(rec(2, 16, ProbeKind::Uart, 0x1FF));
+        log.push(rec(crate::ipc::HashedId::new(1), 10, ProbeKind::Digital, 2));
+        log.push(rec(crate::ipc::HashedId::new(1), 20, ProbeKind::Digital, 1));
+        log.push(rec(crate::ipc::HashedId::new(2), 15, ProbeKind::Uart, 0x41));
+        log.push(rec(
+            crate::ipc::HashedId::new(2),
+            16,
+            ProbeKind::Uart,
+            0x1FF,
+        ));
         log.coarse_since = Instant::now()
             .checked_sub(COARSE_INTERVAL)
             .unwrap_or_else(Instant::now);
@@ -601,24 +607,37 @@ mod tests {
             .iter()
             .map(|rec| (rec.probe_id, rec.value))
             .collect();
-        assert_eq!(values, vec![(2, 0x41), (2, 0x1FF), (1, 1)]);
+        assert_eq!(
+            values,
+            vec![
+                (crate::ipc::HashedId::new(2), 0x41),
+                (crate::ipc::HashedId::new(2), 0x1FF),
+                (crate::ipc::HashedId::new(1), 1)
+            ]
+        );
         log.coarse_since = Instant::now()
             .checked_sub(COARSE_INTERVAL)
             .unwrap_or_else(Instant::now);
         assert!(log.poll_coarse(Instant::now()).is_empty());
         let latest = log.latest_all();
         let latest_ids: Vec<_> = latest.iter().map(|rec| (rec.probe_id, rec.value)).collect();
-        assert_eq!(latest_ids, vec![(2, 0x1FF), (1, 1)]);
-        assert_eq!(log.latest_of(&[1]).len(), 1);
+        assert_eq!(
+            latest_ids,
+            vec![
+                (crate::ipc::HashedId::new(2), 0x1FF),
+                (crate::ipc::HashedId::new(1), 1)
+            ]
+        );
+        assert_eq!(log.latest_of(&[crate::ipc::HashedId::new(1)]).len(), 1);
     }
 
     #[test]
     fn spill_keeps_oldest_on_disk_and_csv_is_ordered() {
         let mut log = ProbeLog::with_cap("spill-test", crate::ipc::board_id_hash("board"), 2);
-        log.note_catalog(point(1, ProbeKind::Digital));
-        log.push(rec(1, 1, ProbeKind::Digital, 0));
-        log.push(rec(1, 2, ProbeKind::Digital, 1));
-        log.push(rec(1, 3, ProbeKind::Digital, 2));
+        log.note_catalog(point(crate::ipc::HashedId::new(1), ProbeKind::Digital));
+        log.push(rec(crate::ipc::HashedId::new(1), 1, ProbeKind::Digital, 0));
+        log.push(rec(crate::ipc::HashedId::new(1), 2, ProbeKind::Digital, 1));
+        log.push(rec(crate::ipc::HashedId::new(1), 3, ProbeKind::Digital, 2));
         let export = log.export().unwrap();
         let loaded = load_export(&export).unwrap();
         let csv = render_csv(
@@ -626,7 +645,7 @@ mod tests {
             &loaded,
             ProbeRange::parse(None, None).unwrap(),
         );
-        let board_hex = crate::ipc::format_id_hex(crate::ipc::board_id_hash("board"));
+        let board_hex = crate::ipc::board_id_hash("board");
         assert!(csv.contains(&format!("1,{board_hex},p1,digital,HiZ\n")));
         assert!(csv.contains(&format!("2,{board_hex},p1,digital,High\n")));
         assert!(csv.contains(&format!("3,{board_hex},p1,digital,Low\n")));
@@ -639,10 +658,13 @@ mod tests {
     fn disk_failure_drops_later_samples() {
         let mut log = ProbeLog::with_cap("fail-test", crate::ipc::board_id_hash("board"), 1);
         log.spill_path = PathBuf::from("/dev/null/sim-cluster-probes-fail.bin");
-        log.push(rec(1, 1, ProbeKind::Digital, 1));
-        log.push(rec(1, 2, ProbeKind::Digital, 2));
+        log.push(rec(crate::ipc::HashedId::new(1), 1, ProbeKind::Digital, 1));
+        log.push(rec(crate::ipc::HashedId::new(1), 2, ProbeKind::Digital, 2));
         assert!(log.truncated());
-        assert_eq!(log.latest_of(&[1])[0].virtual_time_ns, 1);
+        assert_eq!(
+            log.latest_of(&[crate::ipc::HashedId::new(1)])[0].virtual_time_ns,
+            1
+        );
         let export = log.export().unwrap();
         assert_eq!(export.memory.len(), 1);
         assert_eq!(export.memory[0].virtual_time_ns, 1);
@@ -658,19 +680,25 @@ mod tests {
     #[test]
     fn json_view_uses_catalog_names_and_typed_values() {
         let mut catalog = HashMap::new();
-        catalog.insert(1, point(1, ProbeKind::Analog));
-        let sample = json_view(&catalog, &rec(1, 9, ProbeKind::Analog, 3300));
-        assert_eq!(sample.virtual_time_ns, 9);
-        assert_eq!(
-            sample.board,
-            crate::ipc::format_id_hex(crate::ipc::board_id_hash("board"))
+        catalog.insert(
+            crate::ipc::HashedId::new(1),
+            point(crate::ipc::HashedId::new(1), ProbeKind::Analog),
         );
+        let sample = json_view(
+            &catalog,
+            &rec(crate::ipc::HashedId::new(1), 9, ProbeKind::Analog, 3300),
+        );
+        assert_eq!(sample.virtual_time_ns, 9);
+        assert_eq!(sample.board, crate::ipc::board_id_hash("board"));
         assert_eq!(sample.probe, "p1");
         assert_eq!(sample.kind, "analog");
         assert_eq!(sample.value, serde_json::json!(3300));
-        let missing = json_view(&catalog, &rec(2, 1, ProbeKind::Digital, 1));
-        assert_eq!(missing.board, "");
-        assert_eq!(missing.probe, format!("{:016x}", 2u64));
+        let missing = json_view(
+            &catalog,
+            &rec(crate::ipc::HashedId::new(2), 1, ProbeKind::Digital, 1),
+        );
+        assert_eq!(missing.board, crate::ipc::HashedId::new(0));
+        assert_eq!(missing.probe, crate::ipc::HashedId::new(2u64).to_string());
         assert_eq!(missing.value, serde_json::json!("High"));
     }
 }

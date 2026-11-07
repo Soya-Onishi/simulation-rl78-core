@@ -47,8 +47,8 @@ impl ProbeWireKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeAdvertisement {
     pub name: String,
-    pub name_hash: u64,
-    pub probe_id: u64,
+    pub name_hash: crate::ipc::HashedId<u64>,
+    pub probe_id: crate::ipc::HashedId<u64>,
     pub kind: ProbeWireKind,
 }
 
@@ -68,17 +68,17 @@ pub enum ProbeError {
 enum PublisherSlot {
     Digital {
         tap: std::sync::Arc<ProbeTap<DigitalLevel>>,
-        probe_id: u64,
+        probe_id: crate::ipc::HashedId<u64>,
         publisher: ProbeDigitalPub,
     },
     Uart {
         tap: std::sync::Arc<ProbeTap<UartFrame>>,
-        probe_id: u64,
+        probe_id: crate::ipc::HashedId<u64>,
         publisher: ProbeUartPub,
     },
     Analog {
         tap: std::sync::Arc<ProbeTap<AnalogVoltage>>,
-        probe_id: u64,
+        probe_id: crate::ipc::HashedId<u64>,
         publisher: ProbeAnalogPub,
     },
 }
@@ -98,7 +98,7 @@ impl ProbePublishers {
     pub fn open(
         node: &Node<iceoryx2::prelude::ipc::Service>,
         cluster_key: &str,
-        board_hash: u64,
+        board_hash: crate::ipc::HashedId<u64>,
         points: Vec<ProbePoint>,
     ) -> Result<Self, ProbeError> {
         let ads = plan(board_hash, &points)?;
@@ -294,7 +294,10 @@ impl ProbePublishers {
     }
 }
 
-fn plan(board_hash: u64, points: &[ProbePoint]) -> Result<Vec<ProbeAdvertisement>, ProbeError> {
+fn plan(
+    board_hash: crate::ipc::HashedId<u64>,
+    points: &[ProbePoint],
+) -> Result<Vec<ProbeAdvertisement>, ProbeError> {
     if points.len() > MAX_PROBES_PER_BOARD {
         return Err(ProbeError::TooManyProbes);
     }
@@ -333,8 +336,8 @@ struct CsvSend {
 pub struct NodeProbeRuntime {
     publishers: ProbePublishers,
     log: ProbeLog,
-    watch: std::collections::HashSet<u64>,
-    board_hash: u64,
+    watch: std::collections::HashSet<crate::ipc::HashedId<u64>>,
+    board_hash: crate::ipc::HashedId<u64>,
     query: NodeProbeQuery,
     csv: NodeProbeCsv,
     csv_out: Option<CsvSend>,
@@ -344,7 +347,7 @@ impl NodeProbeRuntime {
     pub fn open(
         node: &iceoryx2::prelude::Node<iceoryx2::prelude::ipc::Service>,
         cluster_key: &str,
-        board_hash: u64,
+        board_hash: crate::ipc::HashedId<u64>,
         board_label: &str,
         board_count: usize,
         points: Vec<ProbePoint>,
@@ -380,7 +383,11 @@ impl NodeProbeRuntime {
         self.publishers.advertisements()
     }
 
-    pub fn set_watch(&mut self, board_hash: u64, probe_ids: &[u64]) {
+    pub fn set_watch(
+        &mut self,
+        board_hash: crate::ipc::HashedId<u64>,
+        probe_ids: &[crate::ipc::HashedId<u64>],
+    ) {
         if board_hash != self.board_hash {
             return;
         }
@@ -428,7 +435,7 @@ impl NodeProbeRuntime {
     }
 
     fn answer_query(&mut self, query: crate::ipc::ProbeQueryWire) -> Result<(), IpcError> {
-        if query.board_hash != 0 && query.board_hash != self.board_hash {
+        if !query.board_hash.is_zero() && query.board_hash != self.board_hash {
             return Ok(());
         }
         match query.kind {
@@ -478,7 +485,8 @@ impl NodeProbeRuntime {
             from_ns: (query.has_from != 0).then_some(query.from_ns),
             to_ns: (query.has_to != 0).then_some(query.to_ns),
         };
-        let wanted: std::collections::HashSet<u64> = query.probe_ids().iter().copied().collect();
+        let wanted: std::collections::HashSet<crate::ipc::HashedId<u64>> =
+            query.probe_ids().iter().copied().collect();
         match self.log.export() {
             Ok(export) => {
                 let truncated = export.truncated;
@@ -498,7 +506,7 @@ impl NodeProbeRuntime {
     }
 
     fn begin_csv(&mut self, query: crate::ipc::ProbeQueryWire) -> Result<(), IpcError> {
-        if query.board_hash != 0 && query.board_hash != self.board_hash {
+        if !query.board_hash.is_zero() && query.board_hash != self.board_hash {
             return Ok(());
         }
         let (records, truncated) = self.range_records(&query);
@@ -538,6 +546,7 @@ impl NodeProbeRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::HashedId;
     use sim_kernel::{ProbePolicy, ProbeTap};
 
     fn digital(name: &str) -> ProbePoint {
@@ -549,8 +558,14 @@ mod tests {
         let points: Vec<_> = (0..MAX_PROBES_PER_BOARD + 1)
             .map(|i| digital(&format!("p{i}")))
             .collect();
-        assert!(matches!(plan(1, &points), Err(ProbeError::TooManyProbes)));
+        assert!(matches!(
+            plan(HashedId::new(1), &points),
+            Err(ProbeError::TooManyProbes)
+        ));
         let dup = vec![digital("vcc"), digital("vcc")];
-        assert!(matches!(plan(1, &dup), Err(ProbeError::DuplicateName(_))));
+        assert!(matches!(
+            plan(HashedId::new(1), &dup),
+            Err(ProbeError::DuplicateName(_))
+        ));
     }
 }

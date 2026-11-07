@@ -38,7 +38,7 @@ impl NodeLog {
     pub fn start(
         iox_root: &Path,
         cluster_key: &str,
-        board_hash: u64,
+        board_hash: crate::ipc::HashedId<u64>,
         board_count: usize,
     ) -> Result<Self, IpcError> {
         let queue = Arc::new(LogQueue::new(LogOrigin::Node, board_hash));
@@ -104,11 +104,11 @@ struct LogQueue {
     records: Mutex<VecDeque<ClusterLog>>,
     shutdown: AtomicBool,
     origin: LogOrigin,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
 }
 
 impl LogQueue {
-    fn new(origin: LogOrigin, board_hash: u64) -> Self {
+    fn new(origin: LogOrigin, board_hash: crate::ipc::HashedId<u64>) -> Self {
         Self {
             records: Mutex::new(VecDeque::new()),
             shutdown: AtomicBool::new(false),
@@ -153,9 +153,12 @@ impl ArbiterLogBus {
         iox_root: &Path,
         cluster_key: &str,
         board_count: usize,
-        boards: HashMap<u64, String>,
+        boards: HashMap<crate::ipc::HashedId<u64>, String>,
     ) -> Result<Self, IpcError> {
-        let queue = Arc::new(LogQueue::new(LogOrigin::Arbiter, 0));
+        let queue = Arc::new(LogQueue::new(
+            LogOrigin::Arbiter,
+            crate::ipc::HashedId::ZERO,
+        ));
         install_process_log(Arc::clone(&queue));
         let (ready_tx, ready_rx) = mpsc::channel();
         let queue_for_worker = Arc::clone(&queue);
@@ -257,7 +260,7 @@ fn install_process_log(queue: Arc<LogQueue>) {
 fn publish_node_logs(
     iox_root: PathBuf,
     cluster_key: String,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     board_count: usize,
     queue: Arc<LogQueue>,
     ready: mpsc::Sender<Result<(), String>>,
@@ -302,7 +305,7 @@ fn forward_logs(
     iox_root: PathBuf,
     cluster_key: String,
     board_count: usize,
-    boards: HashMap<u64, String>,
+    boards: HashMap<crate::ipc::HashedId<u64>, String>,
     queue: Arc<LogQueue>,
     ready: mpsc::Sender<Result<(), String>>,
 ) {
@@ -336,7 +339,11 @@ fn forward_logs(
     }
 }
 
-fn forward_node_logs(n2a_sub: &N2aLogSub, upstream: &A2sLogPub, boards: &HashMap<u64, String>) {
+fn forward_node_logs(
+    n2a_sub: &N2aLogSub,
+    upstream: &A2sLogPub,
+    boards: &HashMap<crate::ipc::HashedId<u64>, String>,
+) {
     loop {
         match n2a_sub.receive() {
             Ok(Some(sample)) => {
@@ -403,7 +410,7 @@ impl ServerLogInbox {
     pub fn drain(
         &self,
         console: &LogConsole,
-        boards: &HashMap<u64, String>,
+        boards: &HashMap<crate::ipc::HashedId<u64>, String>,
     ) -> Result<(), IpcError> {
         while let Some(record) = self.try_recv()? {
             console.accept(&record, |h| boards.get(&h).map(String::as_str));

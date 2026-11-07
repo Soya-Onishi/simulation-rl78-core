@@ -548,7 +548,7 @@ fn service_actions<E: Entity>(
     actions: &NodeActions,
     sim: &mut Simulator<E>,
     state: NodeState,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     pending: &mut VecDeque<ActionRequest>,
 ) -> Result<(), BoardError> {
     for _ in 0..ACTION_RECV_CAP {
@@ -566,11 +566,16 @@ fn service_actions<E: Entity>(
 
     while let Some(req) = pending.pop_front() {
         let now = sim.entity().now();
+        let raw: Vec<(u64, f64)> = req
+            .raw_params()
+            .iter()
+            .map(|(h, v)| (h.get(), *v))
+            .collect();
         let status = match sim.entity_mut().apply_action(
-            req.device_hash,
-            req.action_hash,
+            req.device_hash.get(),
+            req.action_hash.get(),
             now,
-            &req.raw_params(),
+            &raw,
         ) {
             Ok(()) => ActionStatus::Applied,
             Err(ActionFailure::NotFoundDevice) => ActionStatus::NotFoundDevice,
@@ -601,7 +606,7 @@ fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a Board
 fn perform_local_step<E: Entity>(
     sim: &mut Simulator<E>,
     control: &NodeControl,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     last_time_report: &mut Option<u64>,
 ) -> Result<(), BoardError> {
     match sim.command(Command::Step) {
@@ -645,7 +650,7 @@ fn perform_local_step<E: Entity>(
 
 fn maybe_time_report(
     control: &NodeControl,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     virtual_time_ns: u64,
     allowed_ns: u64,
     headroom_threshold_ns: u64,

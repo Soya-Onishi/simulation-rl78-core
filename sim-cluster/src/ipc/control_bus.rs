@@ -28,7 +28,7 @@ type N2aSub = Subscriber<ipc::Service, ControlToArbiter, ()>;
 pub struct ArbiterControl {
     pub a2n_pub: A2nPub,
     pub n2a_sub: N2aSub,
-    boards: HashMap<u64, String>,
+    boards: HashMap<crate::ipc::HashedId<u64>, String>,
 }
 
 impl ArbiterControl {
@@ -36,7 +36,7 @@ impl ArbiterControl {
         node: &Node<ipc::Service>,
         cluster_key: &str,
         board_count: usize,
-        boards: HashMap<u64, String>,
+        boards: HashMap<crate::ipc::HashedId<u64>, String>,
     ) -> Result<Self, IpcError> {
         let max_nodes = board_count.max(1);
         let a2n_name = names::ctrl_a2n(cluster_key);
@@ -92,7 +92,7 @@ impl ArbiterControl {
 
     /// Resolve a wire board hash to its topology id.
     #[must_use]
-    pub fn resolve_board(&self, board_id_hash: u64) -> Option<&str> {
+    pub fn resolve_board(&self, board_id_hash: crate::ipc::HashedId<u64>) -> Option<&str> {
         self.boards.get(&board_id_hash).map(String::as_str)
     }
 
@@ -133,7 +133,7 @@ impl NodeControl {
     pub fn open(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        boards: HashMap<u64, String>,
+        boards: HashMap<crate::ipc::HashedId<u64>, String>,
     ) -> Result<Self, IpcError> {
         let max_nodes = boards.len().max(1);
         let a2n_name = names::ctrl_a2n(cluster_key);
@@ -166,7 +166,7 @@ impl NodeControl {
 
 /// Drop n2a messages whose sender hash is not in the local board table.
 fn filter_known_sender(
-    boards: &HashMap<u64, String>,
+    boards: &HashMap<crate::ipc::HashedId<u64>, String>,
     msg: ControlToArbiter,
 ) -> Option<ControlToArbiter> {
     if boards.contains_key(&msg.from_board()) {

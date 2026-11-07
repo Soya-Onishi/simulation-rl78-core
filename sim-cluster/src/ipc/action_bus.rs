@@ -295,9 +295,9 @@ mod tests {
 
         let request = ActionRequest {
             request_id: 7,
-            board_hash: 3,
-            device_hash: 4,
-            action_hash: 5,
+            board_hash: crate::ipc::HashedId::new(3),
+            device_hash: crate::ipc::HashedId::new(4),
+            action_hash: crate::ipc::HashedId::new(5),
             ..ActionRequest::default()
         };
         server.publish_request(&request).unwrap();
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(forwarded.request_id, 7);
         arb_nodes.publish_request(&forwarded).unwrap();
         let at_node = node_actions.try_request().unwrap().expect("a2n");
-        assert_eq!(at_node.action_hash, 5);
+        assert_eq!(at_node.action_hash, crate::ipc::HashedId::new(5));
         node_actions
             .publish_upstream(&ActionUpstream::Result(ActionResult {
                 request_id: 7,

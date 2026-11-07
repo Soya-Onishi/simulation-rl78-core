@@ -55,7 +55,7 @@ impl ActionStatus {
 pub struct ActionParam {
     pub name: [u8; NAME_CAP],
     pub name_len: u8,
-    pub name_hash: u64,
+    pub name_hash: crate::ipc::HashedId<u64>,
     pub unit: [u8; UNIT_CAP],
     pub unit_len: u8,
     pub description: [u8; PARAM_DESC_CAP],
@@ -71,7 +71,7 @@ impl Default for ActionParam {
         Self {
             name: [0; NAME_CAP],
             name_len: 0,
-            name_hash: 0,
+            name_hash: crate::ipc::HashedId::new(0),
             unit: [0; UNIT_CAP],
             unit_len: 0,
             description: [0; PARAM_DESC_CAP],
@@ -87,13 +87,13 @@ impl Default for ActionParam {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, ZeroCopySend)]
 pub struct ActionAdvertise {
-    pub from: u64,
+    pub from: crate::ipc::HashedId<u64>,
     pub device: [u8; NAME_CAP],
     pub device_len: u8,
-    pub device_hash: u64,
+    pub device_hash: crate::ipc::HashedId<u64>,
     pub action: [u8; NAME_CAP],
     pub action_len: u8,
-    pub action_hash: u64,
+    pub action_hash: crate::ipc::HashedId<u64>,
     pub description: [u8; ACTION_DESC_CAP],
     pub description_len: u16,
     pub param_count: u8,
@@ -103,13 +103,13 @@ pub struct ActionAdvertise {
 impl Default for ActionAdvertise {
     fn default() -> Self {
         Self {
-            from: 0,
+            from: crate::ipc::HashedId::new(0),
             device: [0; NAME_CAP],
             device_len: 0,
-            device_hash: 0,
+            device_hash: crate::ipc::HashedId::new(0),
             action: [0; NAME_CAP],
             action_len: 0,
-            action_hash: 0,
+            action_hash: crate::ipc::HashedId::new(0),
             description: [0; ACTION_DESC_CAP],
             description_len: 0,
             param_count: 0,
@@ -121,7 +121,7 @@ impl Default for ActionAdvertise {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, ZeroCopySend)]
 pub struct RequestParam {
-    pub name_hash: u64,
+    pub name_hash: crate::ipc::HashedId<u64>,
     pub value: f64,
 }
 
@@ -129,9 +129,9 @@ pub struct RequestParam {
 #[derive(Clone, Copy, Debug, ZeroCopySend)]
 pub struct ActionRequest {
     pub request_id: u64,
-    pub board_hash: u64,
-    pub device_hash: u64,
-    pub action_hash: u64,
+    pub board_hash: crate::ipc::HashedId<u64>,
+    pub device_hash: crate::ipc::HashedId<u64>,
+    pub action_hash: crate::ipc::HashedId<u64>,
     pub param_count: u8,
     pub params: [RequestParam; sim_kernel::MAX_ACTION_PARAMS],
 }
@@ -140,12 +140,12 @@ impl Default for ActionRequest {
     fn default() -> Self {
         Self {
             request_id: 0,
-            board_hash: 0,
-            device_hash: 0,
-            action_hash: 0,
+            board_hash: crate::ipc::HashedId::new(0),
+            device_hash: crate::ipc::HashedId::new(0),
+            action_hash: crate::ipc::HashedId::new(0),
             param_count: 0,
             params: [RequestParam {
-                name_hash: 0,
+                name_hash: crate::ipc::HashedId::new(0),
                 value: 0.0,
             }; sim_kernel::MAX_ACTION_PARAMS],
         }
@@ -195,7 +195,10 @@ impl std::error::Error for ActionPackError {}
 impl ActionAdvertise {
     /// Pack one catalog row into an advertise sample.
     #[must_use]
-    pub fn new(from: u64, entry: &ActionCatalogEntry) -> Result<Self, ActionPackError> {
+    pub fn new(
+        from: crate::ipc::HashedId<u64>,
+        entry: &ActionCatalogEntry,
+    ) -> Result<Self, ActionPackError> {
         if entry.device_hash != id_hash(&entry.device) {
             return Err(ActionPackError::HashMismatch { field: "device" });
         }
@@ -207,8 +210,8 @@ impl ActionAdvertise {
         }
         let mut sample = ActionAdvertise {
             from,
-            device_hash: entry.device_hash,
-            action_hash: entry.action_hash,
+            device_hash: crate::ipc::HashedId::new(entry.device_hash),
+            action_hash: crate::ipc::HashedId::new(entry.action_hash),
             param_count: u8::try_from(entry.params.len()).unwrap_or(u8::MAX),
             ..ActionAdvertise::default()
         };
@@ -231,10 +234,10 @@ impl ActionRequest {
     #[must_use]
     pub fn new(
         request_id: u64,
-        board_hash: u64,
-        device_hash: u64,
-        action_hash: u64,
-        params: &[(u64, f64)],
+        board_hash: crate::ipc::HashedId<u64>,
+        device_hash: crate::ipc::HashedId<u64>,
+        action_hash: crate::ipc::HashedId<u64>,
+        params: &[(crate::ipc::HashedId<u64>, f64)],
     ) -> Result<Self, ActionPackError> {
         if params.len() > sim_kernel::MAX_ACTION_PARAMS {
             return Err(ActionPackError::TooManyParams);
@@ -258,7 +261,7 @@ impl ActionRequest {
 
     /// Parameter pairs carried on this request, truncated to `param_count`.
     #[must_use]
-    pub fn raw_params(&self) -> Vec<(u64, f64)> {
+    pub fn raw_params(&self) -> Vec<(crate::ipc::HashedId<u64>, f64)> {
         let n = usize::from(self.param_count).min(self.params.len());
         self.params[..n]
             .iter()
@@ -271,16 +274,16 @@ impl AdvertisedAction {
     /// JSON catalog row. `board_id` is the public hex form of `board_hash`.
     #[must_use]
     pub fn new(
-        board_hash: u64,
+        board_hash: crate::ipc::HashedId<u64>,
         board_label: impl Into<String>,
         sample: &ActionAdvertise,
     ) -> Result<Self, ActionPackError> {
         let device = unpack(&sample.device, sample.device_len);
         let action = unpack(&sample.action, sample.action_len);
-        if sample.device_hash != id_hash(&device) {
+        if sample.device_hash != crate::ipc::HashedId::new(id_hash(&device)) {
             return Err(ActionPackError::HashMismatch { field: "device" });
         }
-        if sample.action_hash != id_hash(&action) {
+        if sample.action_hash != crate::ipc::HashedId::new(id_hash(&action)) {
             return Err(ActionPackError::HashMismatch { field: "action" });
         }
         let n = usize::from(sample.param_count).min(sample.params.len());
@@ -289,7 +292,7 @@ impl AdvertisedAction {
             params.push(AdvertisedActionParam::new(param)?);
         }
         Ok(AdvertisedAction {
-            board_id: crate::ipc::format_id_hex(board_hash),
+            board_id: board_hash,
             board_label: board_label.into(),
             device,
             action,
@@ -305,7 +308,7 @@ impl ActionParam {
             return Err(ActionPackError::HashMismatch { field: "parameter" });
         }
         let mut packed = ActionParam {
-            name_hash: param.name_hash,
+            name_hash: crate::ipc::HashedId::new(param.name_hash),
             flags: 0,
             ..ActionParam::default()
         };
@@ -339,7 +342,7 @@ impl ActionParam {
 impl AdvertisedActionParam {
     fn new(param: &ActionParam) -> Result<Self, ActionPackError> {
         let name = unpack(&param.name, param.name_len);
-        if param.name_hash != id_hash(&name) {
+        if param.name_hash != crate::ipc::HashedId::new(id_hash(&name)) {
             return Err(ActionPackError::HashMismatch { field: "parameter" });
         }
         let unit = optional_text(&param.unit, param.unit_len);
@@ -404,9 +407,10 @@ mod tests {
             description: spec.description.clone(),
             params: spec.params.clone(),
         };
-        let sample = ActionAdvertise::new(9, &entry).expect("pack");
-        let body = AdvertisedAction::new(9, "board-a", &sample).expect("unpack");
-        assert_eq!(body.board_id, crate::ipc::format_id_hex(9));
+        let sample = ActionAdvertise::new(crate::ipc::HashedId::new(9), &entry).expect("pack");
+        let body = AdvertisedAction::new(crate::ipc::HashedId::new(9), "board-a", &sample)
+            .expect("unpack");
+        assert_eq!(body.board_id, crate::ipc::HashedId::new(9));
         assert_eq!(body.board_label, "board-a");
         assert_eq!(body.device, "sw1");
         assert_eq!(body.action, "hold");
