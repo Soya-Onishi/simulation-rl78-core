@@ -707,12 +707,8 @@ fn poll_actions(sim: &mut Simulation) {
                 let Some(board_label) = sim.boards.get(&sample.from).cloned() else {
                     continue;
                 };
-                let board_hex = format_id_hex(sample.from);
-                match AdvertisedAction::new(&board_hex, &sample) {
-                    Ok(mut body) => {
-                        body.board_label = board_label;
-                        upsert_catalog(sim, body);
-                    }
+                match AdvertisedAction::new(sample.from, board_label, &sample) {
+                    Ok(body) => upsert_catalog(sim, body),
                     Err(err) => {
                         eprintln!("cluster-backend {}: action advertise: {err}", sim.id);
                     }

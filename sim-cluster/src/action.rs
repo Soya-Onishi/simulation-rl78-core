@@ -268,9 +268,13 @@ impl ActionRequest {
 }
 
 impl AdvertisedAction {
-    /// JSON catalog row. Hashes stay off this value.
+    /// JSON catalog row. `board_id` is the public hex form of `board_hash`.
     #[must_use]
-    pub fn new(board_id: &str, sample: &ActionAdvertise) -> Result<Self, ActionPackError> {
+    pub fn new(
+        board_hash: u64,
+        board_label: impl Into<String>,
+        sample: &ActionAdvertise,
+    ) -> Result<Self, ActionPackError> {
         let device = unpack(&sample.device, sample.device_len);
         let action = unpack(&sample.action, sample.action_len);
         if sample.device_hash != id_hash(&device) {
@@ -285,8 +289,8 @@ impl AdvertisedAction {
             params.push(AdvertisedActionParam::new(param)?);
         }
         Ok(AdvertisedAction {
-            board_id: board_id.to_string(),
-            board_label: String::new(),
+            board_id: crate::ipc::format_id_hex(board_hash),
+            board_label: board_label.into(),
             device,
             action,
             description: unpack(&sample.description, sample.description_len),
@@ -401,8 +405,9 @@ mod tests {
             params: spec.params.clone(),
         };
         let sample = ActionAdvertise::new(9, &entry).expect("pack");
-        let body = AdvertisedAction::new("board-a", &sample).expect("unpack");
-        assert_eq!(body.board_id, "board-a");
+        let body = AdvertisedAction::new(9, "board-a", &sample).expect("unpack");
+        assert_eq!(body.board_id, crate::ipc::format_id_hex(9));
+        assert_eq!(body.board_label, "board-a");
         assert_eq!(body.device, "sw1");
         assert_eq!(body.action, "hold");
         assert_eq!(body.params[0].name, "milliseconds");
