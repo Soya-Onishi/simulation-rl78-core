@@ -47,13 +47,19 @@ pub fn collect_board_catalogs_with_timeout(
     let mut collected = Vec::with_capacity(topo.boards.len());
     for board in &topo.boards {
         let bin = crate::arbiter::binary_for_kind(opts, &board.kind)?;
-        let mut child = spawn_list_catalog(bin).map_err(|err| {
-            ArbiterError::Message(format!(
-                "board '{}': failed to spawn `--list-catalog` ({}): {err}",
-                board.id,
-                bin.display()
-            ))
-        })?;
+        let mut child = Command::new(bin)
+            .arg("--list-catalog")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| {
+                ArbiterError::Message(format!(
+                    "board '{}': failed to spawn `--list-catalog` ({}): {err}",
+                    board.id,
+                    bin.display()
+                ))
+            })?;
 
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
@@ -131,29 +137,6 @@ pub fn collect_board_catalogs_with_timeout(
         }
     }
     Ok(collected)
-}
-
-fn spawn_list_catalog(bin: &std::path::Path) -> std::io::Result<Child> {
-    // `ETXTBSY` can appear briefly after rewriting a test script (or replacing a
-    // binary) while another process still has it mapped; retry a few times.
-    let mut last = None;
-    for _ in 0..20 {
-        match Command::new(bin)
-            .arg("--list-catalog")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => return Ok(child),
-            Err(err) if err.raw_os_error() == Some(26) => {
-                last = Some(err);
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(last.expect("ETXTBSY retry loop left no error"))
 }
 
 enum WaitOutcome {
@@ -330,15 +313,22 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    /// Write a fake board binary without opening `path` for writing.
+    ///
+    /// Contents go to a sibling temp path first; that inode is then renamed onto
+    /// `path`. Spawning `path` therefore never races with a write handle on the
+    /// same path (avoids Linux `ETXTBSY`).
     fn write_exec(path: &Path, body: &str) {
-        fs::write(path, body).unwrap();
+        let staging = path.with_extension("writing");
+        fs::write(&staging, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(path).unwrap().permissions();
+            let mut perms = fs::metadata(&staging).unwrap().permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(path, perms).unwrap();
+            fs::set_permissions(&staging, perms).unwrap();
         }
+        fs::rename(&staging, path).unwrap();
     }
 
     fn one_board_topo(kind: &str) -> LogicalTopology {
