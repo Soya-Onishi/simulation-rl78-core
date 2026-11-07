@@ -265,6 +265,72 @@ pub fn parse_logical_topology(text: &str) -> Result<LogicalTopology, TopologyErr
     LogicalTopology::from_json_str(text)
 }
 
+/// Reverse lookups for path / port / edge hashes computed at topology load.
+#[derive(Clone, Debug)]
+pub struct TopologyHashes {
+    pub boards: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
+    pub paths: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
+    pub ports: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
+    pub edges: std::collections::HashMap<crate::ipc::HashedId<u64>, String>,
+}
+
+/// Hash every path, port name, and leaf edge id; fail on distinct-string collisions.
+pub fn build_topology_hashes(topo: &LogicalTopology) -> Result<TopologyHashes, TopologyError> {
+    use crate::ipc::{
+        board_hash_table, edge_hash_table, edge_id_logical, path_hash_table, port_hash_table,
+    };
+
+    let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str()))
+        .map_err(TopologyError::Invalid)?;
+
+    let mut paths: Vec<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
+    for edge in &topo.edges {
+        paths.push(edge.from.path.as_str());
+        paths.push(edge.to.path.as_str());
+        for hop in &edge.route {
+            paths.push(hop.path.as_str());
+        }
+    }
+    let paths = path_hash_table(paths).map_err(TopologyError::Invalid)?;
+
+    let mut ports: Vec<&str> = Vec::new();
+    for board in &topo.boards {
+        for ep in &board.endpoints {
+            ports.push(ep.name.as_str());
+        }
+    }
+    for edge in &topo.edges {
+        ports.push(edge.from.port.as_str());
+        ports.push(edge.to.port.as_str());
+        for hop in &edge.route {
+            ports.push(hop.port.as_str());
+        }
+    }
+    let ports = port_hash_table(ports).map_err(TopologyError::Invalid)?;
+
+    let logical: Vec<String> = topo
+        .edges
+        .iter()
+        .map(|edge| {
+            edge_id_logical(
+                &edge.from.path,
+                &edge.from.port,
+                &edge.to.path,
+                &edge.to.port,
+            )
+        })
+        .collect();
+    let edges =
+        edge_hash_table(logical.iter().map(String::as_str)).map_err(TopologyError::Invalid)?;
+
+    Ok(TopologyHashes {
+        boards,
+        paths,
+        ports,
+        edges,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +394,14 @@ mod tests {
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[1]), 128);
         assert_eq!(topo.edges[0].from.path, "a");
         assert_eq!(topo.edges[0].route.len(), 2);
+        let hashes = build_topology_hashes(&topo).unwrap();
+        assert_eq!(hashes.boards.len(), 2);
+        assert_eq!(hashes.edges.len(), 2);
+        assert!(
+            hashes
+                .ports
+                .contains_key(&crate::ipc::port_id_hash("uart0_tx"))
+        );
     }
 
     #[test]

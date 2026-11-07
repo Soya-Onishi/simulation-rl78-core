@@ -58,19 +58,19 @@ struct UartTxLane {
 }
 
 struct PendingRx {
-    edge_id: String,
+    edge_id: crate::ipc::HashedId<u64>,
     ep: String,
     sub: UartSub,
 }
 
 struct PendingTx {
     ep: String,
-    edge_ids: Vec<String>,
+    edge_ids: Vec<crate::ipc::HashedId<u64>>,
 }
 
 /// UART edge↔endpoint mapping opened before board ports exist.
 pub struct UartDataPlaneMap {
-    producers: HashMap<String, UartPub>,
+    producers: HashMap<crate::ipc::HashedId<u64>, UartPub>,
     pending_rx: Vec<PendingRx>,
     pending_tx: Vec<PendingTx>,
     required_ins: HashSet<String>,
@@ -81,17 +81,17 @@ impl UartDataPlaneMap {
     pub fn open(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         board: &BoardSpec,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let NodeUartPorts {
             mut producers,
             mut consumers,
-        } = NodeUartPorts::open_for_board(node, cluster_key, board_id, topo_edges)?;
+        } = NodeUartPorts::open_for_board(node, cluster_key, board_name, topo_edges)?;
 
         let mut pending_rx = Vec::new();
-        let mut tx_ep_to_edges: HashMap<String, Vec<String>> = HashMap::new();
+        let mut tx_ep_to_edges: HashMap<String, Vec<crate::ipc::HashedId<u64>>> = HashMap::new();
 
         for edge in topo_edges {
             if edge.payload != PayloadKind::Uart {
@@ -104,8 +104,8 @@ impl UartDataPlaneMap {
                 &edge.to.port,
             );
             match (
-                edge.to.path.as_str() == board_id,
-                edge.from.path.as_str() == board_id,
+                edge.to.path.as_str() == board_name,
+                edge.from.path.as_str() == board_name,
             ) {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
@@ -133,11 +133,11 @@ impl UartDataPlaneMap {
             .collect();
 
         // Keep only producers still needed for pending TX edges.
-        let needed: HashSet<&str> = pending_tx
+        let needed: HashSet<crate::ipc::HashedId<u64>> = pending_tx
             .iter()
-            .flat_map(|t| t.edge_ids.iter().map(String::as_str))
+            .flat_map(|t| t.edge_ids.iter().copied())
             .collect();
-        producers.retain(|id, _| needed.contains(id.as_str()));
+        producers.retain(|id, _| needed.contains(id));
 
         let mut required_ins = HashSet::new();
         let mut required_outs = HashSet::new();
@@ -295,19 +295,19 @@ struct AnalogTxLane {
 }
 
 struct AnalogPendingRx {
-    edge_id: String,
+    edge_id: crate::ipc::HashedId<u64>,
     ep: String,
     sub: AnalogSub,
 }
 
 struct AnalogPendingTx {
     ep: String,
-    edge_ids: Vec<String>,
+    edge_ids: Vec<crate::ipc::HashedId<u64>>,
 }
 
 /// Analog edge↔endpoint mapping opened before board ports exist.
 pub struct AnalogDataPlaneMap {
-    producers: HashMap<String, AnalogPub>,
+    producers: HashMap<crate::ipc::HashedId<u64>, AnalogPub>,
     pending_rx: Vec<AnalogPendingRx>,
     pending_tx: Vec<AnalogPendingTx>,
     required_ins: HashSet<String>,
@@ -318,17 +318,17 @@ impl AnalogDataPlaneMap {
     pub fn open(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         board: &BoardSpec,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let NodeAnalogPorts {
             mut producers,
             mut consumers,
-        } = NodeAnalogPorts::open_for_board(node, cluster_key, board_id, topo_edges)?;
+        } = NodeAnalogPorts::open_for_board(node, cluster_key, board_name, topo_edges)?;
 
         let mut pending_rx = Vec::new();
-        let mut tx_ep_to_edges: HashMap<String, Vec<String>> = HashMap::new();
+        let mut tx_ep_to_edges: HashMap<String, Vec<crate::ipc::HashedId<u64>>> = HashMap::new();
 
         for edge in topo_edges {
             if edge.payload != PayloadKind::Analog {
@@ -341,8 +341,8 @@ impl AnalogDataPlaneMap {
                 &edge.to.port,
             );
             match (
-                edge.to.path.as_str() == board_id,
-                edge.from.path.as_str() == board_id,
+                edge.to.path.as_str() == board_name,
+                edge.from.path.as_str() == board_name,
             ) {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
@@ -371,11 +371,11 @@ impl AnalogDataPlaneMap {
             .map(|(ep, edge_ids)| AnalogPendingTx { ep, edge_ids })
             .collect();
 
-        let needed: HashSet<&str> = pending_tx
+        let needed: HashSet<crate::ipc::HashedId<u64>> = pending_tx
             .iter()
-            .flat_map(|t| t.edge_ids.iter().map(String::as_str))
+            .flat_map(|t| t.edge_ids.iter().copied())
             .collect();
-        producers.retain(|id, _| needed.contains(id.as_str()));
+        producers.retain(|id, _| needed.contains(id));
 
         let mut required_ins = HashSet::new();
         let mut required_outs = HashSet::new();
@@ -515,17 +515,17 @@ impl DataPlane for AnalogDataPlane {
     }
 }
 
-/// Open every data-plane map needed by `board_id` for the given topology.
+/// Open every data-plane map needed by `board_name` for the given topology.
 pub fn open_data_planes(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_id: &str,
+    board_name: &str,
     board: &BoardSpec,
     topo: &LogicalTopology,
 ) -> Result<Vec<Box<dyn DataPlaneMap>>, DataPlaneError> {
     let mut kinds = HashSet::new();
     for edge in &topo.edges {
-        if edge.from.path == board_id || edge.to.path == board_id {
+        if edge.from.path == board_name || edge.to.path == board_name {
             kinds.insert(edge.payload);
         }
     }
@@ -537,12 +537,13 @@ pub fn open_data_planes(
     for kind in kinds {
         match kind {
             PayloadKind::Uart => {
-                let map = UartDataPlaneMap::open(node, cluster_key, board_id, board, &topo.edges)?;
+                let map =
+                    UartDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
                 maps.push(Box::new(map));
             }
             PayloadKind::Analog => {
                 let map =
-                    AnalogDataPlaneMap::open(node, cluster_key, board_id, board, &topo.edges)?;
+                    AnalogDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
                 maps.push(Box::new(map));
             }
             PayloadKind::Digital => {

@@ -22,7 +22,7 @@ use tower_http::services::ServeDir;
 use crate::backend::SimulationBackend;
 use crate::contract::{
     ActionList, ApiError, AttachGdbRequest, CreateSimulationRequest, CreateSimulationResponse,
-    GdbSessionInfo, GdbSshCommand, InvokeActionRequest, ProbeSamplesResponse,
+    GdbSessionInfo, GdbSshCommand, HashedIdString, InvokeActionRequest, ProbeSamplesResponse,
     StartSimulationRequest, StatusEvent, TopologyView, prepare_create_topology,
 };
 use crate::gdb::GdbSlot;
@@ -267,12 +267,13 @@ async fn gdb_attach(
     Path(id): Path<String>,
     body: Result<Json<AttachGdbRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<GdbSessionInfo>), ApiError> {
-    let Json(request) =
-        body.map_err(|_| ApiError::bad_request("bad_param", "invalid gdb attach body"))?;
-    if request.board_id.is_empty() {
-        return Err(ApiError::bad_request("bad_param", "board_id is required"));
-    }
-    let info = tokio::task::spawn_blocking(move || attach_gdb_slot(&state, &id, &request.board_id))
+    let Json(request) = body.map_err(|_| {
+        ApiError::bad_request(
+            "bad_param",
+            "invalid gdb attach body (board_id must be a 16-digit lowercase hex string)",
+        )
+    })?;
+    let info = tokio::task::spawn_blocking(move || attach_gdb_slot(&state, &id, request.board_id))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok((StatusCode::CREATED, Json(info)))
@@ -408,8 +409,7 @@ fn status_event_stream(
                                     || prev.state != status.state
                                     || prev.stop_reason != status.stop_reason
                                     || prev.nodes != status.nodes;
-                                let vt_changed =
-                                    prev.virtual_time_ns != status.virtual_time_ns;
+                                let vt_changed = prev.virtual_time_ns != status.virtual_time_ns;
                                 (fields_changed, vt_changed)
                             }
                         };
@@ -507,8 +507,8 @@ async fn probe_catalog(
 
 #[derive(serde::Deserialize)]
 struct ProbeSamplesQuery {
-    board: String,
-    probe: String,
+    board: HashedIdString,
+    probe: HashedIdString,
     from_ns: Option<String>,
     to_ns: Option<String>,
     viewer: Option<String>,
@@ -529,12 +529,8 @@ async fn probe_samples(
         },
     )
     .await?;
-    if query.board.is_empty() || query.probe.is_empty() {
-        return Err(ApiError::bad_request(
-            "bad_param",
-            "board and probe are required",
-        ));
-    }
+    let board = query.board.parse_id("board")?;
+    let probe = query.probe.parse_id("probe")?;
     let from_ns = query.from_ns.as_deref();
     let to_ns = query.to_ns.as_deref();
     let range = ProbeRange::parse(from_ns, to_ns)
@@ -544,8 +540,8 @@ async fn probe_samples(
     let body = tokio::task::spawn_blocking(move || {
         backend.probe_samples(
             &id,
-            &query.board,
-            &query.probe,
+            board,
+            probe,
             if latest { None } else { range.from_ns },
             if latest { None } else { range.to_ns },
         )
@@ -867,11 +863,14 @@ fn take_gdb_slot(state: &AppState, id: &str) -> Result<Option<GdbSlot>, ApiError
     Ok(gdb_map(state)?.remove(id))
 }
 
-fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSessionInfo, ApiError> {
+fn attach_gdb_slot(
+    state: &AppState,
+    id: &str,
+    board_id: crate::ipc::HashedId<u64>,
+) -> Result<GdbSessionInfo, ApiError> {
     if gdb_connected(state, id) {
         return Err(ApiError::conflict("gdb is connected"));
     }
-
     let status = state.backend.status(id)?;
     match status
         .nodes
@@ -892,7 +891,7 @@ fn attach_gdb_slot(state: &AppState, id: &str, board_id: &str) -> Result<GdbSess
     let slot = crate::gdb::spawn_slot(
         state.backend.clone(),
         id.to_string(),
-        board_id.to_string(),
+        board_id,
         state.advertise_host.clone(),
     )
     .map_err(|err| ApiError::internal(err.to_string()))?;
@@ -921,11 +920,11 @@ fn detach_gdb_slot(state: &AppState, id: &str) -> Result<(), ApiError> {
         return Err(ApiError::not_found("unknown simulation"));
     }
     if let Some(mut slot) = take_gdb_slot(state, id)? {
-        let board_id = slot.board_id.clone();
+        let board_id = slot.board_id;
         slot.shutdown();
         let _ = state
             .backend
-            .inspect(id, &board_id, InspectRequest::ClearBreakpoints);
+            .inspect(id, board_id, InspectRequest::ClearBreakpoints);
     }
     Ok(())
 }

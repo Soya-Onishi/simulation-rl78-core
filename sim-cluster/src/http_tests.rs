@@ -47,7 +47,7 @@ impl SimulationBackend for TopoMock {
             virtual_time_ns: 0,
             stop_reason: None,
             nodes: vec![SessionNode {
-                id: "mcu-a".into(),
+                id: crate::ipc::board_id_hash("mcu-a"),
                 kind: "rl78".into(),
                 state: "stopped".into(),
             }],
@@ -122,8 +122,8 @@ impl SimulationBackend for TopoMock {
     fn probe_samples(
         &self,
         _id: &str,
-        _board: &str,
-        _probe: &str,
+        _board: crate::ipc::HashedId<u64>,
+        _probe: crate::ipc::HashedId<u64>,
         _from_ns: Option<u64>,
         _to_ns: Option<u64>,
     ) -> Result<ProbeSamplesResponse, ApiError> {
@@ -148,12 +148,12 @@ impl SimulationBackend for TopoMock {
     fn inspect(
         &self,
         _id: &str,
-        _board_id: &str,
+        _board_id: crate::ipc::HashedId<u64>,
         _req: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
         Ok(InspectReply::Ok)
     }
-    fn step(&self, _id: &str, _board_id: &str) -> Result<(), ApiError> {
+    fn step(&self, _id: &str, _board_id: crate::ipc::HashedId<u64>) -> Result<(), ApiError> {
         Ok(())
     }
 }
@@ -217,7 +217,8 @@ fn simulation_topology_returns_boards_without_elf() {
         let bytes = res.body_mut().read_to_vec().unwrap();
         let view: TopologyView = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(view.boards.len(), 1);
-        assert_eq!(view.boards[0].id, "mcu-a");
+        assert_eq!(view.boards[0].label, "mcu-a");
+        assert_eq!(view.boards[0].id, crate::ipc::board_id_hash("mcu-a"));
         assert_eq!(view.boards[0].kind, "rl78");
         assert!(view.edges.is_empty());
         let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

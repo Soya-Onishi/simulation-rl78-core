@@ -15,10 +15,10 @@ use crate::probe::{PROBE_NAME_CAP, ProbeAdvertisement, ProbeWireKind};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeCatalogEntry {
     pub board_id: String,
-    pub board_hash: u64,
+    pub board_hash: crate::ipc::HashedId<u64>,
     pub name: String,
-    pub name_hash: u64,
-    pub probe_id: u64,
+    pub name_hash: crate::ipc::HashedId<u64>,
+    pub probe_id: crate::ipc::HashedId<u64>,
     pub kind: ProbeWireKind,
 }
 
@@ -33,12 +33,12 @@ pub enum ProbeSample {
 /// Failures from arbiter probe subscribe helpers.
 #[derive(Debug, thiserror::Error)]
 pub enum ArbiterProbeError {
-    #[error("unknown probe id {0:#x}")]
-    UnknownProbe(u64),
+    #[error("unknown probe id {0}")]
+    UnknownProbe(crate::ipc::HashedId<u64>),
     #[error("unknown probe {board_id}/{name}")]
     UnknownName { board_id: String, name: String },
-    #[error("probe {0:#x} already subscribed")]
-    AlreadySubscribed(u64),
+    #[error("probe {0} already subscribed")]
+    AlreadySubscribed(crate::ipc::HashedId<u64>),
     #[error(transparent)]
     Ipc(#[from] IpcError),
 }
@@ -52,9 +52,9 @@ enum LiveSub {
 /// Catalog + optional live subscribers for probe samples.
 pub struct ArbiterProbeHub {
     cluster_key: String,
-    catalog: HashMap<u64, ProbeCatalogEntry>,
-    by_name: HashMap<(String, String), u64>,
-    subs: HashMap<u64, LiveSub>,
+    catalog: HashMap<crate::ipc::HashedId<u64>, ProbeCatalogEntry>,
+    by_name: HashMap<(crate::ipc::HashedId<u64>, String), crate::ipc::HashedId<u64>>,
+    subs: HashMap<crate::ipc::HashedId<u64>, LiveSub>,
 }
 
 impl ArbiterProbeHub {
@@ -72,7 +72,7 @@ impl ArbiterProbeHub {
     pub fn record_advertise(
         &mut self,
         board_id: impl Into<String>,
-        board_hash: u64,
+        board_hash: crate::ipc::HashedId<u64>,
         adv: ProbeAdvertisement,
     ) {
         let board_id = board_id.into();
@@ -84,7 +84,7 @@ impl ArbiterProbeHub {
             probe_id: adv.probe_id,
             kind: adv.kind,
         };
-        self.by_name.insert((board_id, adv.name), adv.probe_id);
+        self.by_name.insert((board_hash, adv.name), adv.probe_id);
         self.catalog.insert(adv.probe_id, entry);
     }
 
@@ -92,9 +92,9 @@ impl ArbiterProbeHub {
     pub fn record_wire_advertise(
         &mut self,
         board_id: impl Into<String>,
-        board_hash: u64,
-        name_hash: u64,
-        probe_id: u64,
+        board_hash: crate::ipc::HashedId<u64>,
+        name_hash: crate::ipc::HashedId<u64>,
+        probe_id: crate::ipc::HashedId<u64>,
         kind: ProbeWireKind,
         name_bytes: &[u8],
     ) {
@@ -112,7 +112,7 @@ impl ArbiterProbeHub {
     }
 
     #[must_use]
-    pub fn catalog(&self) -> &HashMap<u64, ProbeCatalogEntry> {
+    pub fn catalog(&self) -> &HashMap<crate::ipc::HashedId<u64>, ProbeCatalogEntry> {
         &self.catalog
     }
 
@@ -120,7 +120,7 @@ impl ArbiterProbeHub {
     pub fn subscribe_probe(
         &mut self,
         node: &Node<iceoryx2::prelude::ipc::Service>,
-        probe_id: u64,
+        probe_id: crate::ipc::HashedId<u64>,
     ) -> Result<(), ArbiterProbeError> {
         if self.subs.contains_key(&probe_id) {
             return Err(ArbiterProbeError::AlreadySubscribed(probe_id));
@@ -154,25 +154,30 @@ impl ArbiterProbeHub {
         Ok(())
     }
 
-    /// Resolve `(board_id, name)` then [`subscribe_probe`].
+    /// Resolve `(board_hash, name)` then [`subscribe_probe`].
     pub fn subscribe_by_name(
         &mut self,
         node: &Node<iceoryx2::prelude::ipc::Service>,
-        board_id: &str,
+        board_hash: crate::ipc::HashedId<u64>,
         name: &str,
-    ) -> Result<u64, ArbiterProbeError> {
+    ) -> Result<crate::ipc::HashedId<u64>, ArbiterProbeError> {
         let probe_id = self
             .by_name
-            .get(&(board_id.to_string(), name.to_string()))
+            .get(&(board_hash, name.to_string()))
             .copied()
             .or_else(|| {
                 // Allow subscribe before advertise using deterministic hash, if kind is known
                 // only via catalog — without catalog we cannot open the right typed sub.
-                let id = probe_id_hash(board_id, name);
+                let id = probe_id_hash(board_hash, name);
                 self.catalog.contains_key(&id).then_some(id)
             })
             .ok_or_else(|| ArbiterProbeError::UnknownName {
-                board_id: board_id.to_string(),
+                board_id: self
+                    .catalog
+                    .values()
+                    .find(|e| e.board_hash == board_hash)
+                    .map(|e| e.board_id.clone())
+                    .unwrap_or_else(|| board_hash.to_string()),
                 name: name.to_string(),
             })?;
         self.subscribe_probe(node, probe_id)?;
@@ -184,14 +189,14 @@ impl ArbiterProbeHub {
         &mut self,
         node: &Node<iceoryx2::prelude::ipc::Service>,
     ) -> Result<(), ArbiterProbeError> {
-        let ids: Vec<u64> = self.catalog.keys().copied().collect();
+        let ids: Vec<crate::ipc::HashedId<u64>> = self.catalog.keys().copied().collect();
         for id in ids {
             self.subscribe_probe(node, id)?;
         }
         Ok(())
     }
 
-    pub fn unsubscribe_probe(&mut self, probe_id: u64) -> bool {
+    pub fn unsubscribe_probe(&mut self, probe_id: crate::ipc::HashedId<u64>) -> bool {
         self.subs.remove(&probe_id).is_some()
     }
 

@@ -92,8 +92,8 @@ export default function BoardNode({ data }: NodeProps<BoardFlowNode>) {
         type={h.type}
         position={position}
         style={{ top: `${((i + 1) / (specs.length + 1)) * 100}%` }}
-        onMouseEnter={(ev) => onTip(ev, h.tips, `${board.id} ↔ ${h.remote}`)}
-        onMouseMove={(ev) => onTip(ev, h.tips, `${board.id} ↔ ${h.remote}`)}
+        onMouseEnter={(ev) => onTip(ev, h.tips, `${board.label} ↔ ${h.remoteLabel}`)}
+        onMouseMove={(ev) => onTip(ev, h.tips, `${board.label} ↔ ${h.remoteLabel}`)}
         onMouseLeave={() => onTip(null, null)}
       />
     ))
@@ -104,8 +104,8 @@ export default function BoardNode({ data }: NodeProps<BoardFlowNode>) {
       {handles(board.right, Position.Right)}
       <div className="board-node-head">
         <KindIcon kind={board.kind} />
-        <span className="board-node-id" title={`${board.id} (${board.kind})`}>
-          {board.id}
+        <span className="board-node-id" title={`${board.label} (${board.kind}) / ${board.id}`}>
+          {board.label}
         </span>
       </div>
       {board.kind === 'rl78' && (
@@ -116,8 +116,8 @@ export default function BoardNode({ data }: NodeProps<BoardFlowNode>) {
       {board.unused.length > 0 && (
         <div
           className="unused-port nodrag"
-          onMouseEnter={(ev) => onTip(ev, board.unused, `${board.id} (未接続)`)}
-          onMouseMove={(ev) => onTip(ev, board.unused, `${board.id} (未接続)`)}
+          onMouseEnter={(ev) => onTip(ev, board.unused, `${board.label} (未接続)`)}
+          onMouseMove={(ev) => onTip(ev, board.unused, `${board.label} (未接続)`)}
           onMouseLeave={() => onTip(null, null)}
         />
       )}

@@ -11,12 +11,17 @@ export interface HandleSpec {
   id: string
   type: 'source' | 'target'
   remote: string
+  /** Human-readable label for `remote`. */
+  remoteLabel: string
   /** Local endpoints that connect to `remote` (in and out mixed). */
   tips: Tip[]
 }
 
 export interface BoardModel {
+  /** Public board id (16-digit hex). */
   id: string
+  /** Human-readable board label from topology. */
+  label: string
   kind: string
   width: number
   height: number
@@ -49,7 +54,7 @@ const MIN_H = 64
 const PER_HANDLE = 24
 
 function tipOf(ep: TopologyEndpoint): Tip {
-  return { name: ep.name, direction: ep.direction, payload: ep.payload }
+  return { name: ep.label, direction: ep.direction, payload: ep.payload }
 }
 
 function sortedPair(x: string, y: string): [string, string] {
@@ -64,7 +69,9 @@ function sortedPair(x: string, y: string): [string, string] {
  */
 export function buildModel(topo: Topology): WiringModel {
   const endpointSpec = new Map<string, TopologyEndpoint>()
-  for (const b of topo.boards) for (const ep of b.endpoints) endpointSpec.set(`${b.id}/${ep.name}`, ep)
+  for (const b of topo.boards) {
+    for (const ep of b.endpoints) endpointSpec.set(`${b.id}/${ep.name}`, ep)
+  }
 
   interface Pair {
     a: string
@@ -72,7 +79,7 @@ export function buildModel(topo: Topology): WiringModel {
     lines: string[]
   }
   const pairs = new Map<string, Pair>()
-  // board -> remote -> endpoints (by name)
+  // board -> remote -> endpoints (by public endpoint id)
   const local = new Map<string, Map<string, Map<string, Tip>>>()
   const used = new Map<string, Set<string>>()
 
@@ -88,18 +95,24 @@ export function buildModel(topo: Topology): WiringModel {
   }
 
   for (const e of topo.edges) {
-    const [a, b] = sortedPair(e.from_board, e.to_board)
+    const fromBoard = e.from.path
+    const toBoard = e.to.path
+    const [a, b] = sortedPair(fromBoard, toBoard)
     const key = `${a}\u0000${b}`
     let pair = pairs.get(key)
     if (!pair) pairs.set(key, (pair = { a, b, lines: [] }))
-    pair.lines.push(`${e.from_board}.${e.from_endpoint} -> ${e.to_board}.${e.to_endpoint}: ${e.payload}`)
-    addLocal(e.from_board, e.to_board, e.from_endpoint, {
-      name: e.from_endpoint,
+    pair.lines.push(
+      `${e.from.path_label}.${e.from.port_label} -> ${e.to.path_label}.${e.to.port_label}: ${e.payload}`,
+    )
+    addLocal(fromBoard, toBoard, e.from.port, {
+      name: e.from.port,
+      label: e.from.port_label,
       direction: 'out',
       payload: e.payload,
     })
-    addLocal(e.to_board, e.from_board, e.to_endpoint, {
-      name: e.to_endpoint,
+    addLocal(toBoard, fromBoard, e.to.port, {
+      name: e.to.port,
+      label: e.to.port_label,
       direction: 'in',
       payload: e.payload,
     })
@@ -113,6 +126,8 @@ export function buildModel(topo: Topology): WiringModel {
     if (list) list.push(h)
     else m.set(k, [h])
   }
+  const boardLabel = new Map(topo.boards.map((b) => [b.id, b.label]))
+
   for (const [key, pair] of pairs) {
     // Lexicographic a->b is a geometry anchor only (undirected link).
     const aHandle = `h:${pair.b}`
@@ -125,17 +140,21 @@ export function buildModel(topo: Topology): WiringModel {
       bHandle,
       lines: pair.lines,
     })
-    const tipsOf = (board: string, remote: string) => [...(local.get(board)?.get(remote)?.values() ?? [])]
+    const tipsOf = (board: string, remote: string) => [
+      ...(local.get(board)?.get(remote)?.values() ?? []),
+    ]
     push(rights, pair.a, {
       id: aHandle,
       type: 'source',
       remote: pair.b,
+      remoteLabel: boardLabel.get(pair.b) ?? pair.b,
       tips: tipsOf(pair.a, pair.b),
     })
     push(lefts, pair.b, {
       id: bHandle,
       type: 'target',
       remote: pair.a,
+      remoteLabel: boardLabel.get(pair.a) ?? pair.a,
       tips: tipsOf(pair.b, pair.a),
     })
   }
@@ -147,6 +166,7 @@ export function buildModel(topo: Topology): WiringModel {
     const unused = b.endpoints.filter((ep) => !u?.has(ep.name)).map(tipOf)
     return {
       id: b.id,
+      label: b.label,
       kind: b.kind,
       width: NODE_W,
       height: Math.max(MIN_H, PER_HANDLE * Math.max(left.length, right.length) + 24),

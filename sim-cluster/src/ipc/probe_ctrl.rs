@@ -4,6 +4,7 @@ use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::*;
 
+use crate::ipc::HashedId;
 use crate::probe::MAX_PROBES_PER_BOARD;
 use crate::probe_log::{ProbeKind, ProbeRecord};
 
@@ -29,16 +30,16 @@ const WATCH_BUFFER: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub struct ProbeWatchWire {
-    pub board_hash: u64,
+    pub board_hash: HashedId<u64>,
     pub count: u8,
     pub _pad: [u8; 7],
-    pub probe_ids: [u64; MAX_PROBES_PER_BOARD],
+    pub probe_ids: [HashedId<u64>; MAX_PROBES_PER_BOARD],
 }
 
 impl ProbeWatchWire {
     #[must_use]
-    pub fn new(board_hash: u64, ids: &[u64]) -> Self {
-        let mut probe_ids = [0u64; MAX_PROBES_PER_BOARD];
+    pub fn new(board_hash: HashedId<u64>, ids: &[HashedId<u64>]) -> Self {
+        let mut probe_ids = [HashedId::new(0); MAX_PROBES_PER_BOARD];
         let n = ids.len().min(MAX_PROBES_PER_BOARD);
         probe_ids[..n].copy_from_slice(&ids[..n]);
         Self {
@@ -50,11 +51,11 @@ impl ProbeWatchWire {
     }
 
     #[must_use]
-    pub fn ids(self) -> [u64; MAX_PROBES_PER_BOARD] {
+    pub fn ids(self) -> [HashedId<u64>; MAX_PROBES_PER_BOARD] {
         let mut ids = self.probe_ids;
         let n = usize::from(self.count).min(MAX_PROBES_PER_BOARD);
         for slot in ids.iter_mut().skip(n) {
-            *slot = 0;
+            *slot = HashedId::new(0);
         }
         ids
     }
@@ -64,7 +65,7 @@ impl ProbeWatchWire {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub struct ProbeQueryWire {
     pub request_id: u64,
-    pub board_hash: u64,
+    pub board_hash: HashedId<u64>,
     pub from_ns: u64,
     pub to_ns: u64,
     pub kind: u8,
@@ -72,13 +73,13 @@ pub struct ProbeQueryWire {
     pub has_from: u8,
     pub has_to: u8,
     pub _pad: [u8; 4],
-    pub probe_ids: [u64; MAX_PROBES_PER_BOARD],
+    pub probe_ids: [HashedId<u64>; MAX_PROBES_PER_BOARD],
 }
 
 impl ProbeQueryWire {
     #[must_use]
-    pub fn latest(request_id: u64, board_hash: u64, ids: &[u64]) -> Self {
-        let mut probe_ids = [0u64; MAX_PROBES_PER_BOARD];
+    pub fn latest(request_id: u64, board_hash: HashedId<u64>, ids: &[HashedId<u64>]) -> Self {
+        let mut probe_ids = [HashedId::new(0); MAX_PROBES_PER_BOARD];
         let n = ids.len().min(MAX_PROBES_PER_BOARD);
         probe_ids[..n].copy_from_slice(&ids[..n]);
         Self {
@@ -99,8 +100,8 @@ impl ProbeQueryWire {
     #[must_use]
     pub fn range(
         request_id: u64,
-        board_hash: u64,
-        ids: &[u64],
+        board_hash: HashedId<u64>,
+        ids: &[HashedId<u64>],
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Self {
@@ -110,12 +111,12 @@ impl ProbeQueryWire {
     #[must_use]
     pub fn csv(
         request_id: u64,
-        board_hash: u64,
-        ids: &[u64],
+        board_hash: HashedId<u64>,
+        ids: &[HashedId<u64>],
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Self {
-        let mut probe_ids = [0u64; MAX_PROBES_PER_BOARD];
+        let mut probe_ids = [HashedId::new(0); MAX_PROBES_PER_BOARD];
         let n = ids.len().min(MAX_PROBES_PER_BOARD);
         probe_ids[..n].copy_from_slice(&ids[..n]);
         Self {
@@ -133,7 +134,7 @@ impl ProbeQueryWire {
     }
 
     #[must_use]
-    pub fn probe_ids(&self) -> &[u64] {
+    pub fn probe_ids(&self) -> &[HashedId<u64>] {
         let n = usize::from(self.count).min(MAX_PROBES_PER_BOARD);
         &self.probe_ids[..n]
     }
@@ -143,7 +144,7 @@ impl ProbeQueryWire {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub struct ProbeQueryRecord {
     pub virtual_time_ns: u64,
-    pub probe_id: u64,
+    pub probe_id: HashedId<u64>,
     pub value: u16,
     pub kind: u8,
     pub _pad: u8,
@@ -180,7 +181,7 @@ impl ProbeQueryRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub struct ProbeQueryReplyWire {
     pub request_id: u64,
-    pub from: u64,
+    pub from: HashedId<u64>,
     pub flags: u8,
     pub count: u8,
     pub _pad: [u8; 6],
@@ -191,14 +192,14 @@ impl ProbeQueryReplyWire {
     #[must_use]
     pub fn chunk(
         request_id: u64,
-        from: u64,
+        from: HashedId<u64>,
         records: &[ProbeRecord],
         last: bool,
         truncated: bool,
     ) -> Self {
         let mut packed = [ProbeQueryRecord {
             virtual_time_ns: 0,
-            probe_id: 0,
+            probe_id: HashedId::new(0),
             value: 0,
             kind: 0,
             _pad: 0,
@@ -682,6 +683,7 @@ impl NodeProbeCsv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::HashedId;
     use crate::ipc::runtime::{create_node, isolated_config};
     use crate::probe_log::{ProbeKind, ProbeRecord};
 
@@ -698,20 +700,23 @@ mod tests {
         let node_q = NodeProbeQuery::open(&node, &key, 1).unwrap();
 
         server
-            .publish_watch(ProbeWatchWire::new(9, &[1, 2]))
+            .publish_watch(ProbeWatchWire::new(
+                HashedId::new(9),
+                &[HashedId::new(1), HashedId::new(2)],
+            ))
             .unwrap();
         let watch = arb.try_watch().unwrap().expect("watch");
-        assert_eq!(watch.board_hash, 9);
+        assert_eq!(watch.board_hash, HashedId::new(9));
         assert_eq!(watch.count, 2);
 
-        let query = ProbeQueryWire::latest(3, 9, &[1]);
+        let query = ProbeQueryWire::latest(3, HashedId::new(9), &[HashedId::new(1)]);
         server.publish_query(query).unwrap();
         let forwarded = arb.try_query().unwrap().expect("query s2a");
         arb.publish_query_to_nodes(forwarded).unwrap();
         let at_node = node_q.try_query().unwrap().expect("query a2n");
         assert_eq!(at_node.request_id, 3);
         let rec = |vt: u64, value: u16| ProbeRecord {
-            probe_id: 1,
+            probe_id: HashedId::new(1),
             virtual_time_ns: vt,
             kind: ProbeKind::Digital,
             value,
@@ -719,14 +724,20 @@ mod tests {
         node_q
             .publish_reply(ProbeQueryReplyWire::chunk(
                 3,
-                9,
+                HashedId::new(9),
                 &[rec(10, 1)],
                 false,
                 false,
             ))
             .unwrap();
         node_q
-            .publish_reply(ProbeQueryReplyWire::chunk(3, 9, &[rec(11, 2)], true, false))
+            .publish_reply(ProbeQueryReplyWire::chunk(
+                3,
+                HashedId::new(9),
+                &[rec(11, 2)],
+                true,
+                false,
+            ))
             .unwrap();
         let first = arb.try_node_reply().unwrap().expect("n2a first");
         arb.publish_reply_to_server(first).unwrap();
@@ -743,14 +754,26 @@ mod tests {
 
         let node_csv = NodeProbeCsv::open(&node, &key, 1).unwrap();
         server
-            .publish_csv(ProbeQueryWire::csv(4, 9, &[1], None, None))
+            .publish_csv(ProbeQueryWire::csv(
+                4,
+                HashedId::new(9),
+                &[HashedId::new(1)],
+                None,
+                None,
+            ))
             .unwrap();
         let csv = arb.try_csv().unwrap().expect("csv s2a");
         arb.publish_csv_to_nodes(csv).unwrap();
         let at_csv = node_csv.try_query().unwrap().expect("csv a2n");
         assert_eq!(at_csv.request_id, 4);
         node_csv
-            .publish_reply(ProbeQueryReplyWire::chunk(4, 9, &[], true, false))
+            .publish_reply(ProbeQueryReplyWire::chunk(
+                4,
+                HashedId::new(9),
+                &[],
+                true,
+                false,
+            ))
             .unwrap();
         let csv_up = arb.try_node_csv().unwrap().expect("csv n2a");
         arb.publish_csv_to_server(csv_up).unwrap();

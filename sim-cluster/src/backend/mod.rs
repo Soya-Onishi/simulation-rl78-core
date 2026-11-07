@@ -59,8 +59,8 @@ pub trait SimulationBackend: Send + Sync {
     fn probe_samples(
         &self,
         id: &str,
-        board: &str,
-        probe: &str,
+        board: crate::ipc::HashedId<u64>,
+        probe: crate::ipc::HashedId<u64>,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Result<crate::contract::ProbeSamplesResponse, ApiError>;
@@ -70,8 +70,8 @@ pub trait SimulationBackend: Send + Sync {
     fn inspect(
         &self,
         id: &str,
-        board_id: &str,
+        board_id: crate::ipc::HashedId<u64>,
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError>;
-    fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError>;
+    fn step(&self, id: &str, board_id: crate::ipc::HashedId<u64>) -> Result<(), ApiError>;
 }

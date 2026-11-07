@@ -16,14 +16,18 @@ pub const PROBE_BUFFER: usize = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub struct ProbeDigitalSample {
-    pub probe_id: u64,
+    pub probe_id: crate::ipc::HashedId<u64>,
     pub virtual_time_ns: u64,
     pub value: u8,
 }
 
 impl ProbeDigitalSample {
     #[must_use]
-    pub fn new(probe_id: u64, virtual_time_ns: u64, value: DigitalLevel) -> Self {
+    pub fn new(
+        probe_id: crate::ipc::HashedId<u64>,
+        virtual_time_ns: u64,
+        value: DigitalLevel,
+    ) -> Self {
         Self {
             probe_id,
             virtual_time_ns,
@@ -46,7 +50,7 @@ impl ProbeDigitalSample {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub struct ProbeUartSample {
-    pub probe_id: u64,
+    pub probe_id: crate::ipc::HashedId<u64>,
     pub virtual_time_ns: u64,
     pub value: UartFrame,
 }
@@ -55,7 +59,7 @@ pub struct ProbeUartSample {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub struct ProbeAnalogSample {
-    pub probe_id: u64,
+    pub probe_id: crate::ipc::HashedId<u64>,
     pub virtual_time_ns: u64,
     pub value: AnalogVoltage,
 }
@@ -71,8 +75,8 @@ pub type ProbeAnalogSub = Subscriber<ipc::Service, ProbeAnalogSample, ()>;
 pub fn open_digital_publisher(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_hash: u64,
-    name_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
 ) -> Result<ProbeDigitalPub, IpcError> {
     let name = names::probe(cluster_key, board_hash, name_hash);
     open_digital_publisher_named(node, &name, PROBE_BUFFER)
@@ -82,8 +86,8 @@ pub fn open_digital_publisher(
 pub fn open_uart_publisher(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_hash: u64,
-    name_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
 ) -> Result<ProbeUartPub, IpcError> {
     let name = names::probe(cluster_key, board_hash, name_hash);
     open_uart_publisher_named(node, &name, PROBE_BUFFER)
@@ -93,8 +97,8 @@ pub fn open_uart_publisher(
 pub fn open_digital_subscriber(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_hash: u64,
-    name_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
 ) -> Result<ProbeDigitalSub, IpcError> {
     let name = names::probe(cluster_key, board_hash, name_hash);
     open_digital_subscriber_named(node, &name, PROBE_BUFFER)
@@ -104,8 +108,8 @@ pub fn open_digital_subscriber(
 pub fn open_analog_publisher(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_hash: u64,
-    name_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
 ) -> Result<ProbeAnalogPub, IpcError> {
     let name = names::probe(cluster_key, board_hash, name_hash);
     open_analog_publisher_named(node, &name, PROBE_BUFFER)
@@ -115,8 +119,8 @@ pub fn open_analog_publisher(
 pub fn open_uart_subscriber(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_hash: u64,
-    name_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
 ) -> Result<ProbeUartSub, IpcError> {
     let name = names::probe(cluster_key, board_hash, name_hash);
     open_uart_subscriber_named(node, &name, PROBE_BUFFER)
@@ -126,8 +130,8 @@ pub fn open_uart_subscriber(
 pub fn open_analog_subscriber(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_hash: u64,
-    name_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
 ) -> Result<ProbeAnalogSub, IpcError> {
     let name = names::probe(cluster_key, board_hash, name_hash);
     open_analog_subscriber_named(node, &name, PROBE_BUFFER)
@@ -311,7 +315,7 @@ mod tests {
         let name_hash = probe_name_hash("vcc");
         let puber = open_digital_publisher(&na, &key, board_hash, name_hash).unwrap();
         let sub = open_digital_subscriber(&nb, &key, board_hash, name_hash).unwrap();
-        let sample = ProbeDigitalSample::new(1, 99, DigitalLevel::High);
+        let sample = ProbeDigitalSample::new(crate::ipc::HashedId::new(1), 99, DigitalLevel::High);
         send_digital(&puber, sample);
         let mut got = None;
         for _ in 0..100 {

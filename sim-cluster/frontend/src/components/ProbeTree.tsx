@@ -10,11 +10,14 @@ interface Props {
 
 export default function ProbeTree({ catalog, watched, onChange }: Props) {
   const boards = useMemo(() => {
-    const map = new Map<string, ProbeCatalogItem[]>()
+    const map = new Map<string, { label: string; items: ProbeCatalogItem[] }>()
     for (const item of catalog) {
-      const list = map.get(item.board)
-      if (list) list.push(item)
-      else map.set(item.board, [item])
+      let entry = map.get(item.board)
+      if (!entry) {
+        entry = { label: item.board_label || item.board, items: [] }
+        map.set(item.board, entry)
+      }
+      entry.items.push(item)
     }
     return [...map.entries()]
   }, [catalog])
@@ -30,10 +33,10 @@ export default function ProbeTree({ catalog, watched, onChange }: Props) {
 
   return (
     <ul className="tree">
-      {boards.map(([board, items]) => (
+      {boards.map(([board, { label, items }]) => (
         <li key={board}>
           <details open>
-            <summary>{board}</summary>
+            <summary title={board}>{label}</summary>
             <ul className="tree">
               {items.map((item) => {
                 const key = probeKey(item.board, item.probe)
@@ -45,7 +48,7 @@ export default function ProbeTree({ catalog, watched, onChange }: Props) {
                         checked={watched.has(key)}
                         onChange={(ev) => toggle(key, ev.target.checked)}
                       />
-                      <span>{item.probe}</span>
+                      <span title={item.probe}>{item.probe_label || item.probe}</span>
                       <span className="meta">{item.kind}</span>
                     </label>
                   </li>

@@ -38,6 +38,7 @@ function ActionItem({
   const run = async () => {
     const params: Record<string, number> = {}
     for (const p of row.params) {
+      const label = p.name_label || p.name
       const raw = (values[p.name] ?? '').trim()
       if (raw === '') {
         if (p.default != null) {
@@ -45,13 +46,13 @@ function ActionItem({
           continue
         }
         setMessage('')
-        setError(`パラメータ ${p.name} を入力してください`)
+        setError(`パラメータ ${label} を入力してください`)
         return
       }
       const n = Number(raw)
       if (!Number.isFinite(n)) {
         setMessage('')
-        setError(`パラメータ ${p.name} が数値ではありません`)
+        setError(`パラメータ ${label} が数値ではありません`)
         return
       }
       params[p.name] = n
@@ -72,14 +73,15 @@ function ActionItem({
 
   return (
     <details className="action-item">
-      <summary title={row.description}>{row.action}</summary>
+      <summary title={row.description}>{row.action_label || row.action}</summary>
       <div className="action-body">
         {row.description && <div className="meta">{row.description}</div>}
         {row.params.map((p) => {
           const hint = paramHint(p)
+          const label = p.name_label || p.name
           return (
             <label key={p.name} className="action-param">
-              <span title={p.description ?? undefined}>{hint ? `${p.name} (${hint})` : p.name}</span>
+              <span title={p.description ?? undefined}>{hint ? `${label} (${hint})` : label}</span>
               <input
                 type="number"
                 step="any"
@@ -106,15 +108,27 @@ function ActionItem({
 
 export default function ActionTree({ actions, actionsError, running, onInvoke, onReload }: Props) {
   const tree = useMemo(() => {
-    const boards = new Map<string, Map<string, ActionRow[]>>()
+    const boards = new Map<
+      string,
+      { label: string; devices: Map<string, { label: string; rows: ActionRow[] }> }
+    >()
     for (const row of actions) {
-      let devices = boards.get(row.board_id)
-      if (!devices) boards.set(row.board_id, (devices = new Map()))
-      const list = devices.get(row.device)
-      if (list) list.push(row)
-      else devices.set(row.device, [row])
+      let entry = boards.get(row.board_id)
+      if (!entry) {
+        entry = { label: row.board_label || row.board_id, devices: new Map() }
+        boards.set(row.board_id, entry)
+      }
+      let device = entry.devices.get(row.device)
+      if (!device) {
+        device = { label: row.device_label || row.device, rows: [] }
+        entry.devices.set(row.device, device)
+      }
+      device.rows.push(row)
     }
-    return [...boards.entries()].map(([board, devices]) => [board, [...devices.entries()]] as const)
+    return [...boards.entries()].map(
+      ([board, { label, devices }]) =>
+        [board, label, [...devices.entries()].map(([id, d]) => [id, d.label, d.rows] as const)] as const,
+    )
   }, [actions])
 
   return (
@@ -129,15 +143,15 @@ export default function ActionTree({ actions, actionsError, running, onInvoke, o
         <p className="meta pad">アクションはまだありません。スタート後にボードが公開します。</p>
       ) : (
         <ul className="tree">
-          {tree.map(([board, devices]) => (
+          {tree.map(([board, label, devices]) => (
             <li key={board}>
               <details open>
-                <summary>{board}</summary>
+                <summary title={board}>{label}</summary>
                 <ul className="tree">
-                  {devices.map(([device, rows]) => (
+                  {devices.map(([device, deviceLabel, rows]) => (
                     <li key={device}>
                       <details open>
-                        <summary>{device}</summary>
+                        <summary title={device}>{deviceLabel}</summary>
                         <ul className="tree">
                           {rows.map((row) => (
                             <li key={row.action}>

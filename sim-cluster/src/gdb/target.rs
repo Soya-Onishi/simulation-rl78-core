@@ -15,17 +15,22 @@ use gdbstub::target::{Target, TargetError, TargetResult};
 
 use crate::backend::SimulationBackend;
 use crate::inspect::{InspectReply, InspectRequest, MEM_CHUNK};
+use crate::ipc::HashedId;
 
 use super::arch::{GdbArch, GdbRegs};
 
 pub struct ClusterGdbTarget {
     backend: Arc<dyn SimulationBackend>,
     sim_id: String,
-    board_id: String,
+    board_id: HashedId<u64>,
 }
 
 impl ClusterGdbTarget {
-    pub fn new(backend: Arc<dyn SimulationBackend>, sim_id: String, board_id: String) -> Self {
+    pub fn new(
+        backend: Arc<dyn SimulationBackend>,
+        sim_id: String,
+        board_id: HashedId<u64>,
+    ) -> Self {
         Self {
             backend,
             sim_id,
@@ -35,7 +40,7 @@ impl ClusterGdbTarget {
 
     fn rpc(&self, req: InspectRequest) -> Result<InspectReply, String> {
         self.backend
-            .inspect(&self.sim_id, &self.board_id, req)
+            .inspect(&self.sim_id, self.board_id, req)
             .map_err(|err| err.message)
     }
 
@@ -197,7 +202,7 @@ impl SingleThreadSingleStep for ClusterGdbTarget {
             return Err("stepping with a signal is not supported".into());
         }
         self.backend
-            .step(&self.sim_id, &self.board_id)
+            .step(&self.sim_id, self.board_id)
             .map_err(|err| err.message)?;
         self.wait_running()
     }

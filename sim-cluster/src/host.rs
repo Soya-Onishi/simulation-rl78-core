@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ipc::HashedId;
+
 /// Host command delivered to a live arbiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostCommand {
@@ -20,7 +22,7 @@ pub enum HostCommand {
     /// Leave the session and exit the arbiter process.
     Shutdown,
     /// One gdb step on `board_hash`, then catch peers up to that virtual time.
-    Step { board_hash: u64 },
+    Step { board_hash: HashedId<u64> },
 }
 
 #[derive(Deserialize)]
@@ -29,7 +31,7 @@ struct CmdLine {
     #[serde(default)]
     until_ns: Option<u64>,
     #[serde(default)]
-    board_hash: Option<u64>,
+    board_hash: Option<HashedId<u64>>,
 }
 
 impl HostCommand {
@@ -75,7 +77,7 @@ impl HostCommand {
             Self::Reset => "{\"cmd\":\"reset\"}\n".to_string(),
             Self::Shutdown => "{\"cmd\":\"shutdown\"}\n".to_string(),
             Self::Step { board_hash } => {
-                format!("{{\"cmd\":\"step\",\"board_hash\":{board_hash}}}\n")
+                format!("{{\"cmd\":\"step\",\"board_hash\":\"{board_hash}\"}}\n")
             }
         }
     }
@@ -84,7 +86,7 @@ impl HostCommand {
 /// One node row in an arbiter status line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionNode {
-    pub id: String,
+    pub id: crate::ipc::HashedId<u64>,
     pub kind: String,
     pub state: String,
 }
@@ -128,7 +130,9 @@ mod tests {
             HostCommand::Stop,
             HostCommand::Reset,
             HostCommand::Shutdown,
-            HostCommand::Step { board_hash: 1 },
+            HostCommand::Step {
+                board_hash: HashedId::new(1),
+            },
         ] {
             assert_eq!(HostCommand::parse(&cmd.to_line()), Some(cmd));
         }

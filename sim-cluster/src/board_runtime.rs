@@ -23,8 +23,7 @@ use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::elf_source;
 use crate::inspect::InspectServer;
 use crate::ipc::{
-    IpcError, NodeActions, NodeControl, NodeLog, board_hash_table, board_id_hash, create_node,
-    isolated_config,
+    IpcError, NodeActions, NodeControl, NodeLog, board_id_hash, create_node, isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::probe::{NodeProbeRuntime, ProbeError};
@@ -39,7 +38,7 @@ pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
 pub struct BoardOptions {
     /// When true, [`node!`] calls [`list_catalog`] instead of [`run_node`].
     pub list_catalog: bool,
-    pub board_id: String,
+    pub board_name: String,
     pub cluster_key: String,
     pub iox_root: PathBuf,
     pub topology_path: PathBuf,
@@ -84,7 +83,7 @@ pub fn parse_board_args(
     args: impl IntoIterator<Item = String>,
 ) -> Result<BoardOptions, BoardCliError> {
     let mut list_catalog = false;
-    let mut board_id: Option<String> = None;
+    let mut board_name: Option<String> = None;
     let mut cluster_key: Option<String> = None;
     let mut iox_root: Option<PathBuf> = None;
     let mut topology: Option<PathBuf> = None;
@@ -93,9 +92,9 @@ pub fn parse_board_args(
         match arg.as_str() {
             "-h" | "--help" => return Err(BoardCliError::Help),
             "--list-catalog" => list_catalog = true,
-            "--board-id" => {
-                board_id = Some(iter.next().ok_or_else(|| {
-                    BoardCliError::Message(format!("{prog}: --board-id requires a value"))
+            "--board-name" => {
+                board_name = Some(iter.next().ok_or_else(|| {
+                    BoardCliError::Message(format!("{prog}: --board-name requires a value"))
                 })?);
             }
             "--cluster-key" => {
@@ -123,22 +122,22 @@ pub fn parse_board_args(
     if list_catalog {
         return Ok(BoardOptions {
             list_catalog: true,
-            board_id: board_id.unwrap_or_default(),
+            board_name: board_name.unwrap_or_default(),
             cluster_key: cluster_key.unwrap_or_default(),
             iox_root: iox_root.unwrap_or_default(),
             topology_path: topology.unwrap_or_default(),
         });
     }
-    let (Some(board_id), Some(cluster_key), Some(iox_root), Some(topology_path)) =
-        (board_id, cluster_key, iox_root, topology)
+    let (Some(board_name), Some(cluster_key), Some(iox_root), Some(topology_path)) =
+        (board_name, cluster_key, iox_root, topology)
     else {
         return Err(BoardCliError::Message(format!(
-            "{prog}: --board-id, --cluster-key, --iox-root, and --topology are required"
+            "{prog}: --board-name, --cluster-key, --iox-root, and --topology are required"
         )));
     };
     Ok(BoardOptions {
         list_catalog: false,
-        board_id,
+        board_name,
         cluster_key,
         iox_root,
         topology_path,
@@ -150,7 +149,7 @@ pub fn parse_board_args(
 pub fn board_usage(prog: &str) -> String {
     format!(
         "Usage:\n\
-         {prog} --board-id <id> --cluster-key <key> --iox-root <path> --topology <json>\n\
+         {prog} --board-name <name> --cluster-key <key> --iox-root <path> --topology <json>\n\
          {prog} --list-catalog\n\
          \n\
          Cluster mode is spawned by cluster-arbiter. Starts AwaitingStartup, becomes\n\
@@ -213,14 +212,23 @@ struct CatalogDump {
 
 #[derive(serde::Serialize)]
 struct CatalogProbe {
-    probe: String,
+    /// `probe_name_hash` of the probe name (serde: 16-digit hex).
+    probe: crate::ipc::HashedId<u64>,
+    /// Human-readable probe name.
+    probe_label: String,
     kind: &'static str,
 }
 
+/// Local `--catalog-dump` action row. Shape matches public advertise (hex + labels)
+/// so dump output can later replace the advertise path.
 #[derive(serde::Serialize)]
 struct CatalogAction {
-    device: String,
-    action: String,
+    /// `id_hash` of the device name (serde: 16-digit hex).
+    device: crate::ipc::HashedId<u64>,
+    device_label: String,
+    /// `id_hash` of the action name (serde: 16-digit hex).
+    action: crate::ipc::HashedId<u64>,
+    action_label: String,
     description: String,
     params: Vec<crate::contract::AdvertisedActionParam>,
 }
@@ -236,7 +244,8 @@ fn probe_kind_str(point: &ProbePoint) -> &'static str {
 
 fn catalog_param(param: sim_kernel::ParamSpec) -> crate::contract::AdvertisedActionParam {
     crate::contract::AdvertisedActionParam {
-        name: param.name,
+        name: crate::ipc::HashedId::new(param.name_hash),
+        name_label: param.name,
         unit: param.unit,
         description: param.description,
         min: param.min,
@@ -249,7 +258,8 @@ fn catalog_dump_from_entity<E: Entity>(entity: &E, points: &[ProbePoint]) -> Cat
     let probes = points
         .iter()
         .map(|point| CatalogProbe {
-            probe: point.name().to_string(),
+            probe: crate::ipc::probe_name_hash(point.name()),
+            probe_label: point.name().to_string(),
             kind: probe_kind_str(point),
         })
         .collect();
@@ -257,8 +267,10 @@ fn catalog_dump_from_entity<E: Entity>(entity: &E, points: &[ProbePoint]) -> Cat
         .action_catalog()
         .into_iter()
         .map(|entry| CatalogAction {
-            device: entry.device,
-            action: entry.action,
+            device: crate::ipc::HashedId::new(entry.device_hash),
+            device_label: entry.device,
+            action: crate::ipc::HashedId::new(entry.action_hash),
+            action_label: entry.action,
             description: entry.description,
             params: entry.params.into_iter().map(catalog_param).collect(),
         })
@@ -312,26 +324,28 @@ pub fn run_node<E: Entity>(
     opts: BoardOptions,
     build: impl FnOnce() -> (E, BoardPorts, Vec<ProbePoint>),
 ) -> Result<(), BoardError> {
-    let board_id = opts.board_id.as_str();
-    let board_hash = board_id_hash(board_id);
+    let board_name = opts.board_name.as_str();
+    let board_hash = board_id_hash(board_name);
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
-    let board = find_board(&topo, board_id)?;
-    let boards =
-        board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).map_err(BoardError::Message)?;
+    let hashes = crate::topology::build_topology_hashes(&topo)
+        .map_err(|err| BoardError::Message(err.to_string()))?;
+    let board = find_board(&topo, board_name)?;
+    let boards = hashes.boards;
 
     let config = isolated_config(&opts.iox_root)?;
-    let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;
+    let iox_node = create_node(&config, &format!("node-{board_name}-{}", opts.cluster_key))?;
     let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
     let actions = NodeActions::open(&iox_node, &opts.cluster_key, topo.boards.len())?;
     let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
-    let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
+    let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_name, board, &topo)?;
 
     let (entity, ports, probe_points) = build();
     let mut probes = NodeProbeRuntime::open(
         &iox_node,
         &opts.cluster_key,
-        board_id,
+        board_hash,
+        board_name,
         topo.boards.len(),
         probe_points,
     )?;
@@ -349,7 +363,7 @@ pub fn run_node<E: Entity>(
     ports.clear_pending();
 
     let mut inspect = if board.kind == "rl78" {
-        Some(InspectServer::bind(&opts.iox_root, board_id)?)
+        Some(InspectServer::bind(&opts.iox_root, board_hash)?)
     } else {
         None
     };
@@ -547,7 +561,7 @@ fn service_actions<E: Entity>(
     actions: &NodeActions,
     sim: &mut Simulator<E>,
     state: NodeState,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     pending: &mut VecDeque<ActionRequest>,
 ) -> Result<(), BoardError> {
     for _ in 0..ACTION_RECV_CAP {
@@ -565,11 +579,16 @@ fn service_actions<E: Entity>(
 
     while let Some(req) = pending.pop_front() {
         let now = sim.entity().now();
+        let raw: Vec<(u64, f64)> = req
+            .raw_params()
+            .iter()
+            .map(|(h, v)| (h.get(), *v))
+            .collect();
         let status = match sim.entity_mut().apply_action(
-            req.device_hash,
-            req.action_hash,
+            req.device_hash.get(),
+            req.action_hash.get(),
             now,
-            &req.raw_params(),
+            &raw,
         ) {
             Ok(()) => ActionStatus::Applied,
             Err(ActionFailure::NotFoundDevice) => ActionStatus::NotFoundDevice,
@@ -590,17 +609,20 @@ fn reply(actions: &NodeActions, request_id: u64, status: ActionStatus) -> Result
     Ok(())
 }
 
-fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a BoardSpec, BoardError> {
+fn find_board<'a>(
+    topo: &'a LogicalTopology,
+    board_name: &str,
+) -> Result<&'a BoardSpec, BoardError> {
     topo.boards
         .iter()
-        .find(|b| b.id == board_id)
-        .ok_or_else(|| BoardError::Message(format!("board id `{board_id}` not in topology")))
+        .find(|b| b.id == board_name)
+        .ok_or_else(|| BoardError::Message(format!("board name `{board_name}` not in topology")))
 }
 
 fn perform_local_step<E: Entity>(
     sim: &mut Simulator<E>,
     control: &NodeControl,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     last_time_report: &mut Option<u64>,
 ) -> Result<(), BoardError> {
     match sim.command(Command::Step) {
@@ -644,7 +666,7 @@ fn perform_local_step<E: Entity>(
 
 fn maybe_time_report(
     control: &NodeControl,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     virtual_time_ns: u64,
     allowed_ns: u64,
     headroom_threshold_ns: u64,
@@ -700,7 +722,7 @@ mod tests {
         let opts = parse_board_args(
             "prog",
             [
-                "--board-id".into(),
+                "--board-name".into(),
                 "a".into(),
                 "--cluster-key".into(),
                 "k".into(),
@@ -712,7 +734,7 @@ mod tests {
         )
         .unwrap();
         assert!(!opts.list_catalog);
-        assert_eq!(opts.board_id, "a");
+        assert_eq!(opts.board_name, "a");
         assert_eq!(opts.cluster_key, "k");
     }
 
@@ -736,7 +758,7 @@ mod tests {
             "prog",
             [
                 "--list-catalog".into(),
-                "--board-id".into(),
+                "--board-name".into(),
                 "a".into(),
                 "--cluster-key".into(),
                 "k".into(),
@@ -748,7 +770,7 @@ mod tests {
         )
         .unwrap();
         assert!(opts.list_catalog);
-        assert_eq!(opts.board_id, "a");
+        assert_eq!(opts.board_name, "a");
     }
 
     #[test]
@@ -809,17 +831,28 @@ mod tests {
             value,
             serde_json::json!({
                 "probes": [
-                    { "probe": "uart0", "kind": "uart" },
-                    { "probe": "dac0", "kind": "analog" }
+                    {
+                        "probe": crate::ipc::probe_name_hash("uart0").to_string(),
+                        "probe_label": "uart0",
+                        "kind": "uart"
+                    },
+                    {
+                        "probe": crate::ipc::probe_name_hash("dac0").to_string(),
+                        "probe_label": "dac0",
+                        "kind": "analog"
+                    }
                 ],
                 "actions": [
                     {
-                        "device": "sw1",
-                        "action": "hold",
+                        "device": crate::ipc::HashedId::new(1).to_string(),
+                        "device_label": "sw1",
+                        "action": crate::ipc::HashedId::new(2).to_string(),
+                        "action_label": "hold",
                         "description": "hold the switch",
                         "params": [
                             {
-                                "name": "level",
+                                "name": crate::ipc::HashedId::new(3).to_string(),
+                                "name_label": "level",
                                 "unit": "V",
                                 "description": "drive level",
                                 "min": 0.0,

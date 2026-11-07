@@ -7,35 +7,55 @@ describe('buildModel', () => {
     const topo: Topology = {
       boards: [
         {
-          id: 'mcu-b',
+          id: 'bbbbbbbbbbbbbbbb',
+          label: 'mcu-b',
           kind: 'rl78',
           endpoints: [
-            { name: 'tx', direction: 'out', payload: 'uart' },
-            { name: 'rx', direction: 'in', payload: 'uart' },
+            { name: '1111111111111111', label: 'tx', direction: 'out', payload: 'uart' },
+            { name: '2222222222222222', label: 'rx', direction: 'in', payload: 'uart' },
           ],
         },
         {
-          id: 'mcu-a',
+          id: 'aaaaaaaaaaaaaaaa',
+          label: 'mcu-a',
           kind: 'rl78',
           endpoints: [
-            { name: 'tx', direction: 'out', payload: 'uart' },
-            { name: 'rx', direction: 'in', payload: 'uart' },
+            { name: '1111111111111111', label: 'tx', direction: 'out', payload: 'uart' },
+            { name: '2222222222222222', label: 'rx', direction: 'in', payload: 'uart' },
           ],
         },
       ],
       edges: [
         {
-          from_board: 'mcu-b',
-          from_endpoint: 'tx',
-          to_board: 'mcu-a',
-          to_endpoint: 'rx',
+          from: {
+            path: 'bbbbbbbbbbbbbbbb',
+            path_label: 'mcu-b',
+            port: '1111111111111111',
+            port_label: 'tx',
+          },
+          to: {
+            path: 'aaaaaaaaaaaaaaaa',
+            path_label: 'mcu-a',
+            port: '2222222222222222',
+            port_label: 'rx',
+          },
+          route: [],
           payload: 'uart',
         },
         {
-          from_board: 'mcu-a',
-          from_endpoint: 'tx',
-          to_board: 'mcu-b',
-          to_endpoint: 'rx',
+          from: {
+            path: 'aaaaaaaaaaaaaaaa',
+            path_label: 'mcu-a',
+            port: '1111111111111111',
+            port_label: 'tx',
+          },
+          to: {
+            path: 'bbbbbbbbbbbbbbbb',
+            path_label: 'mcu-b',
+            port: '2222222222222222',
+            port_label: 'rx',
+          },
+          route: [],
           payload: 'uart',
         },
       ],
@@ -43,12 +63,13 @@ describe('buildModel', () => {
     const model = buildModel(topo)
     expect(model.edges).toHaveLength(1)
     const edge = model.edges[0]
-    expect(edge.a).toBe('mcu-a')
-    expect(edge.b).toBe('mcu-b')
+    expect(edge.a).toBe('aaaaaaaaaaaaaaaa')
+    expect(edge.b).toBe('bbbbbbbbbbbbbbbb')
     expect(edge.lines).toHaveLength(2)
 
-    const a = model.boards.find((b) => b.id === 'mcu-a')!
-    const b = model.boards.find((b) => b.id === 'mcu-b')!
+    const a = model.boards.find((b) => b.id === 'aaaaaaaaaaaaaaaa')!
+    const b = model.boards.find((b) => b.id === 'bbbbbbbbbbbbbbbb')!
+    expect(a.label).toBe('mcu-a')
     expect(a.right).toHaveLength(1)
     expect(b.left).toHaveLength(1)
     const tipsA = a.right[0].tips.map((t) => t.name).sort()

@@ -13,6 +13,8 @@ use sim_kernel::UartFrame;
 use super::names;
 use super::runtime::IpcError;
 
+type EdgeFrames = (crate::ipc::HashedId<u64>, Vec<UartFrame>);
+
 type UartPub = Publisher<ipc::Service, UartFrame, ()>;
 type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
 
@@ -21,15 +23,15 @@ type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
 /// TX and RX both use `open_or_create` with identical SPSC QoS derived from the
 /// topology; whichever side arrives first creates the service and holds the port.
 pub struct NodeUartPorts {
-    pub producers: HashMap<String, UartPub>,
-    pub consumers: HashMap<String, UartSub>,
+    pub producers: HashMap<crate::ipc::HashedId<u64>, UartPub>,
+    pub consumers: HashMap<crate::ipc::HashedId<u64>, UartSub>,
 }
 
 impl NodeUartPorts {
     pub fn open_for_board(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let mut producers = HashMap::new();
@@ -44,12 +46,12 @@ impl NodeUartPorts {
                 &edge.to.path,
                 &edge.to.port,
             );
-            let svc_name = names::uart_edge(cluster_key, &id);
+            let svc_name = names::uart_edge(cluster_key, id);
             let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
-            if edge.from.path == board_id {
+            if edge.from.path == board_name {
                 let puber = open_or_create_uart_publisher(node, &svc_name, capacity)?;
                 producers.insert(id, puber);
-            } else if edge.to.path == board_id {
+            } else if edge.to.path == board_name {
                 let sub = open_or_create_uart_subscriber(node, &svc_name, capacity)?;
                 consumers.insert(id, sub);
             }
@@ -60,8 +62,12 @@ impl NodeUartPorts {
         })
     }
 
-    pub fn try_send(&self, edge_id: &str, frame: UartFrame) -> Result<(), IpcError> {
-        let Some(puber) = self.producers.get(edge_id) else {
+    pub fn try_send(
+        &self,
+        edge_id: crate::ipc::HashedId<u64>,
+        frame: UartFrame,
+    ) -> Result<(), IpcError> {
+        let Some(puber) = self.producers.get(&edge_id) else {
             return Err(IpcError::Message(format!("no producer for {edge_id}")));
         };
         puber
@@ -71,10 +77,7 @@ impl NodeUartPorts {
     }
 
     /// Non-blocking drain of all consumer edges.
-    pub fn drain_all(
-        &self,
-        limit_per_edge: usize,
-    ) -> Result<Vec<(String, Vec<UartFrame>)>, IpcError> {
+    pub fn drain_all(&self, limit_per_edge: usize) -> Result<Vec<EdgeFrames>, IpcError> {
         let mut out = Vec::new();
         for (id, sub) in &self.consumers {
             let mut frames = Vec::new();
@@ -88,7 +91,7 @@ impl NodeUartPorts {
                 }
             }
             if !frames.is_empty() {
-                out.push((id.clone(), frames));
+                out.push((*id, frames));
             }
         }
         Ok(out)
@@ -216,7 +219,7 @@ mod tests {
             data_bits: 8,
             ..UartFrame::default()
         };
-        porta.try_send(&edge, frame).unwrap();
+        porta.try_send(edge, frame).unwrap();
         let mut got = None;
         for _ in 0..100 {
             let drained = portb.drain_all(8).unwrap();

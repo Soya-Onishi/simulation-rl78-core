@@ -8,6 +8,7 @@ use std::fmt;
 
 use iceoryx2::prelude::ZeroCopySend;
 
+use crate::ipc::HashedId;
 use crate::probe::PROBE_NAME_CAP;
 
 /// Host-initiated stop reasons on the control plane (no free-form strings).
@@ -102,12 +103,12 @@ pub enum ControlToNode {
     Reset,
     /// Replace the emit set for one board (always broadcast; nodes ignore others).
     ProbeWatch {
-        board_hash: u64,
+        board_hash: HashedId<u64>,
         count: u8,
-        probe_ids: [u64; crate::probe::MAX_PROBES_PER_BOARD],
+        probe_ids: [HashedId<u64>; crate::probe::MAX_PROBES_PER_BOARD],
     },
     /// One instruction on `board_hash`; other nodes ignore this sample.
-    GdbStep { board_hash: u64 },
+    GdbStep { board_hash: HashedId<u64> },
     // TODO: add Shutdown to end the node process (ClusterStop only halts to Stopped).
 }
 
@@ -118,17 +119,23 @@ pub enum ControlToNode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub enum ControlToArbiter {
     /// Control attach complete.
-    Ready { from: u64 },
+    Ready { from: HashedId<u64> },
     /// Virtual time report.
-    TimeReport { from: u64, virtual_time_ns: u64 },
+    TimeReport {
+        from: HashedId<u64>,
+        virtual_time_ns: u64,
+    },
     /// Host-initiated stop (BP / external / step / unmapped).
     /// Guest-local Halt (sim stays Running) must not be sent.
-    HostStop { from: u64, reason: HostStopReason },
+    HostStop {
+        from: HashedId<u64>,
+        reason: HostStopReason,
+    },
     /// Declare one probe point before [`Self::Ready`] (one message per probe).
     ProbeAdvertise {
-        from: u64,
-        name_hash: u64,
-        probe_id: u64,
+        from: HashedId<u64>,
+        name_hash: HashedId<u64>,
+        probe_id: HashedId<u64>,
         /// [`crate::probe::ProbeWireKind`] as `u8`.
         kind: u8,
         name_len: u8,
@@ -139,7 +146,7 @@ pub enum ControlToArbiter {
 impl ControlToArbiter {
     /// Sender board hash.
     #[must_use]
-    pub fn from_board(self) -> u64 {
+    pub fn from_board(self) -> HashedId<u64> {
         match self {
             Self::Ready { from }
             | Self::TimeReport { from, .. }

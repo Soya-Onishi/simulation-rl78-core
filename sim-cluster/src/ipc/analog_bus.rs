@@ -21,15 +21,15 @@ type AnalogSub = Subscriber<ipc::Service, AnalogVoltage, ()>;
 
 /// Node analog endpoints for this board.
 pub struct NodeAnalogPorts {
-    pub producers: HashMap<String, AnalogPub>,
-    pub consumers: HashMap<String, AnalogSub>,
+    pub producers: HashMap<crate::ipc::HashedId<u64>, AnalogPub>,
+    pub consumers: HashMap<crate::ipc::HashedId<u64>, AnalogSub>,
 }
 
 impl NodeAnalogPorts {
     pub fn open_for_board(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let mut producers = HashMap::new();
@@ -44,12 +44,12 @@ impl NodeAnalogPorts {
                 &edge.to.path,
                 &edge.to.port,
             );
-            let svc_name = names::analog_edge(cluster_key, &id);
-            if edge.from.path == board_id {
+            let svc_name = names::analog_edge(cluster_key, id);
+            if edge.from.path == board_name {
                 let puber =
                     open_or_create_analog_publisher(node, &svc_name, DEFAULT_ANALOG_RING_LEN)?;
                 producers.insert(id, puber);
-            } else if edge.to.path == board_id {
+            } else if edge.to.path == board_name {
                 let sub =
                     open_or_create_analog_subscriber(node, &svc_name, DEFAULT_ANALOG_RING_LEN)?;
                 consumers.insert(id, sub);

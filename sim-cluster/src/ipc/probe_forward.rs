@@ -24,8 +24,8 @@ pub const PROBE_CATALOG_A2S_BUFFER: usize = 256;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, ZeroCopySend)]
 pub struct ProbeToServer {
-    pub probe_id: u64,
-    pub board_hash: u64,
+    pub probe_id: crate::ipc::HashedId<u64>,
+    pub board_hash: crate::ipc::HashedId<u64>,
     pub virtual_time_ns: u64,
     pub value: u16,
     pub msg: u8,
@@ -151,8 +151,8 @@ impl ArbiterProbeForward {
 
     pub fn publish_catalog(
         &self,
-        board_hash: u64,
-        probe_id: u64,
+        board_hash: crate::ipc::HashedId<u64>,
+        probe_id: crate::ipc::HashedId<u64>,
         wire_kind: u8,
         name: &str,
     ) -> Result<(), IpcError> {
@@ -177,8 +177,8 @@ impl ArbiterProbeForward {
         self.send(
             &self.catalog,
             ProbeToServer {
-                probe_id: 0,
-                board_hash: 0,
+                probe_id: crate::ipc::HashedId::ZERO,
+                board_hash: crate::ipc::HashedId::ZERO,
                 virtual_time_ns: 0,
                 value: 0,
                 msg: MSG_CATALOG_END,
@@ -192,7 +192,7 @@ impl ArbiterProbeForward {
 
     pub fn publish_sample(
         &self,
-        probe_id: u64,
+        probe_id: crate::ipc::HashedId<u64>,
         virtual_time_ns: u64,
         wire_kind: u8,
         value: u16,
@@ -201,7 +201,7 @@ impl ArbiterProbeForward {
             &self.samples,
             ProbeToServer {
                 probe_id,
-                board_hash: 0,
+                board_hash: crate::ipc::HashedId::ZERO,
                 virtual_time_ns,
                 value,
                 msg: MSG_SAMPLE,

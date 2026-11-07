@@ -88,6 +88,8 @@ pub fn run_arbiter_with_topology(
     opts: &ArbiterOptions,
     topo: &LogicalTopology,
 ) -> Result<(), ArbiterError> {
+    crate::topology::build_topology_hashes(topo)
+        .map_err(|err| ArbiterError::Message(err.to_string()))?;
     ensure_node_bins(opts, topo)?;
     run_host_session(opts, topo)
 }
@@ -158,7 +160,7 @@ fn await_ready(
                         continue;
                     };
                     let Some(kind) = ProbeWireKind::from_u8(kind) else {
-                        log::warn!("ignoring probe advertise with bad kind {kind} from {from:#x}");
+                        log::warn!("ignoring probe advertise with bad kind {kind} from {from}");
                         continue;
                     };
                     let n = (name_len as usize).min(name.len());
@@ -651,14 +653,14 @@ fn apply_start(
 fn apply_gdb_step(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
-    board_hash: u64,
+    board_hash: crate::ipc::HashedId<u64>,
     running: &mut bool,
     until_cap: &mut Option<u64>,
     last_stop_reason: &mut Option<HostStopReason>,
     gdb_step: &mut Option<GdbStepPhase>,
 ) -> Result<(), ArbiterError> {
     let Some(board_id) = control.resolve_board(board_hash).map(str::to_owned) else {
-        log::warn!("gdb Step: unknown board_hash={board_hash:#x}");
+        log::warn!("gdb Step: unknown board_hash={board_hash}");
         return Ok(());
     };
     if *running {
@@ -824,7 +826,7 @@ fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Chil
     for board in &topo.boards {
         let bin = binary_for_kind(opts, &board.kind)?;
         let child = Command::new(bin)
-            .arg("--board-id")
+            .arg("--board-name")
             .arg(&board.id)
             .arg("--cluster-key")
             .arg(&opts.cluster_key)
@@ -861,7 +863,7 @@ fn write_status(
         .boards
         .iter()
         .map(|board| SessionNode {
-            id: board.id.clone(),
+            id: crate::ipc::board_id_hash(&board.id),
             kind: board.kind.clone(),
             state: peers
                 .get(&board.id)

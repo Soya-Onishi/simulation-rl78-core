@@ -1,6 +1,6 @@
 //! Deterministic iceoryx2 service names for a cluster instance.
 
-use xxhash_rust::xxh3::xxh3_64;
+use crate::ipc::hash::edge_id_hash;
 
 /// Service name: arbiter → nodes control channel.
 #[must_use]
@@ -62,27 +62,26 @@ pub fn action_a2s(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/action/a2s")
 }
 
-/// Service name for one directed UART edge.
-///
-/// Uses a content hash of the full logical [`edge_id`] so distinct edges cannot
-/// collide after character sanitization (e.g. `:` / `->` both mapped away).
+/// Service name for one directed UART edge (`edge_id` is already hashed).
 #[must_use]
-pub fn uart_edge(cluster_key: &str, edge_id: &str) -> String {
-    let digest = xxh3_64(edge_id.as_bytes());
-    format!("sim-cluster/{cluster_key}/uart/{digest:016x}")
+pub fn uart_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
+    format!("sim-cluster/{cluster_key}/uart/{edge_id}")
 }
 
-/// Service name for one directed analog edge.
+/// Service name for one directed analog edge (`edge_id` is already hashed).
 #[must_use]
-pub fn analog_edge(cluster_key: &str, edge_id: &str) -> String {
-    let digest = xxh3_64(edge_id.as_bytes());
-    format!("sim-cluster/{cluster_key}/analog/{digest:016x}")
+pub fn analog_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
+    format!("sim-cluster/{cluster_key}/analog/{edge_id}")
 }
 
 /// Service name for one board probe point.
 #[must_use]
-pub fn probe(cluster_key: &str, board_hash: u64, name_hash: u64) -> String {
-    format!("sim-cluster/{cluster_key}/probe/{board_hash:016x}/{name_hash:016x}")
+pub fn probe(
+    cluster_key: &str,
+    board_hash: crate::ipc::HashedId<u64>,
+    name_hash: crate::ipc::HashedId<u64>,
+) -> String {
+    format!("sim-cluster/{cluster_key}/probe/{board_hash}/{name_hash}")
 }
 
 /// Service name: arbiter → server live probe samples.
@@ -151,9 +150,20 @@ pub fn probe_csv_a2s(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/probe/csv/a2s")
 }
 
-/// Default edge id string (matches previous arbiter formatting).
+/// Runtime edge id: `xxh3_64` of `{from_board}:{from_ep}->{to_board}:{to_ep}`.
 #[must_use]
-pub fn edge_id(from_board: &str, from_ep: &str, to_board: &str, to_ep: &str) -> String {
+pub fn edge_id(
+    from_board: &str,
+    from_ep: &str,
+    to_board: &str,
+    to_ep: &str,
+) -> crate::ipc::HashedId<u64> {
+    edge_id_hash(from_board, from_ep, to_board, to_ep)
+}
+
+/// Human-readable logical edge id (hash input / collision table key).
+#[must_use]
+pub fn edge_id_logical(from_board: &str, from_ep: &str, to_board: &str, to_ep: &str) -> String {
     format!("{from_board}:{from_ep}->{to_board}:{to_ep}")
 }
 
@@ -165,25 +175,29 @@ mod tests {
     fn uart_edge_names_distinguish_similar_edges() {
         let a = edge_id("a", "tx", "b", "rx");
         let b = edge_id("a_tx", "", "b_rx", "");
-        // Sanitizing both to underscores would collide; hashes must differ.
-        assert_ne!(uart_edge("k", &a), uart_edge("k", &b));
-        assert_eq!(uart_edge("k", &a), uart_edge("k", &a));
+        // Distinct logical strings must not share a service name.
+        assert_ne!(uart_edge("k", a), uart_edge("k", b));
+        assert_eq!(uart_edge("k", a), uart_edge("k", a));
     }
 
     #[test]
     fn analog_edge_names_distinguish_similar_edges() {
         let a = edge_id("a", "dac0", "p", "vin");
         let b = edge_id("a_dac0", "", "p_vin", "");
-        assert_ne!(analog_edge("k", &a), analog_edge("k", &b));
-        assert_eq!(analog_edge("k", &a), analog_edge("k", &a));
-        assert!(analog_edge("k", &a).contains("/analog/"));
+        assert_ne!(analog_edge("k", a), analog_edge("k", b));
+        assert_eq!(analog_edge("k", a), analog_edge("k", a));
+        assert!(analog_edge("k", a).contains("/analog/"));
     }
 
     #[test]
     fn probe_service_names_are_stable() {
-        let a = probe("k", 1, 2);
-        assert_eq!(a, probe("k", 1, 2));
-        assert_ne!(probe("k", 1, 2), probe("k", 1, 3));
+        use crate::ipc::HashedId;
+        let a = probe("k", HashedId::new(1), HashedId::new(2));
+        assert_eq!(a, probe("k", HashedId::new(1), HashedId::new(2)));
+        assert_ne!(
+            probe("k", HashedId::new(1), HashedId::new(2)),
+            probe("k", HashedId::new(1), HashedId::new(3))
+        );
         assert!(a.contains("/probe/"));
     }
 }
