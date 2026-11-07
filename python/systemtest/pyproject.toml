@@ -15,7 +15,7 @@ dependencies = [
 #   pip install -e ../topology_dsl -e .
 
 [project.entry-points.pytest11]
-systemtest = "systemtest.plugin"
+systemtest = "systemtest.fixture"
 
 [tool.setuptools.packages.find]
 where = ["."]

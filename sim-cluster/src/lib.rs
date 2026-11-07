@@ -63,5 +63,5 @@ pub use sim_kernel::{ProbePoint, ProbePolicy, ProbeTap, UartFrame};
 pub use time_sync::TimeCeiling;
 pub use topology::{
     BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
-    TopologyError, parse_logical_topology,
+    PortRef, TopologyError, parse_logical_topology,
 };

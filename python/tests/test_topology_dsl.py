@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from topology_dsl import embed_local_elfs, main, resolve_server
+from topology_dsl import _load_config_dict, embed_local_elfs, main, resolve_server
 
 
 class ResolveServerTests(unittest.TestCase):
@@ -102,10 +102,19 @@ class CreateCliTests(unittest.TestCase):
                 (root / "fw.bin").write_bytes(b"ABC")
                 script = root / "topo.py"
                 script.write_text(
-                    "from topology_dsl import Topology, emit\n"
-                    "t = Topology(margin_ns=1, headroom_threshold_ns=1)\n"
-                    't.board("a", elf="fw.bin")\n'
-                    "emit(t)\n",
+                    "from topology_dsl import SimulationConfig, Topology, simulation\n"
+                    "\n"
+                    "class T(Topology):\n"
+                    "    def build(self):\n"
+                    '        self._board("a", elf="fw.bin")\n'
+                    "\n"
+                    "@simulation\n"
+                    "def demo() -> SimulationConfig:\n"
+                    "    return SimulationConfig(\n"
+                    "        margin_ns=1,\n"
+                    "        headroom_threshold_ns=1,\n"
+                    '        topology=T(name="demo"),\n'
+                    "    )\n",
                     encoding="utf-8",
                 )
                 prev = os.getcwd()
@@ -131,6 +140,83 @@ class CreateCliTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+class SimulationDiscoveryTests(unittest.TestCase):
+    def _write(self, root: Path, body: str) -> Path:
+        script = root / "topo.py"
+        script.write_text(body, encoding="utf-8")
+        return script
+
+    def test_rejects_zero_simulation_functions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            script = self._write(Path(tmp), "x = 1\n")
+            with self.assertRaises(SystemExit) as raised:
+                _load_config_dict(str(script))
+            self.assertIn("no @simulation function", str(raised.exception))
+
+    def test_rejects_two_simulation_functions(self) -> None:
+        body = (
+            "from topology_dsl import SimulationConfig, Topology, simulation\n"
+            "class T(Topology):\n"
+            "    def build(self):\n"
+            '        self._board("a")\n'
+            "@simulation\n"
+            "def one() -> SimulationConfig:\n"
+            "    return SimulationConfig(1, 1, T(name='demo'))\n"
+            "@simulation\n"
+            "def two() -> SimulationConfig:\n"
+            "    return SimulationConfig(1, 1, T(name='other'))\n"
+        )
+        with TemporaryDirectory() as tmp:
+            script = self._write(Path(tmp), body)
+            with self.assertRaises(SystemExit) as raised:
+                _load_config_dict(str(script))
+            self.assertIn("2 @simulation functions", str(raised.exception))
+
+    def test_rejects_non_config_return(self) -> None:
+        body = (
+            "from topology_dsl import simulation\n"
+            "@simulation\n"
+            "def bad():\n"
+            "    return 1\n"
+        )
+        with TemporaryDirectory() as tmp:
+            script = self._write(Path(tmp), body)
+            with self.assertRaises(SystemExit) as raised:
+                _load_config_dict(str(script))
+            self.assertIn("must return SimulationConfig", str(raised.exception))
+
+    def test_ignores_imported_simulation_factories(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = root / "helper.py"
+            helper.write_text(
+                "from topology_dsl import SimulationConfig, Topology, simulation\n"
+                "class T(Topology):\n"
+                "    def build(self):\n"
+                '        self._board("a")\n'
+                "@simulation\n"
+                "def imported() -> SimulationConfig:\n"
+                "    return SimulationConfig(1, 1, T(name='imp'))\n",
+                encoding="utf-8",
+            )
+            script = root / "topo.py"
+            script.write_text(
+                "import sys\n"
+                f"sys.path.insert(0, {str(root)!r})\n"
+                "from helper import imported  # noqa: F401\n"
+                "from topology_dsl import SimulationConfig, Topology, simulation\n"
+                "class T(Topology):\n"
+                "    def build(self):\n"
+                '        self._board("a")\n'
+                "@simulation\n"
+                "def local() -> SimulationConfig:\n"
+                "    return SimulationConfig(1, 1, T(name='demo'))\n",
+                encoding="utf-8",
+            )
+            out = _load_config_dict(str(script))
+            self.assertEqual(out["boards"][0]["id"], "demo/a")
 
 
 class CreateSimScriptTests(unittest.TestCase):

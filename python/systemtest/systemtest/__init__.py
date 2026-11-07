@@ -1,6 +1,6 @@
 """Cluster system-test harness."""
 
-from topology_dsl import Board, Topology, connect
+from topology_dsl import Board, SimulationConfig, Topology
 
 from systemtest.duration import Duration
 from systemtest.errors import (
@@ -10,7 +10,6 @@ from systemtest.errors import (
     TruncatedError,
     WaitError,
 )
-from systemtest.plugin import sim_case
 from systemtest.simulation import Simulation
 
 __all__ = [
@@ -19,10 +18,9 @@ __all__ = [
     "Duration",
     "ProbeKindError",
     "Simulation",
+    "SimulationConfig",
     "SystemTestError",
     "Topology",
     "TruncatedError",
     "WaitError",
-    "connect",
-    "sim_case",
 ]

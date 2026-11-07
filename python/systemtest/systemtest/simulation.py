@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from topology_dsl import Topology, embed_local_elfs
+from topology_dsl import SimulationConfig, embed_local_elfs
 
 from systemtest.client import ClusterClient, ViewerHold, default_base_url
 from systemtest.duration import Duration
@@ -90,7 +90,7 @@ class Simulation:
     def __init__(
         self,
         *,
-        topology: Topology,
+        topology: dict[str, Any],
         csv: bool,
         testname: str,
         base_url: str | None = None,
@@ -103,7 +103,7 @@ class Simulation:
         self._id: str | None = None
         self._uarts: dict[tuple[str, str], UartStream] = {}
         try:
-            self._id = self._client.create(embed_local_elfs(topology.to_dict()))
+            self._id = self._client.create(embed_local_elfs(topology))
             self._viewer = ViewerHold(self._client.base_url, self._id)
             self._client.set_token(self._viewer.start())
             self._wait_catalog()
@@ -265,17 +265,22 @@ class Simulation:
 
 
 def open_simulation(
-    topology_fn: Callable[[], Topology],
+    config: Callable[[], SimulationConfig],
     *,
     csv: bool,
     testname: str,
     base_url: str | None = None,
 ) -> Simulation:
-    topology = topology_fn()
-    if not isinstance(topology, Topology):
-        raise TypeError("topology function must return topology_dsl.Topology")
+    if not callable(config):
+        raise TypeError("open_simulation expects a () -> SimulationConfig factory")
+    built = config()
+    if not isinstance(built, SimulationConfig):
+        raise TypeError(
+            "config factory must return SimulationConfig, "
+            f"got {type(built).__name__}"
+        )
     return Simulation(
-        topology=topology,
+        topology=built.to_dict(),
         csv=csv,
         testname=testname,
         base_url=base_url or default_base_url(),

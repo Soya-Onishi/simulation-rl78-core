@@ -1,4 +1,4 @@
-"""pytest plugin: @sim_case and the sim fixture."""
+"""pytest fixtures and hooks: @sim_case and the sim fixture."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from systemtest.simulation import Simulation, open_simulation
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line("markers", "sim_case(topology, csv=False): cluster simulation case")
+    config.addinivalue_line("markers", "sim_case(config, csv=False): cluster simulation case")
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
@@ -22,14 +22,17 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
         pytest.skip("simulation-frontend is not running")
 
 
-def sim_case(*, topology, csv: bool = False):
+def sim_case(*, config, csv: bool = False):
     """Mark a test that receives a connected Simulation as argument ``sim``.
+
+    ``config`` is a ``() -> SimulationConfig`` factory (with or without
+    ``@simulation``). The ``sim`` fixture calls it when the test starts.
 
     If simulation-frontend is down, the test is skipped automatically.
     """
 
     def decorator(fn):
-        return pytest.mark.sim_case(topology=topology, csv=csv)(fn)
+        return pytest.mark.sim_case(config=config, csv=csv)(fn)
 
     return decorator
 
@@ -38,10 +41,10 @@ def sim_case(*, topology, csv: bool = False):
 def sim(request: pytest.FixtureRequest) -> Iterator[Simulation]:
     marker = request.node.get_closest_marker("sim_case")
     if marker is None:
-        pytest.fail("sim fixture requires @sim_case(topology=...)")
-    topology = marker.kwargs["topology"]
+        pytest.fail("sim fixture requires @sim_case(config=...)")
+    config = marker.kwargs["config"]
     csv = bool(marker.kwargs.get("csv", False))
-    session = open_simulation(topology, csv=csv, testname=request.node.name)
+    session = open_simulation(config, csv=csv, testname=request.node.name)
     try:
         yield session
     finally:

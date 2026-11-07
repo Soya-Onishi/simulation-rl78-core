@@ -942,7 +942,9 @@ mod tests {
     use crate::ipc::{
         ArbiterControl, NodeControl, board_hash_table, board_id_hash, create_node, isolated_config,
     };
-    use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
+    use crate::topology::{
+        BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind, PortRef,
+    };
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1040,18 +1042,46 @@ mod tests {
             ],
             edges: vec![
                 DirectedEdge {
-                    from_board: "a".into(),
-                    from_endpoint: "uart0_tx".into(),
-                    to_board: "b".into(),
-                    to_endpoint: "uart0_rx".into(),
+                    from: PortRef {
+                        path: "a".into(),
+                        port: "uart0_tx".into(),
+                    },
+                    to: PortRef {
+                        path: "b".into(),
+                        port: "uart0_rx".into(),
+                    },
+                    route: vec![
+                        PortRef {
+                            path: "a".into(),
+                            port: "uart0_tx".into(),
+                        },
+                        PortRef {
+                            path: "b".into(),
+                            port: "uart0_rx".into(),
+                        },
+                    ],
                     payload: PayloadKind::Uart,
                     uart_ring_len: None,
                 },
                 DirectedEdge {
-                    from_board: "b".into(),
-                    from_endpoint: "uart0_tx".into(),
-                    to_board: "a".into(),
-                    to_endpoint: "uart0_rx".into(),
+                    from: PortRef {
+                        path: "b".into(),
+                        port: "uart0_tx".into(),
+                    },
+                    to: PortRef {
+                        path: "a".into(),
+                        port: "uart0_rx".into(),
+                    },
+                    route: vec![
+                        PortRef {
+                            path: "b".into(),
+                            port: "uart0_tx".into(),
+                        },
+                        PortRef {
+                            path: "a".into(),
+                            port: "uart0_rx".into(),
+                        },
+                    ],
                     payload: PayloadKind::Uart,
                     uart_ring_len: None,
                 },

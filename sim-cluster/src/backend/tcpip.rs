@@ -38,7 +38,26 @@ impl TcpipBackend {
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
+}
 
+/// Encode a board id for use as a single URL path segment.
+///
+/// Hierarchical ids contain `/` (e.g. `demo/a`). Leaving that unencoded would
+/// split the route and 404 against `/boards/{board_id}/...`.
+fn encode_path_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+impl TcpipBackend {
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         read_json(get(&self.url(path), RPC_TIMEOUT)?)
     }
@@ -341,14 +360,16 @@ impl SimulationBackend for TcpipBackend {
         board_id: &str,
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
+        let board = encode_path_segment(board_id);
         read_json(self.post_json(
-            &format!("/internal/simulations/{id}/boards/{board_id}/inspect"),
+            &format!("/internal/simulations/{id}/boards/{board}/inspect"),
             &req,
         )?)
     }
 
     fn step(&self, id: &str, board_id: &str) -> Result<(), ApiError> {
-        drop_body(self.post(&format!("/internal/simulations/{id}/boards/{board_id}/step"))?)
+        let board = encode_path_segment(board_id);
+        drop_body(self.post(&format!("/internal/simulations/{id}/boards/{board}/step"))?)
     }
 }
 
@@ -516,12 +537,14 @@ mod tests {
         fn inspect(
             &self,
             _id: &str,
-            _board_id: &str,
+            board_id: &str,
             _req: InspectRequest,
         ) -> Result<InspectReply, ApiError> {
+            *self.last.lock().unwrap() = format!("inspect:{board_id}");
             Ok(InspectReply::Ok)
         }
-        fn step(&self, _id: &str, _board_id: &str) -> Result<(), ApiError> {
+        fn step(&self, _id: &str, board_id: &str) -> Result<(), ApiError> {
+            *self.last.lock().unwrap() = format!("step:{board_id}");
             Ok(())
         }
     }
@@ -634,5 +657,36 @@ mod tests {
         let missing = backend.status("missing").unwrap_err();
         assert_eq!(missing.status, 404);
         assert_eq!(missing.code, "not_found");
+    }
+
+    #[test]
+    fn tcpip_encodes_slash_in_board_id_path() {
+        assert_eq!(encode_path_segment("sys/left/a"), "sys%2Fleft%2Fa");
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock = MockBackend::new();
+        let (base, _join) = rt.block_on({
+            let mock = Arc::clone(&mock);
+            async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let app = router(mock);
+                let join = tokio::spawn(async move {
+                    axum::serve(listener, app).await.unwrap();
+                });
+                (format!("http://{addr}"), join)
+            }
+        });
+
+        let backend = TcpipBackend::new(&base);
+        backend
+            .inspect("sim-1", "sys/left/a", InspectRequest::ReadRegs)
+            .unwrap();
+        assert_eq!(*mock.last.lock().unwrap(), "inspect:sys/left/a");
+        backend.step("sim-1", "sys/left/a").unwrap();
+        assert_eq!(*mock.last.lock().unwrap(), "step:sys/left/a");
     }
 }

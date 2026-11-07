@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-import pytest
-
-from topology_dsl import Topology
+from topology_dsl import SimulationConfig, Topology
 
 from systemtest.simulation import Simulation
 
@@ -57,85 +58,108 @@ class _FakeClient:
         self.closed = True
 
 
-def _topology():
-    return SimpleNamespace(to_dict=lambda: {})
+def _empty_topology() -> dict:
+    return {
+        "boards": [],
+        "edges": [],
+        "margin_ns": 1,
+        "headroom_threshold_ns": 1,
+    }
 
 
-def _patch_harness(monkeypatch, client: _FakeClient, viewer_cls=None) -> None:
-    monkeypatch.setattr("systemtest.simulation.ClusterClient", lambda *_a, **_k: client)
-    monkeypatch.setattr("systemtest.simulation.ViewerHold", viewer_cls or _FakeViewer)
+class SimulationInitTests(unittest.TestCase):
+    def test_create_embeds_local_elf_as_base64(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            elf = Path(tmp) / "fw.bin"
+            elf.write_bytes(b"ABC")
+            client = _FakeClient()
+
+            class T(Topology):
+                def build(self) -> None:
+                    self._board("a", elf=str(elf))
+
+            def config() -> SimulationConfig:
+                return SimulationConfig(
+                    margin_ns=1,
+                    headroom_threshold_ns=1,
+                    topology=T(name="demo"),
+                )
+
+            with (
+                patch("systemtest.simulation.ClusterClient", lambda *_a, **_k: client),
+                patch("systemtest.simulation.ViewerHold", _FakeViewer),
+            ):
+                Simulation(topology=config().to_dict(), csv=False, testname="t")
+
+            self.assertEqual(client.topologies[0]["boards"][0]["elf"], "base64:QUJD")
+            self.assertEqual(client.topologies[0]["boards"][0]["id"], "demo/a")
+
+    def test_catalog_failure_deletes_created_simulation(self) -> None:
+        client = _FakeClient()
+        client.fail_catalog = True
+        viewers: list[_FakeViewer] = []
+
+        class TrackingViewer(_FakeViewer):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                viewers.append(self)
+
+        with (
+            patch("systemtest.simulation.ClusterClient", lambda *_a, **_k: client),
+            patch("systemtest.simulation.ViewerHold", TrackingViewer),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "catalog boom"):
+                Simulation(topology=_empty_topology(), csv=False, testname="t")
+
+        self.assertEqual(client.created, ["s1"])
+        self.assertEqual(client.deleted, ["s1"])
+        self.assertTrue(client.closed)
+        self.assertTrue(viewers[0].closed)
+
+    def test_viewer_start_failure_deletes_created_simulation(self) -> None:
+        client = _FakeClient()
+
+        class BoomViewer(_FakeViewer):
+            def start(self) -> str:
+                raise RuntimeError("viewer boom")
+
+        with (
+            patch("systemtest.simulation.ClusterClient", lambda *_a, **_k: client),
+            patch("systemtest.simulation.ViewerHold", BoomViewer),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "viewer boom"):
+                Simulation(topology=_empty_topology(), csv=False, testname="t")
+
+        self.assertEqual(client.deleted, ["s1"])
+        self.assertTrue(client.closed)
+
+    def test_setup_failure_does_not_write_csv(self) -> None:
+        client = _FakeClient()
+        client.fail_catalog = True
+        with (
+            patch("systemtest.simulation.ClusterClient", lambda *_a, **_k: client),
+            patch("systemtest.simulation.ViewerHold", _FakeViewer),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "catalog boom"):
+                Simulation(topology=_empty_topology(), csv=True, testname="t")
+
+        self.assertEqual(client.csv_calls, 0)
+        self.assertEqual(client.deleted, ["s1"])
+
+    def test_setup_failure_keeps_original_error_if_delete_fails(self) -> None:
+        client = _FakeClient()
+        client.fail_catalog = True
+        client.fail_delete = True
+        with (
+            patch("systemtest.simulation.ClusterClient", lambda *_a, **_k: client),
+            patch("systemtest.simulation.ViewerHold", _FakeViewer),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "catalog boom"):
+                Simulation(topology=_empty_topology(), csv=False, testname="t")
+
+        self.assertEqual(client.deleted, ["s1"])
+        self.assertTrue(client.closed)
 
 
-def test_create_embeds_local_elf_as_base64(monkeypatch, tmp_path) -> None:
-    elf = tmp_path / "fw.bin"
-    elf.write_bytes(b"ABC")
-    client = _FakeClient()
-    _patch_harness(monkeypatch, client)
-
-    topology = Topology(margin_ns=1, headroom_threshold_ns=1)
-    topology.board("a", elf=str(elf))
-    Simulation(topology=topology, csv=False, testname="t")
-
-    assert client.topologies[0]["boards"][0]["elf"] == "base64:QUJD"
-
-
-def test_catalog_failure_deletes_created_simulation(monkeypatch) -> None:
-    client = _FakeClient()
-    client.fail_catalog = True
-    viewers: list[_FakeViewer] = []
-
-    class TrackingViewer(_FakeViewer):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
-            viewers.append(self)
-
-    _patch_harness(monkeypatch, client, TrackingViewer)
-
-    with pytest.raises(RuntimeError, match="catalog boom"):
-        Simulation(topology=_topology(), csv=False, testname="t")  # type: ignore[arg-type]
-
-    assert client.created == ["s1"]
-    assert client.deleted == ["s1"]
-    assert client.closed is True
-    assert viewers[0].closed is True
-
-
-def test_viewer_start_failure_deletes_created_simulation(monkeypatch) -> None:
-    client = _FakeClient()
-
-    class BoomViewer(_FakeViewer):
-        def start(self) -> str:
-            raise RuntimeError("viewer boom")
-
-    _patch_harness(monkeypatch, client, BoomViewer)
-
-    with pytest.raises(RuntimeError, match="viewer boom"):
-        Simulation(topology=_topology(), csv=False, testname="t")  # type: ignore[arg-type]
-
-    assert client.deleted == ["s1"]
-    assert client.closed is True
-
-
-def test_setup_failure_does_not_write_csv(monkeypatch) -> None:
-    client = _FakeClient()
-    client.fail_catalog = True
-    _patch_harness(monkeypatch, client)
-
-    with pytest.raises(RuntimeError, match="catalog boom"):
-        Simulation(topology=_topology(), csv=True, testname="t")  # type: ignore[arg-type]
-
-    assert client.csv_calls == 0
-    assert client.deleted == ["s1"]
-
-
-def test_setup_failure_keeps_original_error_if_delete_fails(monkeypatch) -> None:
-    client = _FakeClient()
-    client.fail_catalog = True
-    client.fail_delete = True
-    _patch_harness(monkeypatch, client)
-
-    with pytest.raises(RuntimeError, match="catalog boom"):
-        Simulation(topology=_topology(), csv=False, testname="t")  # type: ignore[arg-type]
-
-    assert client.deleted == ["s1"]
-    assert client.closed is True
+if __name__ == "__main__":
+    unittest.main()
