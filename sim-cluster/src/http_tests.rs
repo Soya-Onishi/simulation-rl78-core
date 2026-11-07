@@ -31,7 +31,7 @@ impl SimulationBackend for TopoMock {
     fn reset(&self, _id: &str) -> Result<(), ApiError> {
         Ok(())
     }
-    fn delete(&self, _id: &str) -> Result<(), ApiError> {
+    fn shutdown(&self, _id: &str) -> Result<(), ApiError> {
         Ok(())
     }
     fn exists(&self, id: &str) -> Result<bool, ApiError> {

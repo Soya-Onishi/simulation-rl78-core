@@ -37,6 +37,8 @@ pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
 /// Options for [`run_node`].
 #[derive(Clone, Debug)]
 pub struct BoardOptions {
+    /// When true, [`node!`] calls [`list_catalog`] instead of [`run_node`].
+    pub list_catalog: bool,
     pub board_id: String,
     pub cluster_key: String,
     pub iox_root: PathBuf,
@@ -74,10 +76,14 @@ pub enum BoardCliError {
 }
 
 /// Parse board binary argv (after the program name).
+///
+/// `--list-catalog` skips the cluster-required flags. Those flags may still appear
+/// and are ignored in that mode; unknown flags are always an error.
 pub fn parse_board_args(
     prog: &str,
     args: impl IntoIterator<Item = String>,
 ) -> Result<BoardOptions, BoardCliError> {
+    let mut list_catalog = false;
     let mut board_id: Option<String> = None;
     let mut cluster_key: Option<String> = None;
     let mut iox_root: Option<PathBuf> = None;
@@ -86,6 +92,7 @@ pub fn parse_board_args(
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => return Err(BoardCliError::Help),
+            "--list-catalog" => list_catalog = true,
             "--board-id" => {
                 board_id = Some(iter.next().ok_or_else(|| {
                     BoardCliError::Message(format!("{prog}: --board-id requires a value"))
@@ -113,6 +120,15 @@ pub fn parse_board_args(
             }
         }
     }
+    if list_catalog {
+        return Ok(BoardOptions {
+            list_catalog: true,
+            board_id: board_id.unwrap_or_default(),
+            cluster_key: cluster_key.unwrap_or_default(),
+            iox_root: iox_root.unwrap_or_default(),
+            topology_path: topology.unwrap_or_default(),
+        });
+    }
     let (Some(board_id), Some(cluster_key), Some(iox_root), Some(topology_path)) =
         (board_id, cluster_key, iox_root, topology)
     else {
@@ -121,6 +137,7 @@ pub fn parse_board_args(
         )));
     };
     Ok(BoardOptions {
+        list_catalog: false,
         board_id,
         cluster_key,
         iox_root,
@@ -132,19 +149,24 @@ pub fn parse_board_args(
 #[must_use]
 pub fn board_usage(prog: &str) -> String {
     format!(
-        "Usage: {prog} --board-id <id> --cluster-key <key> --iox-root <path> --topology <json>\n\
+        "Usage:\n\
+         {prog} --board-id <id> --cluster-key <key> --iox-root <path> --topology <json>\n\
+         {prog} --list-catalog\n\
          \n\
-         Spawned by cluster-arbiter. Starts AwaitingStartup, becomes Stopped after\n\
-         StartupRecord (Ready), and runs only after Start.\n"
+         Cluster mode is spawned by cluster-arbiter. Starts AwaitingStartup, becomes\n\
+         Stopped after StartupRecord (Ready), and runs only after Start.\n\
+         \n\
+         --list-catalog prints this node's probe and action catalog as JSON on\n\
+         stdout and exits. Cluster flags are not required in that mode.\n"
     )
 }
 
-/// Expand a board/plant binary `main` that parses CLI args and calls [`run_node`].
+/// Expand a board/plant binary `main` that parses CLI args and runs the node.
 ///
 /// Place at crate root (e.g. `main.rs`). Defines `fn main`, so the crate must not
 /// define another `main`. The argument must satisfy
 /// `FnOnce() -> (impl Entity, BoardPorts, Vec<ProbePoint>)` (same as [`run_node`]'s
-/// builder).
+/// builder). With `--list-catalog`, calls [`list_catalog`] instead of [`run_node`].
 ///
 /// ```ignore
 /// sim_cluster::node!(g23_machine);
@@ -170,12 +192,93 @@ macro_rules! node {
                 }
             };
 
-            if let ::std::result::Result::Err(err) = $crate::run_node(opts, $build) {
+            let run = if opts.list_catalog {
+                $crate::list_catalog($build)
+            } else {
+                $crate::run_node(opts, $build)
+            };
+            if let ::std::result::Result::Err(err) = run {
                 ::std::eprintln!("{}: {err}", ::std::env!("CARGO_PKG_NAME"));
                 ::std::process::exit(1);
             }
         }
     };
+}
+
+#[derive(serde::Serialize)]
+struct CatalogDump {
+    probes: Vec<CatalogProbe>,
+    actions: Vec<CatalogAction>,
+}
+
+#[derive(serde::Serialize)]
+struct CatalogProbe {
+    probe: String,
+    kind: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct CatalogAction {
+    device: String,
+    action: String,
+    description: String,
+    params: Vec<crate::contract::AdvertisedActionParam>,
+}
+
+fn probe_kind_str(point: &ProbePoint) -> &'static str {
+    use crate::probe_log::ProbeKind;
+    match point {
+        ProbePoint::Digital(_) => ProbeKind::Digital.as_str(),
+        ProbePoint::Uart(_) => ProbeKind::Uart.as_str(),
+        ProbePoint::Analog(_) => ProbeKind::Analog.as_str(),
+    }
+}
+
+fn catalog_param(param: sim_kernel::ParamSpec) -> crate::contract::AdvertisedActionParam {
+    crate::contract::AdvertisedActionParam {
+        name: param.name,
+        unit: param.unit,
+        description: param.description,
+        min: param.min,
+        max: param.max,
+        default: param.default,
+    }
+}
+
+fn catalog_dump_from_entity<E: Entity>(entity: &E, points: &[ProbePoint]) -> CatalogDump {
+    let probes = points
+        .iter()
+        .map(|point| CatalogProbe {
+            probe: point.name().to_string(),
+            kind: probe_kind_str(point),
+        })
+        .collect();
+    let actions = entity
+        .action_catalog()
+        .into_iter()
+        .map(|entry| CatalogAction {
+            device: entry.device,
+            action: entry.action,
+            description: entry.description,
+            params: entry.params.into_iter().map(catalog_param).collect(),
+        })
+        .collect();
+    CatalogDump { probes, actions }
+}
+
+/// Build the entity via `build`, print probe/action catalogs as JSON, and return.
+///
+/// Does not open iceoryx or read topology. [`BoardPorts`] from `build` are ignored.
+/// Entries are taken from [`Entity::action_catalog`] / [`ProbePoint`] as-is and are
+/// not revalidated through the iceoryx advertise pack path.
+pub fn list_catalog<E: Entity>(
+    build: impl FnOnce() -> (E, BoardPorts, Vec<ProbePoint>),
+) -> Result<(), BoardError> {
+    let (entity, _ports, points) = build();
+    let dump = catalog_dump_from_entity(&entity, &points);
+    let text = serde_json::to_string(&dump).map_err(|err| BoardError::Message(err.to_string()))?;
+    println!("{text}");
+    Ok(())
 }
 
 /// Map a simulator stop to a cluster [`HostStopReason`], if any.
@@ -608,6 +711,7 @@ mod tests {
             ],
         )
         .unwrap();
+        assert!(!opts.list_catalog);
         assert_eq!(opts.board_id, "a");
         assert_eq!(opts.cluster_key, "k");
     }
@@ -618,6 +722,115 @@ mod tests {
             parse_board_args("prog", ["--help".into()]),
             Err(BoardCliError::Help)
         ));
+    }
+
+    #[test]
+    fn parse_board_args_list_catalog_alone() {
+        let opts = parse_board_args("prog", ["--list-catalog".into()]).unwrap();
+        assert!(opts.list_catalog);
+    }
+
+    #[test]
+    fn parse_board_args_list_catalog_ignores_cluster_flags() {
+        let opts = parse_board_args(
+            "prog",
+            [
+                "--list-catalog".into(),
+                "--board-id".into(),
+                "a".into(),
+                "--cluster-key".into(),
+                "k".into(),
+                "--iox-root".into(),
+                "/tmp/iox".into(),
+                "--topology".into(),
+                "/tmp/t.json".into(),
+            ],
+        )
+        .unwrap();
+        assert!(opts.list_catalog);
+        assert_eq!(opts.board_id, "a");
+    }
+
+    #[test]
+    fn parse_board_args_list_catalog_rejects_unknown() {
+        let err =
+            parse_board_args("prog", ["--list-catalog".into(), "--bogus".into()]).unwrap_err();
+        assert!(matches!(err, BoardCliError::Message(_)));
+    }
+
+    struct CatalogStub {
+        entries: Vec<sim_kernel::ActionCatalogEntry>,
+    }
+
+    impl Entity for CatalogStub {
+        fn poll(&mut self, _ctx: sim_kernel::AdvanceCtx) -> sim_kernel::EntityPoll {
+            sim_kernel::EntityPoll::NoProgress
+        }
+
+        fn reset(&mut self) {}
+
+        fn now(&self) -> Tick {
+            Tick(0)
+        }
+
+        fn action_catalog(&self) -> Vec<sim_kernel::ActionCatalogEntry> {
+            self.entries.clone()
+        }
+    }
+
+    #[test]
+    fn catalog_dump_matches_agreed_schema() {
+        use sim_kernel::{ActionCatalogEntry, ParamSpec, ProbePolicy, ProbeTap};
+
+        let uart = ProbeTap::new("uart0", ProbePolicy::OnChange);
+        let dac = ProbeTap::new("dac0", ProbePolicy::OnChange);
+        let points = vec![ProbePoint::Uart(uart), ProbePoint::Analog(dac)];
+        let entity = CatalogStub {
+            entries: vec![ActionCatalogEntry {
+                device: "sw1".into(),
+                device_hash: 1,
+                action: "hold".into(),
+                action_hash: 2,
+                description: "hold the switch".into(),
+                params: vec![ParamSpec {
+                    name: "level".into(),
+                    name_hash: 3,
+                    unit: Some("V".into()),
+                    description: Some("drive level".into()),
+                    min: Some(0.0),
+                    max: Some(5.0),
+                    default: Some(0.0),
+                }],
+            }],
+        };
+        let dump = catalog_dump_from_entity(&entity, &points);
+        let value = serde_json::to_value(&dump).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "probes": [
+                    { "probe": "uart0", "kind": "uart" },
+                    { "probe": "dac0", "kind": "analog" }
+                ],
+                "actions": [
+                    {
+                        "device": "sw1",
+                        "action": "hold",
+                        "description": "hold the switch",
+                        "params": [
+                            {
+                                "name": "level",
+                                "unit": "V",
+                                "description": "drive level",
+                                "min": 0.0,
+                                "max": 5.0,
+                                "default": 0.0
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
     }
 
     /// Minimal CPU for framework unit tests (mirrors ScriptedCpu halt/nop).

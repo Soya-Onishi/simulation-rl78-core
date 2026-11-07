@@ -35,7 +35,7 @@ pub mod topology;
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
 pub use board_runtime::{
-    BoardCliError, BoardError, BoardOptions, board_usage, cluster_host_stop_reason,
+    BoardCliError, BoardError, BoardOptions, board_usage, cluster_host_stop_reason, list_catalog,
     parse_board_args, run_node,
 };
 pub use cluster_stop::is_cluster_relevant_reason;
