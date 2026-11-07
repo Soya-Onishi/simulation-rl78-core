@@ -12,6 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::action::ActionUpstream;
+use crate::arbiter_catalog::{
+    apply_probe_catalogs, collect_board_catalogs, publish_action_catalogs,
+};
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
@@ -100,8 +103,7 @@ fn ready_barrier_and_start(
     topo: &LogicalTopology,
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
-    let mut probes = ArbiterProbeHub::new("test");
-    let mut peers = await_ready(topo, control, &mut probes, None, None)?;
+    let mut peers = await_ready(topo, control)?;
     control.publish(&ControlToNode::Start { allowed_ns: 0 })?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
@@ -114,9 +116,6 @@ fn ready_barrier_and_start(
 fn await_ready(
     topo: &LogicalTopology,
     control: &ArbiterControl,
-    probes: &mut ArbiterProbeHub,
-    actions: Option<&ArbiterNodeActions>,
-    server: Option<&ArbiterServerActions>,
 ) -> Result<HashMap<String, PeerState>, ArbiterError> {
     let timeout = Duration::from_millis(topo.ready_timeout_ms);
     let deadline = Instant::now() + timeout;
@@ -145,35 +144,8 @@ fn await_ready(
         }
 
         let mut progressed = false;
-        forward_catalog(actions, server)?;
         while let Some(msg) = control.try_recv()? {
             match msg {
-                ControlToArbiter::ProbeAdvertise {
-                    from,
-                    name_hash,
-                    probe_id,
-                    kind,
-                    name_len,
-                    name,
-                } => {
-                    let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
-                        continue;
-                    };
-                    let Some(kind) = ProbeWireKind::from_u8(kind) else {
-                        log::warn!("ignoring probe advertise with bad kind {kind} from {from}");
-                        continue;
-                    };
-                    let n = (name_len as usize).min(name.len());
-                    probes.record_wire_advertise(
-                        board_id,
-                        from,
-                        name_hash,
-                        probe_id,
-                        kind,
-                        &name[..n],
-                    );
-                    progressed = true;
-                }
                 ControlToArbiter::Ready { from } => {
                     let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
                         continue;
@@ -199,20 +171,7 @@ fn await_ready(
         }
     }
 
-    // Advertisements are send_copy'd before Ready, but they can land in the
-    // action subscriber between this iteration's drain and the control read
-    // that observes Ready. Drain once more before later advertisements are
-    // discarded.
-    forward_catalog(actions, server)?;
-    if let Some(server) = server {
-        server.publish_upstream(&ActionUpstream::CatalogEnd)?;
-    }
-
-    log::info!(
-        "Ready barrier complete ({} nodes, {} probes)",
-        peers.len(),
-        probes.catalog().len()
-    );
+    log::info!("Ready barrier complete ({} nodes)", peers.len());
     Ok(peers)
 }
 
@@ -291,31 +250,9 @@ enum GdbStepPhase {
     CatchUp { reason: HostStopReason },
 }
 
-/// Forward catalog advertisements that arrived before this iteration's control read.
-///
-/// Nodes `send_copy` every advertisement before `Ready`, so the samples are already
-/// in the action subscriber when `Ready` becomes visible. Draining here before the
-/// control receive keeps that order. The arbiter then publishes `CatalogEnd` on the
-/// server action channel so the HTTP layer can tell the catalog is complete.
-fn forward_catalog(
-    actions: Option<&ArbiterNodeActions>,
-    server: Option<&ArbiterServerActions>,
-) -> Result<(), ArbiterError> {
-    let Some(actions) = actions else {
-        return Ok(());
-    };
-    while let Some(msg) = actions.try_upstream()? {
-        if let ActionUpstream::Advertise(ad) = msg {
-            if let Some(server) = server {
-                server.publish_upstream(&ActionUpstream::Advertise(ad))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// After the ready barrier, advertisements are discarded. Requests are always
-/// forwarded; nodes queue them while Stopped and apply on Start.
+/// Forward action requests and results. Late `Advertise` samples from nodes are
+/// ignored. Requests are always forwarded; nodes queue them while Stopped and
+/// apply on Start.
 fn forward_invokes(
     actions: &ArbiterNodeActions,
     server: &ArbiterServerActions,
@@ -353,15 +290,26 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         opts.cluster_key
     );
 
-    let mut children = spawn_nodes(opts, topo)?;
+    let catalogs = match collect_board_catalogs(opts, topo) {
+        Ok(catalogs) => catalogs,
+        Err(err) => {
+            logs.shutdown();
+            return Err(err);
+        }
+    };
     let mut probe_hub = ArbiterProbeHub::new(opts.cluster_key.clone());
-    let mut peers = match await_ready(
-        topo,
-        &control,
-        &mut probe_hub,
-        Some(&node_actions),
-        Some(&server_actions),
-    ) {
+    if let Err(err) = apply_probe_catalogs(&mut probe_hub, &catalogs) {
+        logs.shutdown();
+        return Err(err);
+    }
+    log::info!(
+        "loaded catalogs via --list-catalog ({} boards, {} probes)",
+        catalogs.len(),
+        probe_hub.catalog().len()
+    );
+
+    let mut children = spawn_nodes(opts, topo)?;
+    let mut peers = match await_ready(topo, &control) {
         Ok(peers) => peers,
         Err(err) => {
             stop_children(&mut children);
@@ -369,6 +317,11 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             return Err(err);
         }
     };
+    if let Err(err) = publish_action_catalogs(&server_actions, &catalogs) {
+        stop_children(&mut children);
+        logs.shutdown();
+        return Err(err);
+    }
     if let Err(err) = probe_hub.subscribe_catalog(&node) {
         stop_children(&mut children);
         logs.shutdown();
@@ -782,7 +735,10 @@ fn analog_millivolts_u16(uv: i64) -> u16 {
     uv.saturating_div(1000).clamp(0, i64::from(u16::MAX)) as u16
 }
 
-fn binary_for_kind<'a>(opts: &'a ArbiterOptions, kind: &str) -> Result<&'a PathBuf, ArbiterError> {
+pub(crate) fn binary_for_kind<'a>(
+    opts: &'a ArbiterOptions,
+    kind: &str,
+) -> Result<&'a PathBuf, ArbiterError> {
     match kind {
         "rl78" => Ok(&opts.node_bin),
         "plant" => Ok(&opts.plant_bin),

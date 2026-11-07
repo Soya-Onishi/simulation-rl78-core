@@ -162,8 +162,8 @@ pub struct ActionResult {
 
 /// Node → arbiter (and arbiter → server) sample.
 ///
-/// Advertise is one catalog row. Result is two words. CatalogEnd is published
-/// by the arbiter once, after the Ready barrier has forwarded every advertise.
+/// Advertise is one catalog row (arbiter → server after Ready). Result is two
+/// words. CatalogEnd is published by the arbiter once after every advertise.
 /// Variants stay inline so the sample remains `Copy` for `send_copy`.
 #[allow(clippy::large_enum_variant)]
 #[repr(C)]

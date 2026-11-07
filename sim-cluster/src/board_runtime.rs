@@ -15,8 +15,7 @@ use sim_kernel::{
 };
 
 use crate::action::{
-    ACTION_RECV_CAP, ActionAdvertise, ActionPackError, ActionRequest, ActionResult, ActionStatus,
-    ActionUpstream,
+    ACTION_RECV_CAP, ActionPackError, ActionRequest, ActionResult, ActionStatus, ActionUpstream,
 };
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
@@ -26,8 +25,7 @@ use crate::ipc::{
     IpcError, NodeActions, NodeControl, NodeLog, board_id_hash, create_node, isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
-use crate::probe::{NodeProbeRuntime, ProbeError};
-use crate::probe_hub::pack_probe_name;
+use crate::probe::{NodeProbeRuntime, ProbeError, ProbeWireKind};
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
 
 /// Idle sleep when not Running, waiting on the allowed ceiling, or guest-halted.
@@ -204,41 +202,48 @@ macro_rules! node {
     };
 }
 
-#[derive(serde::Serialize)]
-struct CatalogDump {
-    probes: Vec<CatalogProbe>,
-    actions: Vec<CatalogAction>,
+/// JSON body printed by [`list_catalog`] / `--list-catalog` (one document on stdout).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogDump {
+    pub probes: Vec<CatalogProbe>,
+    pub actions: Vec<CatalogAction>,
 }
 
-#[derive(serde::Serialize)]
-struct CatalogProbe {
+impl CatalogDump {
+    /// Parse stdout text as a single [`CatalogDump`] JSON document.
+    pub fn parse_json(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(text.trim())
+    }
+}
+
+/// One probe row in [`CatalogDump`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogProbe {
     /// `probe_name_hash` of the probe name (serde: 16-digit hex).
-    probe: crate::ipc::HashedId<u64>,
+    pub probe: crate::ipc::HashedId<u64>,
     /// Human-readable probe name.
-    probe_label: String,
-    kind: &'static str,
+    pub probe_label: String,
+    pub kind: String,
 }
 
-/// Local `--catalog-dump` action row. Shape matches public advertise (hex + labels)
-/// so dump output can later replace the advertise path.
-#[derive(serde::Serialize)]
-struct CatalogAction {
+/// One action row in [`CatalogDump`]. Shape matches public advertise (hex + labels).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogAction {
     /// `id_hash` of the device name (serde: 16-digit hex).
-    device: crate::ipc::HashedId<u64>,
-    device_label: String,
+    pub device: crate::ipc::HashedId<u64>,
+    pub device_label: String,
     /// `id_hash` of the action name (serde: 16-digit hex).
-    action: crate::ipc::HashedId<u64>,
-    action_label: String,
-    description: String,
-    params: Vec<crate::contract::AdvertisedActionParam>,
+    pub action: crate::ipc::HashedId<u64>,
+    pub action_label: String,
+    pub description: String,
+    pub params: Vec<crate::contract::AdvertisedActionParam>,
 }
 
 fn probe_kind_str(point: &ProbePoint) -> &'static str {
-    use crate::probe_log::ProbeKind;
     match point {
-        ProbePoint::Digital(_) => ProbeKind::Digital.as_str(),
-        ProbePoint::Uart(_) => ProbeKind::Uart.as_str(),
-        ProbePoint::Analog(_) => ProbeKind::Analog.as_str(),
+        ProbePoint::Digital(_) => ProbeWireKind::Digital.as_catalog_str(),
+        ProbePoint::Uart(_) => ProbeWireKind::Uart.as_catalog_str(),
+        ProbePoint::Analog(_) => ProbeWireKind::Analog.as_catalog_str(),
     }
 }
 
@@ -260,7 +265,7 @@ fn catalog_dump_from_entity<E: Entity>(entity: &E, points: &[ProbePoint]) -> Cat
         .map(|point| CatalogProbe {
             probe: crate::ipc::probe_name_hash(point.name()),
             probe_label: point.name().to_string(),
-            kind: probe_kind_str(point),
+            kind: probe_kind_str(point).to_string(),
         })
         .collect();
     let actions = entity
@@ -312,11 +317,11 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 /// `build` assembles the entity (board machine or plant) and board-edge ports.
 /// It must not load firmware. When the topology board entry has an `elf` source,
 /// this function loads those bytes and calls [`Entity::load_firmware`].
-/// An empty [`Entity::action_catalog`] skips advertise and [`service_actions`].
+/// An empty [`Entity::action_catalog`] skips [`service_actions`].
 ///
 /// The third return value is the wiring-side [`ProbePoint`] list. This function
-/// opens one publisher per point. Before the first [`ControlToArbiter::Ready`],
-/// those probes are advertised via [`ControlToArbiter::ProbeAdvertise`].
+/// opens one publisher per point. Probe/action catalogs are listed out-of-band by
+/// the arbiter via [`list_catalog`] / `--list-catalog`, not over control IPC.
 ///
 /// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
 /// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
@@ -374,9 +379,7 @@ pub fn run_node<E: Entity>(
     let mut headroom_threshold_ns = 0_u64;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
-    let mut probe_ads = Some(probes.advertisements().to_vec());
-    let mut actions_advertised = false;
-    let mut has_actions = false;
+    let has_actions = !sim.entity().action_catalog().is_empty();
     let mut pending_actions: VecDeque<ActionRequest> = VecDeque::new();
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
@@ -394,33 +397,6 @@ pub fn run_node<E: Entity>(
             if let Some(effect) = effect {
                 match effect {
                     NodeEffect::SendReady => {
-                        if !actions_advertised {
-                            let catalog = sim.entity().action_catalog();
-                            has_actions = !catalog.is_empty();
-                            for entry in &catalog {
-                                let sample = ActionAdvertise::new(board_hash, entry)?;
-                                actions.publish_upstream(&ActionUpstream::Advertise(sample))?;
-                            }
-                            actions_advertised = true;
-                            if has_actions {
-                                log::info!("advertised {} action(s)", catalog.len());
-                            }
-                        }
-                        if let Some(probes) = probe_ads.take() {
-                            for adv in &probes {
-                                let (name, name_len) = pack_probe_name(&adv.name);
-                                control.publish(&ControlToArbiter::ProbeAdvertise {
-                                    from: board_hash,
-                                    name_hash: adv.name_hash,
-                                    probe_id: adv.probe_id,
-                                    kind: adv.kind as u8,
-                                    name_len,
-                                    name,
-                                })?;
-                            }
-
-                            log::info!("advertised {} probe(s)", probes.len());
-                        }
                         control.publish(&ControlToArbiter::Ready { from: board_hash })?;
                         log::trace!("Ready");
                     }
@@ -864,6 +840,8 @@ mod tests {
                 ]
             })
         );
+        let roundtrip = CatalogDump::parse_json(&serde_json::to_string(&dump).unwrap()).unwrap();
+        assert_eq!(roundtrip, dump);
     }
 
     /// Minimal CPU for framework unit tests (mirrors ScriptedCpu halt/nop).

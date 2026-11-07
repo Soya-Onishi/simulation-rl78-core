@@ -22,7 +22,7 @@ pub const MAX_PROBES_PER_BOARD: usize = 32;
 /// Max UTF-8 bytes stored for a probe name on the control plane.
 pub const PROBE_NAME_CAP: usize = 64;
 
-/// Wire kind carried on [`crate::control::ControlToArbiter::ProbeAdvertise`].
+/// Probe sample wire kind (digital / uart / analog publishers).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProbeWireKind {
@@ -32,18 +32,29 @@ pub enum ProbeWireKind {
 }
 
 impl ProbeWireKind {
+    /// Label used in [`crate::board_runtime::CatalogDump`] JSON.
     #[must_use]
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            1 => Some(Self::Digital),
-            2 => Some(Self::Uart),
-            3 => Some(Self::Analog),
+    pub fn as_catalog_str(self) -> &'static str {
+        match self {
+            Self::Digital => "digital",
+            Self::Uart => "uart",
+            Self::Analog => "analog",
+        }
+    }
+
+    /// Parse a [`crate::board_runtime::CatalogProbe::kind`] label.
+    #[must_use]
+    pub fn from_catalog_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "digital" => Some(Self::Digital),
+            "uart" => Some(Self::Uart),
+            "analog" => Some(Self::Analog),
             _ => None,
         }
     }
 }
 
-/// Metadata recorded for [`ControlToArbiter::ProbeAdvertise`](crate::control::ControlToArbiter).
+/// Metadata for one probe known to the arbiter catalog / node publishers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeAdvertisement {
     pub name: String,
@@ -376,11 +387,6 @@ impl NodeProbeRuntime {
             csv: NodeProbeCsv::open(node, cluster_key, board_count)?,
             csv_out: None,
         })
-    }
-
-    #[must_use]
-    pub fn advertisements(&self) -> &[ProbeAdvertisement] {
-        self.publishers.advertisements()
     }
 
     pub fn set_watch(

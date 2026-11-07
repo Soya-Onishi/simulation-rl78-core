@@ -9,7 +9,6 @@ use std::fmt;
 use iceoryx2::prelude::ZeroCopySend;
 
 use crate::ipc::HashedId;
-use crate::probe::PROBE_NAME_CAP;
 
 /// Host-initiated stop reasons on the control plane (no free-form strings).
 #[repr(C)]
@@ -131,16 +130,6 @@ pub enum ControlToArbiter {
         from: HashedId<u64>,
         reason: HostStopReason,
     },
-    /// Declare one probe point before [`Self::Ready`] (one message per probe).
-    ProbeAdvertise {
-        from: HashedId<u64>,
-        name_hash: HashedId<u64>,
-        probe_id: HashedId<u64>,
-        /// [`crate::probe::ProbeWireKind`] as `u8`.
-        kind: u8,
-        name_len: u8,
-        name: [u8; PROBE_NAME_CAP],
-    },
 }
 
 impl ControlToArbiter {
@@ -148,10 +137,9 @@ impl ControlToArbiter {
     #[must_use]
     pub fn from_board(self) -> HashedId<u64> {
         match self {
-            Self::Ready { from }
-            | Self::TimeReport { from, .. }
-            | Self::HostStop { from, .. }
-            | Self::ProbeAdvertise { from, .. } => from,
+            Self::Ready { from } | Self::TimeReport { from, .. } | Self::HostStop { from, .. } => {
+                from
+            }
         }
     }
 }
