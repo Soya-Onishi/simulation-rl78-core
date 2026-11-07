@@ -23,8 +23,7 @@ use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::elf_source;
 use crate::inspect::InspectServer;
 use crate::ipc::{
-    IpcError, NodeActions, NodeControl, NodeLog, board_id_hash, create_node,
-    isolated_config,
+    IpcError, NodeActions, NodeControl, NodeLog, board_id_hash, create_node, isolated_config,
 };
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::probe::{NodeProbeRuntime, ProbeError};
@@ -332,6 +331,7 @@ pub fn run_node<E: Entity>(
     let mut probes = NodeProbeRuntime::open(
         &iox_node,
         &opts.cluster_key,
+        board_hash,
         board_id,
         topo.boards.len(),
         probe_points,
@@ -350,7 +350,7 @@ pub fn run_node<E: Entity>(
     ports.clear_pending();
 
     let mut inspect = if board.kind == "rl78" {
-        Some(InspectServer::bind(&opts.iox_root, board_id)?)
+        Some(InspectServer::bind(&opts.iox_root, board_hash)?)
     } else {
         None
     };

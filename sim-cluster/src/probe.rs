@@ -10,7 +10,7 @@ use sim_kernel::{AnalogVoltage, DigitalLevel, ProbePoint, ProbeTap, UartFrame};
 use crate::ipc::{
     CSV_CHUNKS_PER_TICK, IpcError, NodeProbeCsv, NodeProbeQuery, ProbeAnalogPub, ProbeAnalogSample,
     ProbeDigitalPub, ProbeDigitalSample, ProbeQueryReplyWire, ProbeUartPub, ProbeUartSample,
-    QUERY_CHUNK, QUERY_KIND_LATEST, QUERY_KIND_RANGE, board_id_hash, open_analog_publisher,
+    QUERY_CHUNK, QUERY_KIND_LATEST, QUERY_KIND_RANGE, open_analog_publisher,
     open_digital_publisher, open_uart_publisher, probe_id_hash, probe_name_hash, send_analog,
     send_digital, send_uart,
 };
@@ -98,11 +98,10 @@ impl ProbePublishers {
     pub fn open(
         node: &Node<iceoryx2::prelude::ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_hash: u64,
         points: Vec<ProbePoint>,
     ) -> Result<Self, ProbeError> {
-        let ads = plan(board_id, &points)?;
-        let board_hash = board_id_hash(board_id);
+        let ads = plan(board_hash, &points)?;
         let mut slots = Vec::with_capacity(points.len());
         for (point, adv) in points.into_iter().zip(ads.iter()) {
             match point {
@@ -295,7 +294,7 @@ impl ProbePublishers {
     }
 }
 
-fn plan(board_id: &str, points: &[ProbePoint]) -> Result<Vec<ProbeAdvertisement>, ProbeError> {
+fn plan(board_hash: u64, points: &[ProbePoint]) -> Result<Vec<ProbeAdvertisement>, ProbeError> {
     if points.len() > MAX_PROBES_PER_BOARD {
         return Err(ProbeError::TooManyProbes);
     }
@@ -316,7 +315,7 @@ fn plan(board_id: &str, points: &[ProbePoint]) -> Result<Vec<ProbeAdvertisement>
         ads.push(ProbeAdvertisement {
             name: name.to_string(),
             name_hash: probe_name_hash(name),
-            probe_id: probe_id_hash(board_id, name),
+            probe_id: probe_id_hash(board_hash, name),
             kind,
         });
     }
@@ -345,16 +344,18 @@ impl NodeProbeRuntime {
     pub fn open(
         node: &iceoryx2::prelude::Node<iceoryx2::prelude::ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_hash: u64,
+        board_label: &str,
         board_count: usize,
         points: Vec<ProbePoint>,
     ) -> Result<Self, ProbeError> {
-        let publishers = ProbePublishers::open(node, cluster_key, board_id, points)?;
-        let mut log = ProbeLog::open(cluster_key, board_id);
+        let publishers = ProbePublishers::open(node, cluster_key, board_hash, points)?;
+        let mut log = ProbeLog::open(cluster_key, board_hash);
         for adv in publishers.advertisements() {
             log.note_catalog(ProbePointName {
                 probe_id: adv.probe_id,
-                board_id: board_id.to_string(),
+                board_hash,
+                board_label: board_label.to_string(),
                 name: adv.name.clone(),
                 kind: match adv.kind {
                     ProbeWireKind::Digital => ProbeKind::Digital,
@@ -367,7 +368,7 @@ impl NodeProbeRuntime {
             publishers,
             log,
             watch: std::collections::HashSet::new(),
-            board_hash: board_id_hash(board_id),
+            board_hash,
             query: NodeProbeQuery::open(node, cluster_key, board_count)?,
             csv: NodeProbeCsv::open(node, cluster_key, board_count)?,
             csv_out: None,
@@ -548,14 +549,8 @@ mod tests {
         let points: Vec<_> = (0..MAX_PROBES_PER_BOARD + 1)
             .map(|i| digital(&format!("p{i}")))
             .collect();
-        assert!(matches!(
-            plan("board", &points),
-            Err(ProbeError::TooManyProbes)
-        ));
+        assert!(matches!(plan(1, &points), Err(ProbeError::TooManyProbes)));
         let dup = vec![digital("vcc"), digital("vcc")];
-        assert!(matches!(
-            plan("board", &dup),
-            Err(ProbeError::DuplicateName(_))
-        ));
+        assert!(matches!(plan(1, &dup), Err(ProbeError::DuplicateName(_))));
     }
 }

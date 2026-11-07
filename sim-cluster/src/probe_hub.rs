@@ -6,7 +6,7 @@ use iceoryx2::prelude::Node;
 
 use crate::ipc::{
     IpcError, ProbeAnalogSample, ProbeAnalogSub, ProbeDigitalSample, ProbeDigitalSub,
-    ProbeUartSample, ProbeUartSub, open_analog_subscriber, open_digital_subscriber,
+    ProbeUartSample, ProbeUartSub, format_id_hex, open_analog_subscriber, open_digital_subscriber,
     open_uart_subscriber, probe_id_hash,
 };
 use crate::probe::{PROBE_NAME_CAP, ProbeAdvertisement, ProbeWireKind};
@@ -53,7 +53,7 @@ enum LiveSub {
 pub struct ArbiterProbeHub {
     cluster_key: String,
     catalog: HashMap<u64, ProbeCatalogEntry>,
-    by_name: HashMap<(String, String), u64>,
+    by_name: HashMap<(u64, String), u64>,
     subs: HashMap<u64, LiveSub>,
 }
 
@@ -84,7 +84,7 @@ impl ArbiterProbeHub {
             probe_id: adv.probe_id,
             kind: adv.kind,
         };
-        self.by_name.insert((board_id, adv.name), adv.probe_id);
+        self.by_name.insert((board_hash, adv.name), adv.probe_id);
         self.catalog.insert(adv.probe_id, entry);
     }
 
@@ -154,25 +154,30 @@ impl ArbiterProbeHub {
         Ok(())
     }
 
-    /// Resolve `(board_id, name)` then [`subscribe_probe`].
+    /// Resolve `(board_hash, name)` then [`subscribe_probe`].
     pub fn subscribe_by_name(
         &mut self,
         node: &Node<iceoryx2::prelude::ipc::Service>,
-        board_id: &str,
+        board_hash: u64,
         name: &str,
     ) -> Result<u64, ArbiterProbeError> {
         let probe_id = self
             .by_name
-            .get(&(board_id.to_string(), name.to_string()))
+            .get(&(board_hash, name.to_string()))
             .copied()
             .or_else(|| {
                 // Allow subscribe before advertise using deterministic hash, if kind is known
                 // only via catalog — without catalog we cannot open the right typed sub.
-                let id = probe_id_hash(board_id, name);
+                let id = probe_id_hash(board_hash, name);
                 self.catalog.contains_key(&id).then_some(id)
             })
             .ok_or_else(|| ArbiterProbeError::UnknownName {
-                board_id: board_id.to_string(),
+                board_id: self
+                    .catalog
+                    .values()
+                    .find(|e| e.board_hash == board_hash)
+                    .map(|e| e.board_id.clone())
+                    .unwrap_or_else(|| format_id_hex(board_hash)),
                 name: name.to_string(),
             })?;
         self.subscribe_probe(node, probe_id)?;

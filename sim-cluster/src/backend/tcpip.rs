@@ -486,7 +486,8 @@ mod tests {
                 3,
                 vec![ProbePointName {
                     probe_id: 1,
-                    board_id: "mcu-a".into(),
+                    board_hash: crate::ipc::board_id_hash("mcu-a"),
+                    board_label: "mcu-a".into(),
                     name: "p0".into(),
                     kind: ProbeKind::Digital,
                 }],

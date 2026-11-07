@@ -50,10 +50,16 @@ impl ProbeKind {
     }
 }
 
+/// Probe catalog row used inside the cluster (worker ↔ HTTP / TCP backend).
+///
+/// `board_hash` is serialized as a raw `u64` on this internal wire. Public HTTP
+/// responses use [`ProbeCatalogItem`] with a 16-digit hex `board` string instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbePointName {
     pub probe_id: u64,
-    pub board_id: String,
+    pub board_hash: u64,
+    /// Human-readable board id from the topology (JSON / errors only).
+    pub board_label: String,
     pub name: String,
     pub kind: ProbeKind,
 }
@@ -188,13 +194,12 @@ pub struct ProbeLog {
 
 impl ProbeLog {
     #[must_use]
-    pub fn open(sim_id: &str, board_id: &str) -> Self {
-        Self::with_cap(sim_id, board_id, PROBE_MEM_CAP)
+    pub fn open(sim_id: &str, board_hash: u64) -> Self {
+        Self::with_cap(sim_id, board_hash, PROBE_MEM_CAP)
     }
 
     #[must_use]
-    pub fn with_cap(sim_id: &str, board_id: &str, cap: usize) -> Self {
-        let board_hash = crate::ipc::board_id_hash(board_id);
+    pub fn with_cap(sim_id: &str, board_hash: u64, cap: usize) -> Self {
         let spill_path =
             std::env::temp_dir().join(format!("sim-cluster-probes-{sim_id}-{board_hash:016x}.bin"));
         Self {
@@ -389,7 +394,7 @@ fn probe_names(catalog: &HashMap<u64, ProbePointName>, probe_id: u64) -> (String
         .get(&probe_id)
         .map(|point| {
             (
-                crate::ipc::format_id_hex(crate::ipc::board_id_hash(&point.board_id)),
+                crate::ipc::format_id_hex(point.board_hash),
                 point.name.clone(),
             )
         })
@@ -502,7 +507,7 @@ pub fn csv_header() -> String {
 pub fn csv_record_line(catalog: &[ProbePointName], rec: &ProbeRecord) -> String {
     let point = catalog.iter().find(|point| point.probe_id == rec.probe_id);
     let board = point
-        .map(|p| crate::ipc::format_id_hex(crate::ipc::board_id_hash(&p.board_id)))
+        .map(|p| crate::ipc::format_id_hex(p.board_hash))
         .unwrap_or_default();
     let probe = point.map(|p| p.name.as_str()).unwrap_or("");
     let probe = if probe.is_empty() {
@@ -551,7 +556,8 @@ mod tests {
     fn point(id: u64, kind: ProbeKind) -> ProbePointName {
         ProbePointName {
             probe_id: id,
-            board_id: "board".into(),
+            board_hash: crate::ipc::board_id_hash("board"),
+            board_label: "board".into(),
             name: format!("p{id}"),
             kind,
         }
@@ -579,7 +585,7 @@ mod tests {
 
     #[test]
     fn coarse_keeps_last_digital_and_every_uart_word() {
-        let mut log = ProbeLog::with_cap("coarse-test", "board", 8);
+        let mut log = ProbeLog::with_cap("coarse-test", crate::ipc::board_id_hash("board"), 8);
         log.note_catalog(point(1, ProbeKind::Digital));
         log.note_catalog(point(2, ProbeKind::Uart));
         log.set_running(true);
@@ -608,7 +614,7 @@ mod tests {
 
     #[test]
     fn spill_keeps_oldest_on_disk_and_csv_is_ordered() {
-        let mut log = ProbeLog::with_cap("spill-test", "board", 2);
+        let mut log = ProbeLog::with_cap("spill-test", crate::ipc::board_id_hash("board"), 2);
         log.note_catalog(point(1, ProbeKind::Digital));
         log.push(rec(1, 1, ProbeKind::Digital, 0));
         log.push(rec(1, 2, ProbeKind::Digital, 1));
@@ -631,7 +637,7 @@ mod tests {
 
     #[test]
     fn disk_failure_drops_later_samples() {
-        let mut log = ProbeLog::with_cap("fail-test", "board", 1);
+        let mut log = ProbeLog::with_cap("fail-test", crate::ipc::board_id_hash("board"), 1);
         log.spill_path = PathBuf::from("/dev/null/sim-cluster-probes-fail.bin");
         log.push(rec(1, 1, ProbeKind::Digital, 1));
         log.push(rec(1, 2, ProbeKind::Digital, 2));

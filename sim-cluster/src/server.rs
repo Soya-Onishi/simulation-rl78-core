@@ -494,8 +494,8 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         },
         JobKind::Inspect { id, board_id, req } => match world.sims.get(&id) {
             Some(sim) => match resolve_board_hex(sim, &board_id) {
-                Ok((_, label)) => {
-                    let path = inspect_sock_path(&sim.iox_root, &label);
+                Ok((board_hash, _)) => {
+                    let path = inspect_sock_path(&sim.iox_root, board_hash);
                     match inspect_rpc(&path, &req) {
                         Ok(reply) => JobReply::Inspect(reply),
                         Err(err) => JobReply::Err(ApiError::internal(err)),
@@ -511,13 +511,12 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
                     JobReply::Err(ApiError::conflict("arbiter has exited"))
                 } else {
                     match resolve_board_hex(sim, &board_id) {
-                        Ok((board_hash, _)) => match send_cmd(
-                            sim,
-                            HostCommand::Step { board_hash },
-                        ) {
-                            Ok(()) => JobReply::Accepted,
-                            Err(err) => JobReply::Err(ApiError::internal(err)),
-                        },
+                        Ok((board_hash, _)) => {
+                            match send_cmd(sim, HostCommand::Step { board_hash }) {
+                                Ok(()) => JobReply::Accepted,
+                                Err(err) => JobReply::Err(ApiError::internal(err)),
+                            }
+                        }
                         Err(err) => JobReply::Err(err),
                     }
                 }
@@ -541,7 +540,8 @@ fn create_simulation(
     let actions = ServerActions::create(&iox, &id, topo.boards.len())?;
     let probe_inbox = ServerProbeInbox::create(&iox, &id)?;
     let probe_ctrl = ServerProbeCtrl::create(&iox, &id, topo.boards.len())?;
-    let hashes = build_topology_hashes(&topo).map_err(|err| ServerError::Message(err.to_string()))?;
+    let hashes =
+        build_topology_hashes(&topo).map_err(|err| ServerError::Message(err.to_string()))?;
     let boards = hashes.boards;
     let topology = TopologyView::from_logical(&topo);
     let topo_path = write_temp_topology(&topo)?;
@@ -635,7 +635,6 @@ fn public_nodes(sim: &Simulation) -> Vec<SessionNode> {
         })
         .collect()
 }
-
 
 fn status_event(sim: &Simulation) -> StatusEvent {
     StatusEvent {
@@ -780,7 +779,7 @@ fn ingest_probe(sim: &mut Simulation, sample: &crate::ipc::ProbeToServer) -> Opt
         MSG_CATALOG => {
             let name_len = usize::from(sample.name_len).min(sample.name.len());
             let name = String::from_utf8_lossy(&sample.name[..name_len]).into_owned();
-            let board_id = sim
+            let board_label = sim
                 .boards
                 .get(&sample.board_hash)
                 .cloned()
@@ -789,7 +788,8 @@ fn ingest_probe(sim: &mut Simulation, sample: &crate::ipc::ProbeToServer) -> Opt
                 sample.probe_id,
                 ProbePointName {
                     probe_id: sample.probe_id,
-                    board_id,
+                    board_hash: sample.board_hash,
+                    board_label,
                     name,
                     kind,
                 },
@@ -824,8 +824,8 @@ fn probe_catalog_items(sim: &Simulation) -> Result<Vec<ProbeCatalogItem>, ApiErr
         .probe_catalog
         .values()
         .map(|point| ProbeCatalogItem {
-            board: format_id_hex(board_id_hash(&point.board_id)),
-            board_label: point.board_id.clone(),
+            board: format_id_hex(point.board_hash),
+            board_label: point.board_label.clone(),
             probe: point.name.clone(),
             kind: point.kind.as_str().to_string(),
         })
@@ -839,9 +839,11 @@ fn resolve_probes(sim: &Simulation, probes: &[ProbeRef]) -> Result<Vec<u64>, Api
     let mut ids = Vec::with_capacity(probes.len());
     for probe in probes {
         let (board_hash, _) = resolve_board_hex(sim, &probe.board)?;
-        let Some((id, _)) = sim.probe_catalog.iter().find(|(_, point)| {
-            board_id_hash(&point.board_id) == board_hash && point.name == probe.name
-        }) else {
+        let Some((id, _)) = sim
+            .probe_catalog
+            .iter()
+            .find(|(_, point)| point.board_hash == board_hash && point.name == probe.name)
+        else {
             return Err(ApiError::not_found(format!(
                 "unknown probe {}/{}",
                 probe.board, probe.name
@@ -920,8 +922,7 @@ fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
         .collect();
     for id in &sim.watch.probe_ids {
         if let Some(point) = sim.probe_catalog.get(id) {
-            let board_hash = crate::ipc::board_id_hash(&point.board_id);
-            by_board.entry(board_hash).or_default().insert(*id);
+            by_board.entry(point.board_hash).or_default().insert(*id);
         }
     }
     for (board_hash, ids) in by_board {
@@ -940,10 +941,7 @@ fn query_latest(
     let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
     for id in probe_ids {
         if let Some(point) = sim.probe_catalog.get(id) {
-            by_board
-                .entry(crate::ipc::board_id_hash(&point.board_id))
-                .or_default()
-                .push(*id);
+            by_board.entry(point.board_hash).or_default().push(*id);
         }
     }
     let expected: HashSet<u64> = by_board.keys().copied().collect();
@@ -967,10 +965,7 @@ fn query_range(
     let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
     for id in probe_ids {
         if let Some(point) = sim.probe_catalog.get(id) {
-            by_board
-                .entry(crate::ipc::board_id_hash(&point.board_id))
-                .or_default()
-                .push(*id);
+            by_board.entry(point.board_hash).or_default().push(*id);
         }
     }
     let expected: HashSet<u64> = by_board.keys().copied().collect();
@@ -1043,7 +1038,7 @@ fn start_csv(
     let mut by_board: HashMap<u64, Vec<u64>> = HashMap::new();
     for point in sim.probe_catalog.values() {
         by_board
-            .entry(crate::ipc::board_id_hash(&point.board_id))
+            .entry(point.board_hash)
             .or_default()
             .push(point.probe_id);
     }
@@ -1239,9 +1234,7 @@ fn push_log(sim: &mut Simulation, record: &ClusterLog) {
     let board = board_label
         .as_ref()
         .map(|_| format_id_hex(record.board_hash()));
-    let who = board_label
-        .as_deref()
-        .unwrap_or(record.origin().as_str());
+    let who = board_label.as_deref().unwrap_or(record.origin().as_str());
     println!(
         "[{}] [{}] {who}: {}",
         sim.id,

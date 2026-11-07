@@ -8,15 +8,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sim_kernel::{Command, Entity, InspectResult, Response, Simulator};
 
-use crate::ipc::board_id_hash;
-
 /// Maximum memory payload per inspect call (gdbstub chunks larger reads).
 pub const MEM_CHUNK: u32 = 1024;
 
 /// Socket path under the cluster iceoryx root.
 #[must_use]
-pub fn inspect_sock_path(iox_root: &Path, board_id: &str) -> PathBuf {
-    iox_root.join(format!("inspect-{:016x}.sock", board_id_hash(board_id)))
+pub fn inspect_sock_path(iox_root: &Path, board_hash: u64) -> PathBuf {
+    iox_root.join(format!("inspect-{board_hash:016x}.sock"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,8 +46,8 @@ pub struct InspectServer {
 }
 
 impl InspectServer {
-    pub fn bind(iox_root: &Path, board_id: &str) -> std::io::Result<Self> {
-        let path = inspect_sock_path(iox_root, board_id);
+    pub fn bind(iox_root: &Path, board_hash: u64) -> std::io::Result<Self> {
+        let path = inspect_sock_path(iox_root, board_hash);
         let _ = std::fs::remove_file(&path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -220,7 +218,10 @@ mod tests {
 
     #[test]
     fn sock_path_uses_board_hash() {
-        let path = inspect_sock_path(std::path::Path::new("/tmp/iox"), "mcu-a");
+        let path = inspect_sock_path(
+            std::path::Path::new("/tmp/iox"),
+            crate::ipc::board_id_hash("mcu-a"),
+        );
         assert!(
             path.file_name()
                 .unwrap()

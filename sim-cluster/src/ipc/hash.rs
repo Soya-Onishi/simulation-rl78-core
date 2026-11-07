@@ -22,11 +22,11 @@ pub fn probe_name_hash(name: &str) -> u64 {
     sim_kernel::id_hash(name)
 }
 
-/// Cluster-wide probe id: `xxh3(board_id || 0x00 || name)`.
+/// Cluster-wide probe id: `xxh3(board_hash_le || 0x00 || name)`.
 #[must_use]
-pub fn probe_id_hash(board_id: &str, name: &str) -> u64 {
-    let mut bytes = Vec::with_capacity(board_id.len() + 1 + name.len());
-    bytes.extend_from_slice(board_id.as_bytes());
+pub fn probe_id_hash(board_hash: u64, name: &str) -> u64 {
+    let mut bytes = Vec::with_capacity(8 + 1 + name.len());
+    bytes.extend_from_slice(&board_hash.to_le_bytes());
     bytes.push(0);
     bytes.extend_from_slice(name.as_bytes());
     xxh3_64(&bytes)
@@ -66,7 +66,9 @@ pub fn id_hash_table<'a>(
     for id in ids {
         let h = hash(id);
 
-        if let Some(existing) = table.insert(h, id.to_string()) && existing != id {
+        if let Some(existing) = table.insert(h, id.to_string())
+            && existing != id
+        {
             return Err(format!(
                 "hash collision between '{existing}' and '{id}' (hash={h:#x})"
             ));
@@ -116,18 +118,31 @@ mod tests {
 
     #[test]
     fn probe_id_includes_board_and_name() {
-        assert_eq!(probe_id_hash("a", "vcc"), probe_id_hash("a", "vcc"));
-        assert_ne!(probe_id_hash("a", "vcc"), probe_id_hash("b", "vcc"));
-        assert_ne!(probe_id_hash("a", "vcc"), probe_id_hash("a", "gnd"));
-        // NUL separator avoids `ab`+`c` vs `a`+`bc` ambiguity.
-        assert_ne!(probe_id_hash("ab", "c"), probe_id_hash("a", "bc"));
+        let a = board_id_hash("a");
+        let b = board_id_hash("b");
+        assert_eq!(probe_id_hash(a, "vcc"), probe_id_hash(a, "vcc"));
+        assert_ne!(probe_id_hash(a, "vcc"), probe_id_hash(b, "vcc"));
+        assert_ne!(probe_id_hash(a, "vcc"), probe_id_hash(a, "gnd"));
+    }
+
+    #[test]
+    fn probe_id_hash_uses_board_hash_le_bytes() {
+        let board_hash: u64 = 0x0123_4567_89ab_cdef;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&board_hash.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(b"vcc");
+        assert_eq!(probe_id_hash(board_hash, "vcc"), xxh3_64(&bytes));
     }
 
     #[test]
     fn table_allows_same_string_twice() {
         let table = board_hash_table(["a", "a"]).unwrap();
         assert_eq!(table.len(), 1);
-        assert_eq!(table.get(&board_id_hash("a")).map(String::as_str), Some("a"));
+        assert_eq!(
+            table.get(&board_id_hash("a")).map(String::as_str),
+            Some("a")
+        );
     }
 
     #[test]
@@ -144,7 +159,10 @@ mod tests {
     #[test]
     fn edge_id_hash_matches_logical_xxh3() {
         let logical = "a:tx->b:rx";
-        assert_eq!(edge_id_hash("a", "tx", "b", "rx"), xxh3_64(logical.as_bytes()));
+        assert_eq!(
+            edge_id_hash("a", "tx", "b", "rx"),
+            xxh3_64(logical.as_bytes())
+        );
     }
 
     #[test]
@@ -156,4 +174,3 @@ mod tests {
         assert!(err.contains("right"));
     }
 }
-
