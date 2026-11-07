@@ -34,7 +34,7 @@ use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
 /// Idle sleep when not Running, waiting on the allowed ceiling, or guest-halted.
 pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
 
-/// Options for [`run_board`].
+/// Options for [`run_node`].
 #[derive(Clone, Debug)]
 pub struct BoardOptions {
     pub board_id: String,
@@ -137,6 +137,45 @@ pub fn board_usage(prog: &str) -> String {
          Spawned by cluster-arbiter. Starts AwaitingStartup, becomes Stopped after\n\
          StartupRecord (Ready), and runs only after Start.\n"
     )
+}
+
+/// Expand a board/plant binary `main` that parses CLI args and calls [`run_node`].
+///
+/// Place at crate root (e.g. `main.rs`). Defines `fn main`, so the crate must not
+/// define another `main`. The argument must satisfy
+/// `FnOnce() -> (impl Entity, BoardPorts, Vec<ProbePoint>)` (same as [`run_node`]'s
+/// builder).
+///
+/// ```ignore
+/// sim_cluster::node!(g23_machine);
+/// ```
+#[macro_export]
+macro_rules! node {
+    ($build:expr $(,)?) => {
+        fn main() {
+            let mut argv = ::std::env::args();
+            let prog = argv
+                .next()
+                .unwrap_or_else(|| ::std::env!("CARGO_PKG_NAME").into());
+            let opts = match $crate::parse_board_args(&prog, argv) {
+                ::std::result::Result::Ok(opts) => opts,
+                ::std::result::Result::Err($crate::BoardCliError::Help) => {
+                    ::std::eprint!("{}", $crate::board_usage(&prog));
+                    ::std::process::exit(0);
+                }
+                ::std::result::Result::Err($crate::BoardCliError::Message(msg)) => {
+                    ::std::eprintln!("{msg}");
+                    ::std::eprint!("{}", $crate::board_usage(&prog));
+                    ::std::process::exit(2);
+                }
+            };
+
+            if let ::std::result::Result::Err(err) = $crate::run_node(opts, $build) {
+                ::std::eprintln!("{}: {err}", ::std::env!("CARGO_PKG_NAME"));
+                ::std::process::exit(1);
+            }
+        }
+    };
 }
 
 /// Map a simulator stop to a cluster [`HostStopReason`], if any.

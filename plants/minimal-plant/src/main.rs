@@ -1,13 +1,10 @@
 //! Minimal plant — first-order lag on analog `vin` / `vout`.
 //!
-//! Hands control to [`sim_cluster::run_node`]. No firmware; [`sim_kernel::Model::dt`]
-//! is 1 ms and the time constant is 5 s.
+//! Hands control to [`sim_cluster::run_node`] via [`sim_cluster::node!`].
+//! No firmware; [`sim_kernel::Model::dt`] is 1 ms and the time constant is 5 s.
 
-use std::env;
-use std::process;
 use std::sync::{Arc, Mutex};
 
-use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_node};
 use sim_kernel::{
     AnalogVoltage, BoardPorts, InPort, Model, NS_PER_SEC, OutPort, Plant, ProbePoint, ProbePolicy,
     ProbeTap, SourcePort, Tick, Wire,
@@ -18,27 +15,7 @@ const DT: Tick = Tick(1_000_000);
 /// Time constant T = 5 s, in nanoseconds.
 const TAU_NS: f64 = 5.0 * NS_PER_SEC as f64;
 
-fn main() {
-    let mut argv = env::args();
-    let prog = argv.next().unwrap_or_else(|| "minimal-plant".into());
-    let opts = match parse_board_args(&prog, argv) {
-        Ok(opts) => opts,
-        Err(BoardCliError::Help) => {
-            eprint!("{}", board_usage(&prog));
-            process::exit(0);
-        }
-        Err(BoardCliError::Message(msg)) => {
-            eprintln!("{msg}");
-            eprint!("{}", board_usage(&prog));
-            process::exit(2);
-        }
-    };
-
-    if let Err(err) = run_node(opts, build_plant) {
-        eprintln!("minimal-plant: {err}");
-        process::exit(1);
-    }
-}
+sim_cluster::node!(build_plant);
 
 /// First-order lag `y' = (u - y) / T` with forward Euler.
 pub struct FirstOrderLag {

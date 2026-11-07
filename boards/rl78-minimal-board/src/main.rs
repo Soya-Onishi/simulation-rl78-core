@@ -1,13 +1,8 @@
 //! RL78 minimal board — cluster board binary with a fixed ROM/RAM map.
 //!
-//! Assembles [`g23_machine`] and hands control to [`sim_cluster::run_board`].
+//! Assembles [`g23_machine`] and hands control to [`sim_cluster::run_node`] via [`sim_cluster::node!`].
 //! Firmware loading (if the topology lists an ELF) is performed by the
 //! framework via [`sim_kernel::Machine::load_firmware`].
-
-use std::env;
-use std::process;
-
-use sim_cluster::{BoardCliError, board_usage, parse_board_args, run_node};
 
 use std::sync::Arc;
 
@@ -18,27 +13,7 @@ use sim_kernel::{
     UnmappedPolicy, Wire,
 };
 
-fn main() {
-    let mut argv = env::args();
-    let prog = argv.next().unwrap_or_else(|| "rl78-minimal-board".into());
-    let opts = match parse_board_args(&prog, argv) {
-        Ok(opts) => opts,
-        Err(BoardCliError::Help) => {
-            eprint!("{}", board_usage(&prog));
-            process::exit(0);
-        }
-        Err(BoardCliError::Message(msg)) => {
-            eprintln!("{msg}");
-            eprint!("{}", board_usage(&prog));
-            process::exit(2);
-        }
-    };
-
-    if let Err(err) = run_node(opts, g23_machine) {
-        eprintln!("rl78-minimal-board: {err}");
-        process::exit(1);
-    }
-}
+sim_cluster::node!(g23_machine);
 
 /// RL78/G23 + R7F100GxL RAM/ROM. Option byte is applied at core reset from ROM.
 ///
