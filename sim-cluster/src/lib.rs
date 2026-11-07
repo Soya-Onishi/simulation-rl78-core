@@ -3,8 +3,9 @@
 //!
 //! Process IPC (iceoryx2 pub/sub) lives here so [`sim_kernel`] stays free of
 //! transport dependencies. Architecture crates and the single-board CLI are
-//! unchanged. Board binaries use [`board_runtime::run_board`] for the shared
-//! cluster participation loop (see `rl78-minimal-board` / `minimal-plant`).
+//! unchanged. Board/plant binaries use [`node!`] + [`board_runtime::run_node`]
+//! for the shared cluster participation loop (see `rl78-minimal-board` /
+//! `minimal-plant`).
 
 pub mod action;
 pub mod arbiter;
