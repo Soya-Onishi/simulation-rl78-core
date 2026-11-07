@@ -9,6 +9,7 @@
 
 pub mod action;
 pub mod arbiter;
+mod arbiter_catalog;
 pub mod backend;
 pub mod board_runtime;
 pub mod cluster_stop;
@@ -35,8 +36,8 @@ pub mod topology;
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
 pub use board_runtime::{
-    BoardCliError, BoardError, BoardOptions, board_usage, cluster_host_stop_reason, list_catalog,
-    parse_board_args, run_node,
+    BoardCliError, BoardError, BoardOptions, CatalogAction, CatalogDump, CatalogProbe, board_usage,
+    cluster_host_stop_reason, list_catalog, parse_board_args, run_node,
 };
 pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
@@ -55,10 +56,7 @@ pub use probe::{
     MAX_PROBES_PER_BOARD, NodeProbeRuntime, PROBE_NAME_CAP, ProbeAdvertisement, ProbeError,
     ProbePublishers, ProbeWireKind,
 };
-pub use probe_hub::{
-    ArbiterProbeError, ArbiterProbeHub, ProbeCatalogEntry, ProbeSample, pack_probe_name,
-    unpack_probe_name,
-};
+pub use probe_hub::{ArbiterProbeError, ArbiterProbeHub, ProbeCatalogEntry, ProbeSample};
 pub use server::{ServerError, ServerOptions, run_backend, spawn_worker};
 pub use sim_kernel::{ProbePoint, ProbePolicy, ProbeTap, UartFrame};
 pub use time_sync::TimeCeiling;

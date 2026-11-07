@@ -9,7 +9,7 @@ use crate::ipc::{
     ProbeUartSample, ProbeUartSub, open_analog_subscriber, open_digital_subscriber,
     open_uart_subscriber, probe_id_hash,
 };
-use crate::probe::{PROBE_NAME_CAP, ProbeAdvertisement, ProbeWireKind};
+use crate::probe::{ProbeAdvertisement, ProbeWireKind};
 
 /// One advertised probe known to the arbiter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,7 +68,7 @@ impl ArbiterProbeHub {
         }
     }
 
-    /// Record a node [`ProbeAdvertise`](crate::control::ControlToArbiter::ProbeAdvertise).
+    /// Record one probe into the catalog (from `--list-catalog` or tests).
     pub fn record_advertise(
         &mut self,
         board_id: impl Into<String>,
@@ -86,29 +86,6 @@ impl ArbiterProbeHub {
         };
         self.by_name.insert((board_hash, adv.name), adv.probe_id);
         self.catalog.insert(adv.probe_id, entry);
-    }
-
-    /// Record from a raw control-plane advertise payload.
-    pub fn record_wire_advertise(
-        &mut self,
-        board_id: impl Into<String>,
-        board_hash: crate::ipc::HashedId<u64>,
-        name_hash: crate::ipc::HashedId<u64>,
-        probe_id: crate::ipc::HashedId<u64>,
-        kind: ProbeWireKind,
-        name_bytes: &[u8],
-    ) {
-        let name = String::from_utf8_lossy(name_bytes).into_owned();
-        self.record_advertise(
-            board_id,
-            board_hash,
-            ProbeAdvertisement {
-                name,
-                name_hash,
-                probe_id,
-                kind,
-            },
-        );
     }
 
     #[must_use]
@@ -242,20 +219,4 @@ impl ArbiterProbeHub {
         }
         Ok(out)
     }
-}
-
-/// Pack a probe name into the fixed control-plane buffer.
-#[must_use]
-pub fn pack_probe_name(name: &str) -> ([u8; PROBE_NAME_CAP], u8) {
-    let mut buf = [0u8; PROBE_NAME_CAP];
-    let n = name.len().min(PROBE_NAME_CAP);
-    buf[..n].copy_from_slice(&name.as_bytes()[..n]);
-    (buf, n as u8)
-}
-
-/// Unpack a probe name from the control-plane buffer.
-#[must_use]
-pub fn unpack_probe_name(buf: &[u8; PROBE_NAME_CAP], len: u8) -> String {
-    let n = (len as usize).min(PROBE_NAME_CAP);
-    String::from_utf8_lossy(&buf[..n]).into_owned()
 }

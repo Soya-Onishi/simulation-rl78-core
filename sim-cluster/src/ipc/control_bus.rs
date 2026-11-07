@@ -12,8 +12,10 @@ use crate::probe::MAX_PROBES_PER_BOARD;
 use super::names;
 use super::runtime::IpcError;
 
-/// n2a slots for one startup burst: every board may send
-/// [`MAX_PROBES_PER_BOARD`] advertisements plus one `Ready` before the arbiter drains.
+/// n2a subscriber capacity scales with board count.
+///
+/// Catalogs no longer arrive on control IPC; headroom covers `Ready` plus later
+/// `TimeReport` / `HostStop` bursts.
 #[must_use]
 fn n2a_subscriber_buffer(board_count: usize) -> usize {
     board_count.max(1) * (MAX_PROBES_PER_BOARD + 1)
