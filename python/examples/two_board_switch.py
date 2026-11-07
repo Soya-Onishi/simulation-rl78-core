@@ -1,4 +1,4 @@
-from topology_dsl import Root, Topology
+from topology_dsl import SimulationConfig, Topology, simulation
 
 ELF_TX = "https://github.com/Soya-Onishi/rl78-uart-sample/raw/refs/heads/main/button-uart-tx/main.abs"
 ELF_RX = "https://github.com/Soya-Onishi/rl78-uart-sample/raw/refs/heads/main/uart-rx/main.abs"
@@ -20,11 +20,10 @@ class TwoBoardSwitch(Topology):
         self.connect(a.port("uart0_tx"), b.port("uart0_rx"))
 
 
-class TwoBoardSwitchRoot(Root):
-    def configure(self) -> None:
-        self.margin_ns = 200_000
-        self.headroom_threshold_ns = 100_000
-        self.topology = TwoBoardSwitch(name="demo", elf_a=ELF_TX, elf_b=ELF_RX)
-
-
-TwoBoardSwitchRoot().emit()
+@simulation
+def two_board_switch() -> SimulationConfig:
+    return SimulationConfig(
+        margin_ns=200_000,
+        headroom_threshold_ns=100_000,
+        topology=TwoBoardSwitch(name="demo", elf_a=ELF_TX, elf_b=ELF_RX),
+    )

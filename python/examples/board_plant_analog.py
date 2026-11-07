@@ -1,6 +1,6 @@
 """Example: RL78 board analog DAC into a first-order-lag plant."""
 
-from topology_dsl import Root, Topology
+from topology_dsl import SimulationConfig, Topology, simulation
 
 
 class BoardPlantAnalog(Topology):
@@ -13,11 +13,10 @@ class BoardPlantAnalog(Topology):
         self.connect(a.port("dac0"), p.port("vin"))
 
 
-class BoardPlantAnalogRoot(Root):
-    def configure(self) -> None:
-        self.margin_ns = 200_000
-        self.headroom_threshold_ns = 100_000
-        self.topology = BoardPlantAnalog(name="demo")
-
-
-BoardPlantAnalogRoot().emit()
+@simulation
+def board_plant_analog() -> SimulationConfig:
+    return SimulationConfig(
+        margin_ns=200_000,
+        headroom_threshold_ns=100_000,
+        topology=BoardPlantAnalog(name="demo"),
+    )

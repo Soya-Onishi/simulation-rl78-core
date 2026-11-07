@@ -1,8 +1,9 @@
 """Hierarchical Python DSL for logical multi-board topologies.
 
-Define a concrete ``Topology`` (``build``) and wrap it in a concrete ``Root``
-(``configure``). Scripts call ``Root.emit()`` to produce flat simulation JSON;
-``python -m topology_dsl run|create <script.py>`` loads that emitted dict.
+Define a concrete ``Topology`` (``build``) and a ``@simulation`` function that
+returns ``SimulationConfig``. ``python -m topology_dsl run|create <script.py>``
+loads the script, requires exactly one ``@simulation`` function, and turns its
+config into flat simulation JSON.
 
 ``create`` embeds local ELF files as ``base64:``, POSTs ``/api/simulation`` on a
 running simulation-frontend (start ``cluster-backend`` first), and prints the
@@ -20,6 +21,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -265,30 +267,18 @@ class Topology(ABC):
         return edges
 
 
-class Root(ABC):
-    """Entry point that configures timing and owns the root Topology."""
+@dataclass
+class SimulationConfig:
+    """Timing settings plus the root ``Topology`` for one simulation."""
 
-    def __init__(self) -> None:
-        self.margin_ns: int | None = None
-        self.headroom_threshold_ns: int | None = None
-        self.ready_timeout_ms: int | None = None
-        self.topology: Topology | None = None
+    margin_ns: int
+    headroom_threshold_ns: int
+    topology: Topology
+    ready_timeout_ms: int | None = None
 
-    @abstractmethod
-    def configure(self) -> None:
-        """Set timing fields and assign ``self.topology``."""
-
-    def emit(self) -> dict[str, Any]:
-        self.topology = None
-        self.configure()
-        if self.topology is None:
-            raise RuntimeError("Root.configure() must assign self.topology")
-        if self.margin_ns is None or self.headroom_threshold_ns is None:
-            raise RuntimeError(
-                "Root.configure() must set margin_ns and headroom_threshold_ns"
-            )
+    def to_dict(self) -> dict[str, Any]:
         if self.topology._parent is not None:
-            raise RuntimeError("Root.topology must be a top-level Topology")
+            raise RuntimeError("SimulationConfig.topology must be a top-level Topology")
         self.topology._run_build()
         boards = self.topology._collect_boards()
         out: dict[str, Any] = {
@@ -299,12 +289,18 @@ class Root(ABC):
         }
         if self.ready_timeout_ms is not None:
             out["ready_timeout_ms"] = self.ready_timeout_ms
-        global _LAST_EMITTED
-        _LAST_EMITTED = out
         return out
 
 
-_LAST_EMITTED: dict[str, Any] | None = None
+_SIMULATION_FNS: list[Callable[[], SimulationConfig]] = []
+
+
+def simulation(
+    fn: Callable[[], SimulationConfig],
+) -> Callable[[], SimulationConfig]:
+    """Mark a topology factory for CLI discovery (exactly one per script)."""
+    _SIMULATION_FNS.append(fn)
+    return fn
 
 
 DEFAULT_SERVER = "http://127.0.0.1:8090"
@@ -321,15 +317,26 @@ def _usage(code: int) -> None:
 
 
 def _load_emitted(path: str) -> dict[str, Any]:
-    global _LAST_EMITTED
-    _LAST_EMITTED = None
+    _SIMULATION_FNS.clear()
     runpy.run_path(path, run_name="__main__")
-    if _LAST_EMITTED is None:
+    if len(_SIMULATION_FNS) == 0:
         raise SystemExit(
-            "topology script did not call Root.emit(); "
-            "the runner requires emit() so logical JSON can be captured"
+            "topology script has no @simulation function; "
+            "define exactly one () -> SimulationConfig factory"
         )
-    return _LAST_EMITTED
+    if len(_SIMULATION_FNS) > 1:
+        names = ", ".join(getattr(fn, "__name__", repr(fn)) for fn in _SIMULATION_FNS)
+        raise SystemExit(
+            f"topology script has {len(_SIMULATION_FNS)} @simulation functions "
+            f"({names}); define exactly one"
+        )
+    config = _SIMULATION_FNS[0]()
+    if not isinstance(config, SimulationConfig):
+        raise SystemExit(
+            "@simulation function must return SimulationConfig, "
+            f"got {type(config).__name__}"
+        )
+    return config.to_dict()
 
 
 def _elf_kind(elf: str) -> str:

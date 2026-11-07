@@ -1,10 +1,10 @@
-"""Hierarchy / Root.emit tests for topology_dsl."""
+"""Hierarchy / SimulationConfig tests for topology_dsl."""
 
 from __future__ import annotations
 
 import unittest
 
-from topology_dsl import Root, Topology
+from topology_dsl import SimulationConfig, Topology
 
 
 class PairTopo(Topology):
@@ -25,17 +25,6 @@ class PairTopo(Topology):
         self.export("rx", b.port("rx"))
 
 
-class NestedRoot(Root):
-    def __init__(self, *, left_elf: str | None = None) -> None:
-        super().__init__()
-        self._left_elf = left_elf
-
-    def configure(self) -> None:
-        self.margin_ns = 1000
-        self.headroom_threshold_ns = 200
-        self.topology = _SysTopo(name="sys", left_elf=self._left_elf)
-
-
 class _SysTopo(Topology):
     def __init__(self, name: str, *, left_elf: str | None = None) -> None:
         super().__init__(name)
@@ -46,32 +35,25 @@ class _SysTopo(Topology):
         right = self.board("d", kind="rl78")
         right.endpoint("rx", direction="in", payload="uart")
         right.endpoint("tx", direction="out", payload="uart")
-        # Connect left's exported tx (leaf a) into local board d.
         self.connect(left.port("tx"), right.port("rx"))
 
 
-class FlatRoot(Root):
-    def configure(self) -> None:
-        self.margin_ns = 1
-        self.headroom_threshold_ns = 1
-        self.topology = _FlatTopo(name="demo")
-
-
-class _FlatTopo(Topology):
-    def build(self) -> None:
-        a = self.board("a", elf="fw.bin")
-        a.endpoint("tx", direction="out", payload="uart")
+def nested_config(*, left_elf: str | None = None) -> SimulationConfig:
+    return SimulationConfig(
+        margin_ns=1000,
+        headroom_threshold_ns=200,
+        topology=_SysTopo(name="sys", left_elf=left_elf),
+    )
 
 
 class HierarchyEmitTests(unittest.TestCase):
     def test_full_ids_and_route(self) -> None:
-        out = NestedRoot(left_elf="https://example.test/a.elf").emit()
+        out = nested_config(left_elf="https://example.test/a.elf").to_dict()
         ids = {b["id"] for b in out["boards"]}
         self.assertEqual(ids, {"sys/left/a", "sys/left/b", "sys/d"})
         self.assertEqual(out["margin_ns"], 1000)
         self.assertEqual(out["headroom_threshold_ns"], 200)
 
-        # Edges: left internal a->b, plus sys-level left.tx -> d.rx
         self.assertEqual(len(out["edges"]), 2)
         cross = next(
             e
@@ -95,20 +77,17 @@ class HierarchyEmitTests(unittest.TestCase):
         class Bad(Topology):
             def build(self) -> None:
                 child = self.add_child(PairTopo(name="left"))
-                # Reach into child leaf — not visible at this level.
                 leaf = child._boards["a"].port("tx")
                 d = self.board("d")
                 d.endpoint("rx", direction="in", payload="uart")
                 self.connect(leaf, d.port("rx"))
 
-        class BadRoot(Root):
-            def configure(self) -> None:
-                self.margin_ns = 1
-                self.headroom_threshold_ns = 1
-                self.topology = Bad(name="sys")
-
         with self.assertRaises(RuntimeError):
-            BadRoot().emit()
+            SimulationConfig(
+                margin_ns=1,
+                headroom_threshold_ns=1,
+                topology=Bad(name="sys"),
+            ).to_dict()
 
     def test_rejects_mutate_child_after_add_child(self) -> None:
         caught: list[BaseException] = []
@@ -121,13 +100,11 @@ class HierarchyEmitTests(unittest.TestCase):
                 except RuntimeError as err:
                     caught.append(err)
 
-        class R(Root):
-            def configure(self) -> None:
-                self.margin_ns = 1
-                self.headroom_threshold_ns = 1
-                self.topology = Parent(name="sys")
-
-        R().emit()
+        SimulationConfig(
+            margin_ns=1,
+            headroom_threshold_ns=1,
+            topology=Parent(name="sys"),
+        ).to_dict()
         self.assertEqual(len(caught), 1)
 
     def test_rejects_board_child_name_collision(self) -> None:
@@ -136,19 +113,16 @@ class HierarchyEmitTests(unittest.TestCase):
                 self.board("left")
                 self.add_child(PairTopo(name="left"))
 
-        class R(Root):
-            def configure(self) -> None:
-                self.margin_ns = 1
-                self.headroom_threshold_ns = 1
-                self.topology = Collision(name="sys")
-
         with self.assertRaises(ValueError):
-            R().emit()
+            SimulationConfig(
+                margin_ns=1,
+                headroom_threshold_ns=1,
+                topology=Collision(name="sys"),
+            ).to_dict()
 
-    def test_emit_can_rerun_on_same_root(self) -> None:
-        root = NestedRoot(left_elf="https://example.test/a.elf")
-        first = root.emit()
-        second = root.emit()
+    def test_factory_can_rerun(self) -> None:
+        first = nested_config(left_elf="https://example.test/a.elf").to_dict()
+        second = nested_config(left_elf="https://example.test/a.elf").to_dict()
         self.assertEqual(first["boards"], second["boards"])
         self.assertEqual(first["edges"], second["edges"])
 

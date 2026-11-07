@@ -6,7 +6,9 @@ This is not a product system test. Real cases live in the development project.
 
 from __future__ import annotations
 
-from systemtest import Duration, Root, Topology, sim_case, Simulation
+from topology_dsl import SimulationConfig, Topology
+
+from systemtest import Duration, Simulation, sim_case
 
 
 class PlantTopo(Topology):
@@ -19,14 +21,15 @@ class PlantTopo(Topology):
         self.connect(board.port("dac0"), plant.port("vin"))
 
 
-class PlantRoot(Root):
-    def configure(self) -> None:
-        self.margin_ns = 200_000
-        self.headroom_threshold_ns = 100_000
-        self.topology = PlantTopo(name="demo")
+def plant_config() -> SimulationConfig:
+    return SimulationConfig(
+        margin_ns=200_000,
+        headroom_threshold_ns=100_000,
+        topology=PlantTopo(name="demo"),
+    )
 
 
-@sim_case(root=PlantRoot())
+@sim_case(config=plant_config)
 def test_plant_wait_and_analog_latest(sim: Simulation) -> None:
     sim.wait(Duration.ms(1))
     sim.analog("demo/a", "dac0").latest()

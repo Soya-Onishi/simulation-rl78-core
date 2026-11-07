@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from topology_dsl import Root, Topology
+from topology_dsl import SimulationConfig, Topology
 
 from systemtest.simulation import Simulation
 
@@ -67,9 +69,6 @@ def _empty_topology() -> dict:
 
 class SimulationInitTests(unittest.TestCase):
     def test_create_embeds_local_elf_as_base64(self) -> None:
-        import tempfile
-        from pathlib import Path
-
         with tempfile.TemporaryDirectory() as tmp:
             elf = Path(tmp) / "fw.bin"
             elf.write_bytes(b"ABC")
@@ -79,17 +78,18 @@ class SimulationInitTests(unittest.TestCase):
                 def build(self) -> None:
                     self.board("a", elf=str(elf))
 
-            class R(Root):
-                def configure(self) -> None:
-                    self.margin_ns = 1
-                    self.headroom_threshold_ns = 1
-                    self.topology = T(name="demo")
+            def config() -> SimulationConfig:
+                return SimulationConfig(
+                    margin_ns=1,
+                    headroom_threshold_ns=1,
+                    topology=T(name="demo"),
+                )
 
             with (
                 patch("systemtest.simulation.ClusterClient", lambda *_a, **_k: client),
                 patch("systemtest.simulation.ViewerHold", _FakeViewer),
             ):
-                Simulation(topology=R().emit(), csv=False, testname="t")
+                Simulation(topology=config().to_dict(), csv=False, testname="t")
 
             self.assertEqual(client.topologies[0]["boards"][0]["elf"], "base64:QUJD")
             self.assertEqual(client.topologies[0]["boards"][0]["id"], "demo/a")

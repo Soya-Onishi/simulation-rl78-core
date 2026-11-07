@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from topology_dsl import Root, embed_local_elfs
+from topology_dsl import SimulationConfig, embed_local_elfs
 
 from systemtest.client import ClusterClient, ViewerHold, default_base_url
 from systemtest.duration import Duration
@@ -264,16 +265,22 @@ class Simulation:
 
 
 def open_simulation(
-    root: Root,
+    config: Callable[[], SimulationConfig],
     *,
     csv: bool,
     testname: str,
     base_url: str | None = None,
 ) -> Simulation:
-    if not isinstance(root, Root):
-        raise TypeError("open_simulation expects a topology_dsl.Root instance")
+    if not callable(config):
+        raise TypeError("open_simulation expects a () -> SimulationConfig factory")
+    built = config()
+    if not isinstance(built, SimulationConfig):
+        raise TypeError(
+            "config factory must return SimulationConfig, "
+            f"got {type(built).__name__}"
+        )
     return Simulation(
-        topology=root.emit(),
+        topology=built.to_dict(),
         csv=csv,
         testname=testname,
         base_url=base_url or default_base_url(),
