@@ -59,7 +59,6 @@ pub fn parse_id_hex(text: &str) -> Option<u64> {
 /// The same string may appear more than once. Distinct strings that share a
 /// hash are an error.
 pub fn id_hash_table<'a>(
-    kind: &str,
     hash: impl Fn(&str) -> u64,
     ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<HashMap<u64, String>, String> {
@@ -69,7 +68,7 @@ pub fn id_hash_table<'a>(
         match table.get(&h) {
             Some(existing) if existing != id => {
                 return Err(format!(
-                    "{kind} hash collision between '{existing}' and '{id}' (hash={h:#x})"
+                    "hash collision between '{existing}' and '{id}' (hash={h:#x})"
                 ));
             }
             Some(_) => {}
@@ -85,28 +84,28 @@ pub fn id_hash_table<'a>(
 pub fn board_hash_table<'a>(
     board_ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<HashMap<u64, String>, String> {
-    id_hash_table("board_id", board_id_hash, board_ids)
+    id_hash_table(board_id_hash, board_ids)
 }
 
 /// Build reverse lookup for path strings (`boards[].id` and edge route paths).
 pub fn path_hash_table<'a>(
     paths: impl IntoIterator<Item = &'a str>,
 ) -> Result<HashMap<u64, String>, String> {
-    id_hash_table("path", board_id_hash, paths)
+    id_hash_table(board_id_hash, paths)
 }
 
 /// Build reverse lookup for port / endpoint name strings.
 pub fn port_hash_table<'a>(
     ports: impl IntoIterator<Item = &'a str>,
 ) -> Result<HashMap<u64, String>, String> {
-    id_hash_table("port", port_id_hash, ports)
+    id_hash_table(port_id_hash, ports)
 }
 
 /// Build reverse lookup for logical edge-id strings.
 pub fn edge_hash_table<'a>(
     edge_ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<HashMap<u64, String>, String> {
-    id_hash_table("edge_id", |s| xxh3_64(s.as_bytes()), edge_ids)
+    id_hash_table(|s| xxh3_64(s.as_bytes()), edge_ids)
 }
 
 #[cfg(test)]
@@ -156,7 +155,7 @@ mod tests {
     #[test]
     fn table_rejects_distinct_string_collision() {
         // Force a collision by hashing with a constant function.
-        let err = id_hash_table("path", |_| 1u64, ["left", "right"]).unwrap_err();
+        let err = id_hash_table(|_| 1u64, ["left", "right"]).unwrap_err();
         assert!(err.contains("collision"));
         assert!(err.contains("left"));
         assert!(err.contains("right"));
