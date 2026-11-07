@@ -1,12 +1,12 @@
-"""Thin Python DSL for logical multi-board topologies.
+"""Hierarchical Python DSL for logical multi-board topologies.
 
-``python -m topology_dsl run <script.py>`` prints logical JSON (elf strings
-unchanged). ``python -m topology_dsl create <script.py>`` embeds local ELF
-files as ``base64:``, POSTs ``/api/simulation`` on a running simulation-frontend
-(start ``cluster-backend`` first),
-and prints the simulation URL. The server validates JSON
-(``sim_cluster::topology``) and starts the arbiter. This is a runtime
-handoff, not a checked-in product config.
+Define a concrete ``Topology`` (``build``) and wrap it in a concrete ``Root``
+(``configure``). Scripts call ``Root.emit()`` to produce flat simulation JSON;
+``python -m topology_dsl run|create <script.py>`` loads that emitted dict.
+
+``create`` embeds local ELF files as ``base64:``, POSTs ``/api/simulation`` on a
+running simulation-frontend (start ``cluster-backend`` first), and prints the
+simulation URL.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import sys
 import urllib.error
 import urllib.request
 import webbrowser
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -29,12 +30,28 @@ Payload = Literal["uart", "digital", "analog"]
 Direction = Literal["in", "out"]
 
 
+@dataclass(frozen=True)
+class EndpointLoc:
+    """One hop in a directed-edge ``route`` (and ``from`` / ``to``)."""
+
+    path: str
+    port: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "port": self.port}
+
+
 @dataclass
-class EndpointRef:
-    board_id: str
-    name: str
+class PortRef:
+    """A visible port: leaf board endpoint or exported topology boundary."""
+
+    chain: list[EndpointLoc]
     direction: Direction
     payload: Payload
+
+    @property
+    def leaf(self) -> EndpointLoc:
+        return self.chain[0]
 
 
 @dataclass
@@ -44,18 +61,20 @@ class Board:
     # One firmware source: filesystem path, file://, http(s)://, or
     # base64:<payload>. These are alternatives and are not combined.
     elf: Optional[str] = None
-    _endpoints: dict[str, EndpointRef] = field(default_factory=dict, repr=False)
+    _endpoints: dict[str, PortRef] = field(default_factory=dict, repr=False)
 
-    def endpoint(self, name: str, *, direction: Direction, payload: Payload) -> EndpointRef:
+    def endpoint(self, name: str, *, direction: Direction, payload: Payload) -> PortRef:
         if name in self._endpoints:
             raise ValueError(f"board {self.id!r}: duplicate endpoint {name!r}")
-        ref = EndpointRef(
-            board_id=self.id, name=name, direction=direction, payload=payload
+        ref = PortRef(
+            chain=[EndpointLoc(path=self.id, port=name)],
+            direction=direction,
+            payload=payload,
         )
         self._endpoints[name] = ref
         return ref
 
-    def port(self, name: str) -> EndpointRef:
+    def port(self, name: str) -> PortRef:
         try:
             return self._endpoints[name]
         except KeyError as exc:
@@ -67,7 +86,7 @@ class Board:
             "kind": self.kind,
             "endpoints": [
                 {
-                    "name": ep.name,
+                    "name": ep.leaf.port,
                     "direction": ep.direction,
                     "payload": ep.payload,
                 }
@@ -79,109 +98,213 @@ class Board:
         return out
 
 
-@dataclass
-class Topology:
-    margin_ns: int
-    headroom_threshold_ns: int
-    ready_timeout_ms: Optional[int] = None
-    _boards: dict[str, Board] = field(default_factory=dict, repr=False)
-    _edges: list[dict[str, Any]] = field(default_factory=list, repr=False)
+class Topology(ABC):
+    """Reusable hierarchical topology definition."""
+
+    def __init__(self, name: str) -> None:
+        if not name:
+            raise ValueError("topology name must not be empty")
+        if "/" in name:
+            raise ValueError(f"topology name must not contain '/': {name!r}")
+        self.name = name
+        self._parent: Topology | None = None
+        self._children: dict[str, Topology] = {}
+        self._boards: dict[str, Board] = {}
+        self._exports: dict[str, PortRef] = {}
+        self._edges: list[dict[str, Any]] = []
+        self._built = False
+        self._building = False
+
+    @property
+    def path(self) -> str:
+        if self._parent is None:
+            return self.name
+        return f"{self._parent.path}/{self.name}"
+
+    @abstractmethod
+    def build(self) -> None:
+        """Register boards/plants, children, exports, and connections."""
 
     def board(
-        self, board_id: str, *, kind: str = "rl78", elf: Optional[str] = None
+        self, local_name: str, *, kind: str = "rl78", elf: Optional[str] = None
     ) -> Board:
-        if board_id in self._boards:
-            raise ValueError(f"duplicate board id {board_id!r}")
+        self._require_building()
+        if not local_name:
+            raise ValueError("board local name must not be empty")
+        if "/" in local_name:
+            raise ValueError(f"board local name must not contain '/': {local_name!r}")
+        if local_name in self._boards:
+            raise ValueError(f"duplicate board local name {local_name!r}")
+        if local_name in self._children:
+            raise ValueError(
+                f"board local name {local_name!r} conflicts with a child topology"
+            )
+        board_id = f"{self.path}/{local_name}"
         board = Board(id=board_id, kind=kind, elf=elf)
-        self._boards[board_id] = board
+        self._boards[local_name] = board
         return board
 
-    def plant(self, plant_id: str, *, kind: str = "plant") -> Board:
+    def plant(self, local_name: str, *, kind: str = "plant") -> Board:
         """Register a plant node (no ELF). JSON is still a ``boards[]`` entry."""
-        return self.board(plant_id, kind=kind)
+        return self.board(local_name, kind=kind)
 
-    def add_edge(
+    def add_child(self, child: Topology) -> Topology:
+        self._require_building()
+        if not isinstance(child, Topology):
+            raise TypeError("add_child expects a Topology instance")
+        if child._parent is not None:
+            raise ValueError(f"topology {child.name!r} already has a parent")
+        if child.name in self._children:
+            raise ValueError(f"duplicate child topology name {child.name!r}")
+        if child.name in self._boards:
+            raise ValueError(
+                f"child topology name {child.name!r} conflicts with a board"
+            )
+        if child._built:
+            raise ValueError(f"topology {child.name!r} is already built")
+        child._parent = self
+        self._children[child.name] = child
+        child._run_build()
+        return child
+
+    def export(self, name: str, endpoint: PortRef) -> PortRef:
+        self._require_building()
+        if not name:
+            raise ValueError("export name must not be empty")
+        if name in self._exports:
+            raise ValueError(f"topology {self.path!r}: duplicate export {name!r}")
+        if not self._is_visible(endpoint):
+            raise RuntimeError(
+                f"topology {self.path!r}: export target is not visible at this level"
+            )
+        exported = PortRef(
+            chain=[*endpoint.chain, EndpointLoc(path=self.path, port=name)],
+            direction=endpoint.direction,
+            payload=endpoint.payload,
+        )
+        self._exports[name] = exported
+        return exported
+
+    def port(self, name: str) -> PortRef:
+        try:
+            return self._exports[name]
+        except KeyError as exc:
+            raise KeyError(f"topology {self.path!r}: unknown export {name!r}") from exc
+
+    def connect(
         self,
-        src: EndpointRef,
-        dst: EndpointRef,
+        src: PortRef,
+        dst: PortRef,
         *,
         uart_ring_len: Optional[int] = None,
     ) -> None:
+        self._require_building()
+        if not self._is_visible(src) or not self._is_visible(dst):
+            raise RuntimeError(
+                f"topology {self.path!r}: connect endpoints must be visible at this level"
+            )
         if src.direction != "out":
             raise ValueError(f"connect source must be out, got {src.direction!r}")
         if dst.direction != "in":
             raise ValueError(f"connect sink must be in, got {dst.direction!r}")
         if src.payload != dst.payload:
             raise ValueError("connect payload mismatch between endpoints")
-        if src.board_id == dst.board_id:
+        if src.leaf.path == dst.leaf.path:
             raise ValueError("connect must link two different boards")
+        route_locs = [*src.chain, *reversed(dst.chain)]
         edge: dict[str, Any] = {
-            "from_board": src.board_id,
-            "from_endpoint": src.name,
-            "to_board": dst.board_id,
-            "to_endpoint": dst.name,
+            "from": src.leaf.to_dict(),
+            "to": dst.leaf.to_dict(),
+            "route": [loc.to_dict() for loc in route_locs],
             "payload": src.payload,
         }
         if uart_ring_len is not None:
             edge["uart_ring_len"] = uart_ring_len
         self._edges.append(edge)
 
-    def to_dict(self) -> dict[str, Any]:
+    def _run_build(self) -> None:
+        if self._built:
+            raise RuntimeError(f"topology {self.path!r} is already built")
+        self._building = True
+        try:
+            self.build()
+            self._built = True
+        finally:
+            self._building = False
+
+    def _require_building(self) -> None:
+        if not self._building:
+            raise RuntimeError(
+                f"topology {self.name!r}: board/connect/export/add_child only valid during build()"
+            )
+
+    def _is_visible(self, ref: PortRef) -> bool:
+        last = ref.chain[-1]
+        for board in self._boards.values():
+            if (
+                last.path == board.id
+                and len(ref.chain) == 1
+                and last.port in board._endpoints
+            ):
+                return True
+        for child in self._children.values():
+            if last.path == child.path and last.port in child._exports:
+                return True
+        return False
+
+    def _collect_boards(self) -> list[Board]:
+        boards = list(self._boards.values())
+        for child in self._children.values():
+            boards.extend(child._collect_boards())
+        return boards
+
+    def _collect_edges(self) -> list[dict[str, Any]]:
+        edges = list(self._edges)
+        for child in self._children.values():
+            edges.extend(child._collect_edges())
+        return edges
+
+
+class Root(ABC):
+    """Entry point that configures timing and owns the root Topology."""
+
+    def __init__(self) -> None:
+        self.margin_ns: int | None = None
+        self.headroom_threshold_ns: int | None = None
+        self.ready_timeout_ms: int | None = None
+        self.topology: Topology | None = None
+
+    @abstractmethod
+    def configure(self) -> None:
+        """Set timing fields and assign ``self.topology``."""
+
+    def emit(self) -> dict[str, Any]:
+        self.topology = None
+        self.configure()
+        if self.topology is None:
+            raise RuntimeError("Root.configure() must assign self.topology")
+        if self.margin_ns is None or self.headroom_threshold_ns is None:
+            raise RuntimeError(
+                "Root.configure() must set margin_ns and headroom_threshold_ns"
+            )
+        if self.topology._parent is not None:
+            raise RuntimeError("Root.topology must be a top-level Topology")
+        self.topology._run_build()
+        boards = self.topology._collect_boards()
         out: dict[str, Any] = {
-            "boards": [b.to_dict() for b in self._boards.values()],
-            "edges": list(self._edges),
+            "boards": [b.to_dict() for b in boards],
+            "edges": self.topology._collect_edges(),
             "margin_ns": self.margin_ns,
             "headroom_threshold_ns": self.headroom_threshold_ns,
         }
         if self.ready_timeout_ms is not None:
             out["ready_timeout_ms"] = self.ready_timeout_ms
+        global _LAST_EMITTED
+        _LAST_EMITTED = out
         return out
 
 
-def connect(
-    src: EndpointRef,
-    dst: EndpointRef,
-    *,
-    uart_ring_len: Optional[int] = None,
-) -> None:
-    """Record a directed edge. Both endpoints must belong to the same Topology."""
-    # Edges are stored on the topology that owns the source board; locate it via
-    # a module-level registry filled by Topology.board.
-    topo = _OWNER.get(src.board_id)
-    if topo is None:
-        raise RuntimeError(f"board {src.board_id!r} is not attached to a Topology")
-    if _OWNER.get(dst.board_id) is not topo:
-        raise RuntimeError("connect endpoints must belong to the same Topology")
-    topo.add_edge(src, dst, uart_ring_len=uart_ring_len)
-
-
-_OWNER: dict[str, Topology] = {}
-_EMITTED: list[Topology] = []
-
-
-def _register_board(topo: Topology, board: Board) -> Board:
-    _OWNER[board.id] = topo
-    return board
-
-
-# Patch Topology.board to register ownership for connect().
-_orig_board = Topology.board
-
-
-def _board(
-    self: Topology, board_id: str, *, kind: str = "rl78", elf: Optional[str] = None
-) -> Board:
-    board = _orig_board(self, board_id, kind=kind, elf=elf)
-    return _register_board(self, board)
-
-
-Topology.board = _board  # type: ignore[method-assign]
-
-
-def emit(topo: Topology) -> None:
-    """Mark ``topo`` as the script result (printed as JSON by the runner)."""
-    _EMITTED.clear()
-    _EMITTED.append(topo)
+_LAST_EMITTED: dict[str, Any] | None = None
 
 
 DEFAULT_SERVER = "http://127.0.0.1:8090"
@@ -198,15 +321,15 @@ def _usage(code: int) -> None:
 
 
 def _load_emitted(path: str) -> dict[str, Any]:
-    _OWNER.clear()
-    _EMITTED.clear()
+    global _LAST_EMITTED
+    _LAST_EMITTED = None
     runpy.run_path(path, run_name="__main__")
-    if not _EMITTED:
+    if _LAST_EMITTED is None:
         raise SystemExit(
-            "topology script did not call emit(topology); "
+            "topology script did not call Root.emit(); "
             "the runner requires emit() so logical JSON can be captured"
         )
-    return _EMITTED[0].to_dict()
+    return _LAST_EMITTED
 
 
 def _elf_kind(elf: str) -> str:

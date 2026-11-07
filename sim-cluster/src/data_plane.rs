@@ -98,14 +98,14 @@ impl UartDataPlaneMap {
                 continue;
             }
             let id = edge_id(
-                &edge.from_board,
-                &edge.from_endpoint,
-                &edge.to_board,
-                &edge.to_endpoint,
+                &edge.from.path,
+                &edge.from.port,
+                &edge.to.path,
+                &edge.to.port,
             );
             match (
-                edge.to_board.as_str() == board_id,
-                edge.from_board.as_str() == board_id,
+                edge.to.path.as_str() == board_id,
+                edge.from.path.as_str() == board_id,
             ) {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
@@ -113,13 +113,13 @@ impl UartDataPlaneMap {
                     };
                     pending_rx.push(PendingRx {
                         edge_id: id,
-                        ep: edge.to_endpoint.clone(),
+                        ep: edge.to.port.clone(),
                         sub,
                     });
                 }
                 (false, true) => {
                     tx_ep_to_edges
-                        .entry(edge.from_endpoint.clone())
+                        .entry(edge.from.port.clone())
                         .or_default()
                         .push(id);
                 }
@@ -335,14 +335,14 @@ impl AnalogDataPlaneMap {
                 continue;
             }
             let id = edge_id(
-                &edge.from_board,
-                &edge.from_endpoint,
-                &edge.to_board,
-                &edge.to_endpoint,
+                &edge.from.path,
+                &edge.from.port,
+                &edge.to.path,
+                &edge.to.port,
             );
             match (
-                edge.to_board.as_str() == board_id,
-                edge.from_board.as_str() == board_id,
+                edge.to.path.as_str() == board_id,
+                edge.from.path.as_str() == board_id,
             ) {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
@@ -352,13 +352,13 @@ impl AnalogDataPlaneMap {
                     };
                     pending_rx.push(AnalogPendingRx {
                         edge_id: id,
-                        ep: edge.to_endpoint.clone(),
+                        ep: edge.to.port.clone(),
                         sub,
                     });
                 }
                 (false, true) => {
                     tx_ep_to_edges
-                        .entry(edge.from_endpoint.clone())
+                        .entry(edge.from.port.clone())
                         .or_default()
                         .push(id);
                 }
@@ -525,7 +525,7 @@ pub fn open_data_planes(
 ) -> Result<Vec<Box<dyn DataPlaneMap>>, DataPlaneError> {
     let mut kinds = HashSet::new();
     for edge in &topo.edges {
-        if edge.from_board == board_id || edge.to_board == board_id {
+        if edge.from.path == board_id || edge.to.path == board_id {
             kinds.insert(edge.payload);
         }
     }
@@ -569,7 +569,7 @@ mod tests {
 
     use super::*;
     use crate::ipc::{create_node, isolated_config, new_cluster_key};
-    use crate::topology::{EndpointDirection, EndpointSpec};
+    use crate::topology::{EndpointDirection, EndpointSpec, PortRef};
 
     fn uart_board(id: &str) -> BoardSpec {
         BoardSpec {
@@ -596,18 +596,46 @@ mod tests {
             boards: vec![uart_board("a"), uart_board("b")],
             edges: vec![
                 DirectedEdge {
-                    from_board: "a".into(),
-                    from_endpoint: "uart0_tx".into(),
-                    to_board: "b".into(),
-                    to_endpoint: "uart0_rx".into(),
+                    from: PortRef {
+                        path: "a".into(),
+                        port: "uart0_tx".into(),
+                    },
+                    to: PortRef {
+                        path: "b".into(),
+                        port: "uart0_rx".into(),
+                    },
+                    route: vec![
+                        PortRef {
+                            path: "a".into(),
+                            port: "uart0_tx".into(),
+                        },
+                        PortRef {
+                            path: "b".into(),
+                            port: "uart0_rx".into(),
+                        },
+                    ],
                     payload: PayloadKind::Uart,
                     uart_ring_len: Some(8),
                 },
                 DirectedEdge {
-                    from_board: "b".into(),
-                    from_endpoint: "uart0_tx".into(),
-                    to_board: "a".into(),
-                    to_endpoint: "uart0_rx".into(),
+                    from: PortRef {
+                        path: "b".into(),
+                        port: "uart0_tx".into(),
+                    },
+                    to: PortRef {
+                        path: "a".into(),
+                        port: "uart0_rx".into(),
+                    },
+                    route: vec![
+                        PortRef {
+                            path: "b".into(),
+                            port: "uart0_tx".into(),
+                        },
+                        PortRef {
+                            path: "a".into(),
+                            port: "uart0_rx".into(),
+                        },
+                    ],
                     payload: PayloadKind::Uart,
                     uart_ring_len: Some(8),
                 },
@@ -757,10 +785,24 @@ mod tests {
                 analog_board("p", "vout", "vin"),
             ],
             edges: vec![DirectedEdge {
-                from_board: "a".into(),
-                from_endpoint: "dac0".into(),
-                to_board: "p".into(),
-                to_endpoint: "vin".into(),
+                from: PortRef {
+                    path: "a".into(),
+                    port: "dac0".into(),
+                },
+                to: PortRef {
+                    path: "p".into(),
+                    port: "vin".into(),
+                },
+                route: vec![
+                    PortRef {
+                        path: "a".into(),
+                        port: "dac0".into(),
+                    },
+                    PortRef {
+                        path: "p".into(),
+                        port: "vin".into(),
+                    },
+                ],
                 payload: PayloadKind::Analog,
                 uart_ring_len: None,
             }],

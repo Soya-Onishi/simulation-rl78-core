@@ -6,22 +6,28 @@ This is not a product system test. Real cases live in the development project.
 
 from __future__ import annotations
 
-from systemtest import Duration, Topology, connect, sim_case, Simulation
+from systemtest import Duration, Root, Topology, sim_case, Simulation
 
 
-def plant_topo() -> Topology:
-    topology = Topology(margin_ns=200_000, headroom_threshold_ns=100_000)
-    board = topology.board("a", kind="rl78")
-    board.endpoint("dac0", direction="out", payload="analog")
-    plant = topology.plant("p")
-    plant.endpoint("vin", direction="in", payload="analog")
-    plant.endpoint("vout", direction="out", payload="analog")
-    connect(board.port("dac0"), plant.port("vin"))
-    return topology
+class PlantTopo(Topology):
+    def build(self) -> None:
+        board = self.board("a", kind="rl78")
+        board.endpoint("dac0", direction="out", payload="analog")
+        plant = self.plant("p")
+        plant.endpoint("vin", direction="in", payload="analog")
+        plant.endpoint("vout", direction="out", payload="analog")
+        self.connect(board.port("dac0"), plant.port("vin"))
 
 
-@sim_case(topology=plant_topo)
+class PlantRoot(Root):
+    def configure(self) -> None:
+        self.margin_ns = 200_000
+        self.headroom_threshold_ns = 100_000
+        self.topology = PlantTopo(name="demo")
+
+
+@sim_case(root=PlantRoot())
 def test_plant_wait_and_analog_latest(sim: Simulation) -> None:
     sim.wait(Duration.ms(1))
-    sim.analog("a", "dac0").latest()
-    sim.analog("p", "vout").latest()
+    sim.analog("demo/a", "dac0").latest()
+    sim.analog("demo/p", "vout").latest()

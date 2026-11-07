@@ -102,10 +102,19 @@ class CreateCliTests(unittest.TestCase):
                 (root / "fw.bin").write_bytes(b"ABC")
                 script = root / "topo.py"
                 script.write_text(
-                    "from topology_dsl import Topology, emit\n"
-                    "t = Topology(margin_ns=1, headroom_threshold_ns=1)\n"
-                    't.board("a", elf="fw.bin")\n'
-                    "emit(t)\n",
+                    "from topology_dsl import Root, Topology\n"
+                    "\n"
+                    "class T(Topology):\n"
+                    "    def build(self):\n"
+                    '        self.board("a", elf="fw.bin")\n'
+                    "\n"
+                    "class R(Root):\n"
+                    "    def configure(self):\n"
+                    "        self.margin_ns = 1\n"
+                    "        self.headroom_threshold_ns = 1\n"
+                    '        self.topology = T(name="demo")\n'
+                    "\n"
+                    "R().emit()\n",
                     encoding="utf-8",
                 )
                 prev = os.getcwd()

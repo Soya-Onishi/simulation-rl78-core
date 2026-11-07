@@ -39,17 +39,17 @@ impl NodeUartPorts {
                 continue;
             }
             let id = names::edge_id(
-                &edge.from_board,
-                &edge.from_endpoint,
-                &edge.to_board,
-                &edge.to_endpoint,
+                &edge.from.path,
+                &edge.from.port,
+                &edge.to.path,
+                &edge.to.port,
             );
             let svc_name = names::uart_edge(cluster_key, &id);
             let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
-            if edge.from_board == board_id {
+            if edge.from.path == board_id {
                 let puber = open_or_create_uart_publisher(node, &svc_name, capacity)?;
                 producers.insert(id, puber);
-            } else if edge.to_board == board_id {
+            } else if edge.to.path == board_id {
                 let sub = open_or_create_uart_subscriber(node, &svc_name, capacity)?;
                 consumers.insert(id, sub);
             }
@@ -145,7 +145,9 @@ fn open_or_create_uart_subscriber(
 mod tests {
     use super::*;
     use crate::ipc::runtime::{create_node, isolated_config, new_cluster_key};
-    use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind};
+    use crate::topology::{
+        BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind, PortRef,
+    };
     use std::time::Duration;
 
     #[test]
@@ -178,10 +180,24 @@ mod tests {
                 },
             ],
             edges: vec![DirectedEdge {
-                from_board: "a".into(),
-                from_endpoint: "tx".into(),
-                to_board: "b".into(),
-                to_endpoint: "rx".into(),
+                from: PortRef {
+                    path: "a".into(),
+                    port: "tx".into(),
+                },
+                to: PortRef {
+                    path: "b".into(),
+                    port: "rx".into(),
+                },
+                route: vec![
+                    PortRef {
+                        path: "a".into(),
+                        port: "tx".into(),
+                    },
+                    PortRef {
+                        path: "b".into(),
+                        port: "rx".into(),
+                    },
+                ],
                 payload: PayloadKind::Uart,
                 uart_ring_len: Some(8),
             }],

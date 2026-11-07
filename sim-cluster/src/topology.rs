@@ -58,13 +58,23 @@ pub struct BoardSpec {
     pub endpoints: Vec<EndpointSpec>,
 }
 
-/// Directed data-plane edge between two endpoints (one SHM segment later).
+/// One hop on a directed edge: leaf board/plant or intermediate topology export.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortRef {
+    pub path: String,
+    pub port: String,
+}
+
+/// Directed data-plane edge between two leaf endpoints.
+///
+/// `from` / `to` are always leaf boards. `route` lists display hops
+/// (`route[0] == from`, `route[last] == to`); the data plane wires only the
+/// leaf endpoints.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectedEdge {
-    pub from_board: String,
-    pub from_endpoint: String,
-    pub to_board: String,
-    pub to_endpoint: String,
+    pub from: PortRef,
+    pub to: PortRef,
+    pub route: Vec<PortRef>,
     pub payload: PayloadKind,
     /// UART ring length; ignored for non-UART payloads. Omitted → default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,50 +163,65 @@ impl LogicalTopology {
         }
 
         for edge in &self.edges {
+            if edge.route.is_empty() {
+                return Err(TopologyError::Invalid(
+                    "edge route must not be empty".into(),
+                ));
+            }
+            if edge.route.first() != Some(&edge.from) {
+                return Err(TopologyError::Invalid(
+                    "edge route[0] must equal from".into(),
+                ));
+            }
+            if edge.route.last() != Some(&edge.to) {
+                return Err(TopologyError::Invalid(
+                    "edge route[last] must equal to".into(),
+                ));
+            }
             let from = self
                 .boards
                 .iter()
-                .find(|b| b.id == edge.from_board)
+                .find(|b| b.id == edge.from.path)
                 .ok_or_else(|| {
-                    TopologyError::Invalid(format!("edge from unknown board '{}'", edge.from_board))
+                    TopologyError::Invalid(format!("edge from unknown board '{}'", edge.from.path))
                 })?;
             let to = self
                 .boards
                 .iter()
-                .find(|b| b.id == edge.to_board)
+                .find(|b| b.id == edge.to.path)
                 .ok_or_else(|| {
-                    TopologyError::Invalid(format!("edge to unknown board '{}'", edge.to_board))
+                    TopologyError::Invalid(format!("edge to unknown board '{}'", edge.to.path))
                 })?;
             let from_ep = from
                 .endpoints
                 .iter()
-                .find(|e| e.name == edge.from_endpoint)
+                .find(|e| e.name == edge.from.port)
                 .ok_or_else(|| {
                     TopologyError::Invalid(format!(
                         "edge: board '{}' has no endpoint '{}'",
-                        edge.from_board, edge.from_endpoint
+                        edge.from.path, edge.from.port
                     ))
                 })?;
             let to_ep = to
                 .endpoints
                 .iter()
-                .find(|e| e.name == edge.to_endpoint)
+                .find(|e| e.name == edge.to.port)
                 .ok_or_else(|| {
                     TopologyError::Invalid(format!(
                         "edge: board '{}' has no endpoint '{}'",
-                        edge.to_board, edge.to_endpoint
+                        edge.to.path, edge.to.port
                     ))
                 })?;
             if from_ep.direction != EndpointDirection::Out {
                 return Err(TopologyError::Invalid(format!(
                     "edge source '{}:{}' must be direction out",
-                    edge.from_board, edge.from_endpoint
+                    edge.from.path, edge.from.port
                 )));
             }
             if to_ep.direction != EndpointDirection::In {
                 return Err(TopologyError::Invalid(format!(
                     "edge sink '{}:{}' must be direction in",
-                    edge.to_board, edge.to_endpoint
+                    edge.to.path, edge.to.port
                 )));
             }
             if from_ep.payload != edge.payload || to_ep.payload != edge.payload {
@@ -205,7 +230,7 @@ impl LogicalTopology {
                     edge.payload
                 )));
             }
-            if edge.from_board == edge.to_board {
+            if edge.from.path == edge.to.path {
                 return Err(TopologyError::Invalid(
                     "edge must connect two different boards".into(),
                 ));
@@ -254,17 +279,21 @@ mod tests {
           ],
           "edges": [
             {
-              "from_board": "a",
-              "from_endpoint": "uart0_tx",
-              "to_board": "b",
-              "to_endpoint": "uart0_rx",
+              "from": {"path": "a", "port": "uart0_tx"},
+              "to": {"path": "b", "port": "uart0_rx"},
+              "route": [
+                {"path": "a", "port": "uart0_tx"},
+                {"path": "b", "port": "uart0_rx"}
+              ],
               "payload": "uart"
             },
             {
-              "from_board": "b",
-              "from_endpoint": "uart0_tx",
-              "to_board": "a",
-              "to_endpoint": "uart0_rx",
+              "from": {"path": "b", "port": "uart0_tx"},
+              "to": {"path": "a", "port": "uart0_rx"},
+              "route": [
+                {"path": "b", "port": "uart0_tx"},
+                {"path": "a", "port": "uart0_rx"}
+              ],
               "payload": "uart",
               "uart_ring_len": 128
             }
@@ -284,6 +313,8 @@ mod tests {
         assert_eq!(topo.ready_timeout_ms, DEFAULT_READY_TIMEOUT_MS);
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[0]), 256);
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[1]), 128);
+        assert_eq!(topo.edges[0].from.path, "a");
+        assert_eq!(topo.edges[0].route.len(), 2);
     }
 
     #[test]
@@ -294,8 +325,23 @@ mod tests {
 
     #[test]
     fn rejects_unknown_edge_board() {
-        let bad = sample_json().replace("\"to_board\": \"b\"", "\"to_board\": \"z\"");
-        let err = parse_logical_topology(&bad).unwrap_err();
+        let bad = r#"{
+          "boards": [{"id":"a","kind":"rl78","endpoints":[
+            {"name":"tx","direction":"out","payload":"uart"}
+          ]}],
+          "edges": [{
+            "from": {"path":"a","port":"tx"},
+            "to": {"path":"z","port":"rx"},
+            "route": [
+              {"path":"a","port":"tx"},
+              {"path":"z","port":"rx"}
+            ],
+            "payload":"uart"
+          }],
+          "margin_ns": 1,
+          "headroom_threshold_ns": 1
+        }"#;
+        let err = parse_logical_topology(bad).unwrap_err();
         assert!(err.to_string().contains("unknown board"));
     }
 
@@ -305,6 +351,122 @@ mod tests {
         let text = topo.to_json_string().unwrap();
         let again = parse_logical_topology(&text).unwrap();
         assert_eq!(topo, again);
+    }
+
+    #[test]
+    fn rejects_empty_route() {
+        let text = r#"{
+          "boards": [
+            {"id":"a","kind":"rl78","endpoints":[
+              {"name":"tx","direction":"out","payload":"uart"}
+            ]},
+            {"id":"b","kind":"rl78","endpoints":[
+              {"name":"rx","direction":"in","payload":"uart"}
+            ]}
+          ],
+          "edges": [{
+            "from": {"path":"a","port":"tx"},
+            "to": {"path":"b","port":"rx"},
+            "route": [],
+            "payload":"uart"
+          }],
+          "margin_ns": 1,
+          "headroom_threshold_ns": 1
+        }"#;
+        let err = parse_logical_topology(text).unwrap_err();
+        assert!(err.to_string().contains("route must not be empty"));
+    }
+
+    #[test]
+    fn rejects_route_mismatch_ends() {
+        let bad_first = r#"{
+          "boards": [
+            {"id":"a","kind":"rl78","endpoints":[
+              {"name":"tx","direction":"out","payload":"uart"}
+            ]},
+            {"id":"b","kind":"rl78","endpoints":[
+              {"name":"rx","direction":"in","payload":"uart"}
+            ]}
+          ],
+          "edges": [{
+            "from": {"path":"a","port":"tx"},
+            "to": {"path":"b","port":"rx"},
+            "route": [
+              {"path":"b","port":"rx"},
+              {"path":"b","port":"rx"}
+            ],
+            "payload":"uart"
+          }],
+          "margin_ns": 1,
+          "headroom_threshold_ns": 1
+        }"#;
+        let err = parse_logical_topology(bad_first).unwrap_err();
+        assert!(err.to_string().contains("route[0] must equal from"));
+
+        let bad_last = r#"{
+          "boards": [
+            {"id":"a","kind":"rl78","endpoints":[
+              {"name":"tx","direction":"out","payload":"uart"}
+            ]},
+            {"id":"b","kind":"rl78","endpoints":[
+              {"name":"rx","direction":"in","payload":"uart"}
+            ]}
+          ],
+          "edges": [{
+            "from": {"path":"a","port":"tx"},
+            "to": {"path":"b","port":"rx"},
+            "route": [
+              {"path":"a","port":"tx"},
+              {"path":"a","port":"tx"}
+            ],
+            "payload":"uart"
+          }],
+          "margin_ns": 1,
+          "headroom_threshold_ns": 1
+        }"#;
+        let err = parse_logical_topology(bad_last).unwrap_err();
+        assert!(err.to_string().contains("route[last] must equal to"));
+    }
+
+    #[test]
+    fn accepts_hierarchical_route_hops() {
+        let text = r#"{
+          "boards": [
+            {
+              "id": "sys/left/a",
+              "kind": "rl78",
+              "endpoints": [
+                {"name": "tx", "direction": "out", "payload": "uart"}
+              ]
+            },
+            {
+              "id": "sys/d",
+              "kind": "rl78",
+              "endpoints": [
+                {"name": "rx", "direction": "in", "payload": "uart"}
+              ]
+            }
+          ],
+          "edges": [
+            {
+              "from": {"path": "sys/left/a", "port": "tx"},
+              "to": {"path": "sys/d", "port": "rx"},
+              "route": [
+                {"path": "sys/left/a", "port": "tx"},
+                {"path": "sys/left", "port": "tx"},
+                {"path": "sys/d", "port": "rx"}
+              ],
+              "payload": "uart"
+            }
+          ],
+          "margin_ns": 1,
+          "headroom_threshold_ns": 1
+        }"#;
+        let topo = parse_logical_topology(text).unwrap();
+        assert_eq!(topo.edges[0].route.len(), 3);
+        assert_eq!(topo.edges[0].route[1].path, "sys/left");
+        let again = parse_logical_topology(&topo.to_json_string().unwrap()).unwrap();
+        assert_eq!(topo.edges[0].route, again.edges[0].route);
     }
 
     #[test]
