@@ -281,14 +281,14 @@ impl SimulationBackend for LocalBackend {
         &self,
         id: &str,
         board: HashedId<u64>,
-        probe: &str,
+        probe: HashedId<u64>,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Result<crate::contract::ProbeSamplesResponse, ApiError> {
         match self.rpc(JobKind::ProbeSamples {
             id: id.to_string(),
             board,
-            probe: probe.to_string(),
+            probe,
             from_ns,
             to_ns,
         })? {

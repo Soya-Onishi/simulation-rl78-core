@@ -48,7 +48,7 @@ export default function ProbeTree({ catalog, watched, onChange }: Props) {
                         checked={watched.has(key)}
                         onChange={(ev) => toggle(key, ev.target.checked)}
                       />
-                      <span>{item.probe}</span>
+                      <span title={item.probe}>{item.probe_label || item.probe}</span>
                       <span className="meta">{item.kind}</span>
                     </label>
                   </li>

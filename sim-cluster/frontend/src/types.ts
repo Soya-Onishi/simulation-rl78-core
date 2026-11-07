@@ -25,7 +25,10 @@ export interface LogEvent {
 export interface ProbeCatalogItem {
   board: string
   board_label: string
+  /** `probe_name_hash` as 16-digit hex. */
   probe: string
+  /** Human-readable probe name. */
+  probe_label: string
   kind: ProbeKind
 }
 
@@ -33,7 +36,9 @@ export interface ProbeCatalogItem {
 export interface ProbeView {
   virtual_time_ns: number
   board: string
+  /** `probe_name_hash` as 16-digit hex. */
   probe: string
+  probe_label: string
   kind: ProbeKind
   value: string
 }
@@ -44,7 +49,10 @@ export interface ProbeBatch {
 }
 
 export interface ActionParam {
+  /** `id_hash` of the parameter name as 16-digit hex. */
   name: string
+  /** Human-readable parameter name. */
+  name_label: string
   unit?: string | null
   description?: string | null
   min?: number | null
@@ -55,8 +63,12 @@ export interface ActionParam {
 export interface ActionRow {
   board_id: string
   board_label?: string
+  /** `id_hash` of the device name as 16-digit hex. */
   device: string
+  device_label: string
+  /** `id_hash` of the action name as 16-digit hex. */
   action: string
+  action_label: string
   description: string
   params: ActionParam[]
 }

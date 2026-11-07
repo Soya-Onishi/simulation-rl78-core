@@ -362,7 +362,9 @@ export default function GraphView({ store, catalog, watched, virtualTimeNs }: Pr
                   style={{ borderLeftColor: color }}
                 >
                   <span className="lane-board">{item.board_label || item.board}</span>
-                  <span className="lane-probe">{item.probe}</span>
+                  <span className="lane-probe" title={item.probe}>
+                    {item.probe_label || item.probe}
+                  </span>
                 </div>
                 {item.kind === 'analog' ? (
                   <div className="lane-plot-wrap">

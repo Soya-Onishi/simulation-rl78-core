@@ -102,10 +102,13 @@ pub struct LogEvent {
     pub text: String,
 }
 
-/// One parameter in an action catalog row. Hashes are not part of the JSON contract.
+/// One parameter in an action catalog row.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AdvertisedActionParam {
-    pub name: String,
+    /// `id_hash` of the parameter name (serde: 16-digit hex).
+    pub name: crate::ipc::HashedId<u64>,
+    /// Human-readable parameter name.
+    pub name_label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,8 +128,14 @@ pub struct AdvertisedAction {
     /// Human-readable board id from the topology definition.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub board_label: String,
-    pub device: String,
-    pub action: String,
+    /// `id_hash` of the device name (serde: 16-digit hex).
+    pub device: crate::ipc::HashedId<u64>,
+    /// Human-readable device name.
+    pub device_label: String,
+    /// `id_hash` of the action name (serde: 16-digit hex).
+    pub action: crate::ipc::HashedId<u64>,
+    /// Human-readable action name.
+    pub action_label: String,
     pub description: String,
     pub params: Vec<AdvertisedActionParam>,
 }
@@ -141,10 +150,11 @@ pub struct ActionList {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InvokeActionRequest {
     pub board_id: crate::ipc::HashedId<u64>,
-    pub device: String,
-    pub action: String,
+    pub device: crate::ipc::HashedId<u64>,
+    pub action: crate::ipc::HashedId<u64>,
+    /// Keys are `id_hash` of parameter names (serde: 16-digit hex).
     #[serde(default)]
-    pub params: std::collections::BTreeMap<String, f64>,
+    pub params: std::collections::BTreeMap<crate::ipc::HashedId<u64>, f64>,
 }
 
 /// One row of `GET /api/simulation/{id}/probes/samples`.
@@ -152,7 +162,10 @@ pub struct InvokeActionRequest {
 pub struct ProbeSampleJson {
     pub virtual_time_ns: u64,
     pub board: crate::ipc::HashedId<u64>,
-    pub probe: String,
+    /// `probe_name_hash` of the probe name (serde: 16-digit hex).
+    pub probe: crate::ipc::HashedId<u64>,
+    /// Human-readable probe name.
+    pub probe_label: String,
     pub kind: String,
     pub value: serde_json::Value,
 }
@@ -347,14 +360,38 @@ impl ApiError {
     }
 }
 
-/// Parse a public 16-digit lowercase hex id from a path or query string.
-pub fn parse_hashed_id(text: &str, field: &str) -> Result<crate::ipc::HashedId<u64>, ApiError> {
-    text.parse().map_err(|_| {
-        ApiError::bad_request(
-            "bad_param",
-            format!("{field} must be a 16-digit lowercase hex string"),
-        )
-    })
+/// Hex id carried as a plain string in HTTP query parameters.
+///
+/// API query parameters use this type instead of deserializing
+/// [`crate::ipc::HashedId`] directly so invalid values can return
+/// [`ApiError`] with code `bad_param`, rather than axum's default
+/// rejection response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HashedIdString(String);
+
+impl HashedIdString {
+    /// Borrow the raw parameter text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// True when the client omitted a value or sent an empty string.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Parse as a public 16-digit lowercase hex [`crate::ipc::HashedId`].
+    pub fn parse_id(&self, field: &str) -> Result<crate::ipc::HashedId<u64>, ApiError> {
+        self.0.parse().map_err(|_| {
+            ApiError::bad_request(
+                "bad_param",
+                format!("{field} must be a 16-digit lowercase hex string"),
+            )
+        })
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -368,10 +405,12 @@ impl std::error::Error for ApiError {}
 #[cfg(test)]
 mod tests {
     use super::{
+        AdvertisedAction, AdvertisedActionParam, HashedIdString, InvokeActionRequest,
         ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest, TopologyView,
-        parse_hashed_id, prepare_create_topology,
+        prepare_create_topology,
     };
     use crate::topology::LogicalTopology;
+    use sim_kernel::id_hash;
 
     fn one_board(elf: Option<&str>) -> LogicalTopology {
         LogicalTopology {
@@ -434,14 +473,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_hashed_id_rejects_bad_hex() {
-        assert!(parse_hashed_id("ABCDEF0123456789", "board_id").is_err());
-        assert!(parse_hashed_id("0x0123456789abcdef", "board_id").is_err());
-        let ok = crate::ipc::board_id_hash("mcu-a");
-        assert_eq!(parse_hashed_id(&ok.to_string(), "board_id").unwrap(), ok);
-    }
-
-    #[test]
     fn samples_body_uses_typed_values() {
         let body = ProbeSamplesResponse {
             truncated: false,
@@ -449,14 +480,16 @@ mod tests {
                 ProbeSampleJson {
                     virtual_time_ns: 1,
                     board: crate::ipc::board_id_hash("a"),
-                    probe: "p01".into(),
+                    probe: crate::ipc::probe_name_hash("p01"),
+                    probe_label: "p01".into(),
                     kind: "digital".into(),
                     value: serde_json::json!("High"),
                 },
                 ProbeSampleJson {
                     virtual_time_ns: 2,
                     board: crate::ipc::board_id_hash("a"),
-                    probe: "uart0".into(),
+                    probe: crate::ipc::probe_name_hash("uart0"),
+                    probe_label: "uart0".into(),
                     kind: "uart".into(),
                     value: serde_json::json!(65),
                 },
@@ -465,6 +498,76 @@ mod tests {
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["samples"][0]["value"], "High");
         assert_eq!(json["samples"][1]["value"], 65);
+        assert_eq!(
+            json["samples"][0]["probe"],
+            crate::ipc::probe_name_hash("p01").to_string()
+        );
+        assert_eq!(json["samples"][0]["probe_label"], "p01");
+    }
+
+    #[test]
+    fn hashed_id_string_rejects_bad_hex_as_bad_param() {
+        let bad = HashedIdString("ABCDEF0123456789".into());
+        let err = bad.parse_id("board").unwrap_err();
+        assert_eq!(err.code, "bad_param");
+        assert!(
+            HashedIdString("0x0123456789abcdef".into())
+                .parse_id("board")
+                .is_err()
+        );
+        let ok = crate::ipc::board_id_hash("mcu-a");
+        assert_eq!(
+            HashedIdString(ok.to_string()).parse_id("board").unwrap(),
+            ok
+        );
+    }
+
+    #[test]
+    fn invoke_request_wire_uses_hex_ids_for_device_action_params() {
+        let device = crate::ipc::HashedId::new(id_hash("sw1"));
+        let action = crate::ipc::HashedId::new(id_hash("hold"));
+        let param = crate::ipc::HashedId::new(id_hash("milliseconds"));
+        let board = crate::ipc::board_id_hash("mcu-a");
+        let json = serde_json::json!({
+            "board_id": board.to_string(),
+            "device": device.to_string(),
+            "action": action.to_string(),
+            "params": { param.to_string(): 12.0 },
+        });
+        let req: InvokeActionRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.board_id, board);
+        assert_eq!(req.device, device);
+        assert_eq!(req.action, action);
+        assert_eq!(req.params.get(&param), Some(&12.0));
+    }
+
+    #[test]
+    fn advertised_action_wire_keeps_hex_ids_and_labels() {
+        let body = AdvertisedAction {
+            board_id: crate::ipc::board_id_hash("mcu-a"),
+            board_label: "mcu-a".into(),
+            device: crate::ipc::HashedId::new(id_hash("sw1")),
+            device_label: "sw1".into(),
+            action: crate::ipc::HashedId::new(id_hash("hold")),
+            action_label: "hold".into(),
+            description: "press".into(),
+            params: vec![AdvertisedActionParam {
+                name: crate::ipc::HashedId::new(id_hash("milliseconds")),
+                name_label: "milliseconds".into(),
+                unit: Some("ms".into()),
+                description: None,
+                min: Some(1.0),
+                max: None,
+                default: None,
+            }],
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["device"], body.device.to_string());
+        assert_eq!(json["device_label"], "sw1");
+        assert_eq!(json["action"], body.action.to_string());
+        assert_eq!(json["action_label"], "hold");
+        assert_eq!(json["params"][0]["name"], body.params[0].name.to_string());
+        assert_eq!(json["params"][0]["name_label"], "milliseconds");
     }
 
     #[test]

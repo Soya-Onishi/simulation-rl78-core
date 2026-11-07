@@ -28,6 +28,11 @@ def board_id_hex(board_id: str) -> str:
     return f"{xxhash.xxh3_64_intdigest(board_id.encode('utf-8')):016x}"
 
 
+def name_id_hex(name: str) -> str:
+    """Public API device/action/param/probe name: xxh3_64 as 16-digit hex."""
+    return f"{xxhash.xxh3_64_intdigest(name.encode('utf-8')):016x}"
+
+
 def out_dir() -> Path:
     override = os.environ.get(OUT_ENV)
     if override:
@@ -135,11 +140,18 @@ class Simulation:
     ) -> None:
         converted: dict[str, float] = {}
         for name, value in params.items():
+            key = name_id_hex(name)
             if isinstance(value, Duration):
-                converted[name] = float(value.nanoseconds)
+                converted[key] = float(value.nanoseconds)
             else:
-                converted[name] = float(value)
-        self._client.invoke_action(self._id, board_id_hex(board_id), device, action, converted)
+                converted[key] = float(value)
+        self._client.invoke_action(
+            self._id,
+            board_id_hex(board_id),
+            name_id_hex(device),
+            name_id_hex(action),
+            converted,
+        )
 
     def wait(self, duration: Duration) -> None:
         until_ns = self.virtual_time_ns + duration.nanoseconds
@@ -211,7 +223,7 @@ class Simulation:
         self._client.catalog(self._id)
 
     def _latest(self, board: str, probe: str, kind: str) -> dict[str, Any] | None:
-        payload = self._client.samples(self._id, board_id_hex(board), probe)
+        payload = self._client.samples(self._id, board_id_hex(board), name_id_hex(probe))
         self._raise_truncated(payload)
         samples = payload.get("samples") or []
         if not samples:
@@ -235,7 +247,7 @@ class Simulation:
         payload = self._client.samples(
             self._id,
             board_id_hex(board),
-            probe,
+            name_id_hex(probe),
             from_ns=0 if last_vt is None else last_vt,
             to_ns=self.virtual_time_ns,
         )

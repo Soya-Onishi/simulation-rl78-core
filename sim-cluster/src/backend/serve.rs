@@ -8,11 +8,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::contract::{
-    ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, InvokeActionRequest,
-    LogEvent, ProbeSamplesResponse, StartSimulationRequest, StatusEvent, TopologyView,
-    parse_hashed_id,
+    ActionList, ApiError, CreateSimulationRequest, CreateSimulationResponse, HashedIdString,
+    InvokeActionRequest, LogEvent, ProbeSamplesResponse, StartSimulationRequest, StatusEvent,
+    TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
+use crate::ipc::HashedId;
 use crate::probe_log::{
     CoarseBatch, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
 };
@@ -328,8 +329,8 @@ async fn csv_status(
 
 #[derive(serde::Deserialize)]
 struct SamplesQuery {
-    board: String,
-    probe: String,
+    board: HashedIdString,
+    probe: HashedIdString,
     from_ns: Option<u64>,
     to_ns: Option<u64>,
 }
@@ -339,13 +340,15 @@ async fn probe_samples(
     Path(id): Path<String>,
     Query(query): Query<SamplesQuery>,
 ) -> Result<Json<ProbeSamplesResponse>, ApiError> {
+    if query.probe.is_empty() {
+        return Err(ApiError::bad_request("bad_param", "probe is required"));
+    }
+    let board = query.board.parse_id("board")?;
+    let probe = query.probe.parse_id("probe")?;
     let backend = state.backend.clone();
-    let board = parse_hashed_id(&query.board, "board")?;
     Ok(Json(
-        blocking(move || {
-            backend.probe_samples(&id, board, &query.probe, query.from_ns, query.to_ns)
-        })
-        .await?,
+        blocking(move || backend.probe_samples(&id, board, probe, query.from_ns, query.to_ns))
+            .await?,
     ))
 }
 
@@ -381,7 +384,7 @@ async fn viewer_detach(
 #[derive(serde::Deserialize)]
 struct BoardPath {
     id: String,
-    board_id: String,
+    board_id: HashedId<u64>,
 }
 
 async fn inspect(
@@ -390,9 +393,8 @@ async fn inspect(
     Json(req): Json<InspectRequest>,
 ) -> Result<Json<InspectReply>, ApiError> {
     let backend = state.backend.clone();
-    let board_id = parse_hashed_id(&path.board_id, "board_id")?;
     Ok(Json(
-        blocking(move || backend.inspect(&path.id, board_id, req)).await?,
+        blocking(move || backend.inspect(&path.id, path.board_id, req)).await?,
     ))
 }
 
@@ -401,7 +403,6 @@ async fn step(
     Path(path): Path<BoardPath>,
 ) -> Result<StatusCode, ApiError> {
     let backend = state.backend.clone();
-    let board_id = parse_hashed_id(&path.board_id, "board_id")?;
-    blocking(move || backend.step(&path.id, board_id)).await?;
+    blocking(move || backend.step(&path.id, path.board_id)).await?;
     Ok(StatusCode::OK)
 }

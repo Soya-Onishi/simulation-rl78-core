@@ -315,7 +315,7 @@ impl SimulationBackend for TcpipBackend {
         &self,
         id: &str,
         board: crate::ipc::HashedId<u64>,
-        probe: &str,
+        probe: crate::ipc::HashedId<u64>,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Result<ProbeSamplesResponse, ApiError> {
@@ -513,7 +513,7 @@ mod tests {
             &self,
             _id: &str,
             _board: crate::ipc::HashedId<u64>,
-            _probe: &str,
+            _probe: crate::ipc::HashedId<u64>,
             _from_ns: Option<u64>,
             _to_ns: Option<u64>,
         ) -> Result<ProbeSamplesResponse, ApiError> {
@@ -610,8 +610,8 @@ mod tests {
                 &id,
                 InvokeActionRequest {
                     board_id: board_hex,
-                    device: "sw".into(),
-                    action: "press".into(),
+                    device: crate::ipc::HashedId::new(sim_kernel::id_hash("sw")),
+                    action: crate::ipc::HashedId::new(sim_kernel::id_hash("press")),
                     params: Default::default(),
                 },
             )
@@ -622,7 +622,7 @@ mod tests {
                 &id,
                 vec![ProbeRef {
                     board: board_hex,
-                    name: "p0".into(),
+                    name: crate::ipc::probe_name_hash("p0"),
                 }],
             )
             .unwrap();
@@ -644,7 +644,13 @@ mod tests {
         assert!(backend.csv_poll(&id, req_id).unwrap().done);
         backend.csv_status(&id, req_id).unwrap();
         backend
-            .probe_samples(&id, board_hex, "p0", None, None)
+            .probe_samples(
+                &id,
+                board_hex,
+                crate::ipc::probe_name_hash("p0"),
+                None,
+                None,
+            )
             .unwrap();
         let token = backend.viewer_attach(&id).unwrap();
         backend.viewer_check(&id, &token).unwrap();

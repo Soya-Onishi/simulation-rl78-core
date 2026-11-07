@@ -42,9 +42,9 @@ pub use cluster_stop::is_cluster_relevant_reason;
 pub use contract::{
     ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, AttachGdbRequest,
     CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, GdbSshCommand,
-    InvokeActionRequest, LogEvent, ProbeSampleJson, ProbeSamplesResponse, StartSimulationRequest,
-    StatusEvent, TopologyBoardView, TopologyEdgeView, TopologyEndpointView, TopologyPortRefView,
-    TopologyView, prepare_create_topology,
+    HashedIdString, InvokeActionRequest, LogEvent, ProbeSampleJson, ProbeSamplesResponse,
+    StartSimulationRequest, StatusEvent, TopologyBoardView, TopologyEdgeView, TopologyEndpointView,
+    TopologyPortRefView, TopologyView, prepare_create_topology,
 };
 pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;

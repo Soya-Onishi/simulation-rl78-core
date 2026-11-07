@@ -212,14 +212,23 @@ struct CatalogDump {
 
 #[derive(serde::Serialize)]
 struct CatalogProbe {
-    probe: String,
+    /// `probe_name_hash` of the probe name (serde: 16-digit hex).
+    probe: crate::ipc::HashedId<u64>,
+    /// Human-readable probe name.
+    probe_label: String,
     kind: &'static str,
 }
 
+/// Local `--catalog-dump` action row. Shape matches public advertise (hex + labels)
+/// so dump output can later replace the advertise path.
 #[derive(serde::Serialize)]
 struct CatalogAction {
-    device: String,
-    action: String,
+    /// `id_hash` of the device name (serde: 16-digit hex).
+    device: crate::ipc::HashedId<u64>,
+    device_label: String,
+    /// `id_hash` of the action name (serde: 16-digit hex).
+    action: crate::ipc::HashedId<u64>,
+    action_label: String,
     description: String,
     params: Vec<crate::contract::AdvertisedActionParam>,
 }
@@ -235,7 +244,8 @@ fn probe_kind_str(point: &ProbePoint) -> &'static str {
 
 fn catalog_param(param: sim_kernel::ParamSpec) -> crate::contract::AdvertisedActionParam {
     crate::contract::AdvertisedActionParam {
-        name: param.name,
+        name: crate::ipc::HashedId::new(param.name_hash),
+        name_label: param.name,
         unit: param.unit,
         description: param.description,
         min: param.min,
@@ -248,7 +258,8 @@ fn catalog_dump_from_entity<E: Entity>(entity: &E, points: &[ProbePoint]) -> Cat
     let probes = points
         .iter()
         .map(|point| CatalogProbe {
-            probe: point.name().to_string(),
+            probe: crate::ipc::probe_name_hash(point.name()),
+            probe_label: point.name().to_string(),
             kind: probe_kind_str(point),
         })
         .collect();
@@ -256,8 +267,10 @@ fn catalog_dump_from_entity<E: Entity>(entity: &E, points: &[ProbePoint]) -> Cat
         .action_catalog()
         .into_iter()
         .map(|entry| CatalogAction {
-            device: entry.device,
-            action: entry.action,
+            device: crate::ipc::HashedId::new(entry.device_hash),
+            device_label: entry.device,
+            action: crate::ipc::HashedId::new(entry.action_hash),
+            action_label: entry.action,
             description: entry.description,
             params: entry.params.into_iter().map(catalog_param).collect(),
         })
@@ -815,17 +828,28 @@ mod tests {
             value,
             serde_json::json!({
                 "probes": [
-                    { "probe": "uart0", "kind": "uart" },
-                    { "probe": "dac0", "kind": "analog" }
+                    {
+                        "probe": crate::ipc::probe_name_hash("uart0").to_string(),
+                        "probe_label": "uart0",
+                        "kind": "uart"
+                    },
+                    {
+                        "probe": crate::ipc::probe_name_hash("dac0").to_string(),
+                        "probe_label": "dac0",
+                        "kind": "analog"
+                    }
                 ],
                 "actions": [
                     {
-                        "device": "sw1",
-                        "action": "hold",
+                        "device": crate::ipc::HashedId::new(1).to_string(),
+                        "device_label": "sw1",
+                        "action": crate::ipc::HashedId::new(2).to_string(),
+                        "action_label": "hold",
                         "description": "hold the switch",
                         "params": [
                             {
-                                "name": "level",
+                                "name": crate::ipc::HashedId::new(3).to_string(),
+                                "name_label": "level",
                                 "unit": "V",
                                 "description": "drive level",
                                 "min": 0.0,

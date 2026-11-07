@@ -78,7 +78,10 @@ pub struct ProbeRecord {
 pub struct ProbeView {
     pub virtual_time_ns: u64,
     pub board: crate::ipc::HashedId<u64>,
-    pub probe: String,
+    /// `probe_name_hash` of the probe name (serde: 16-digit hex).
+    pub probe: crate::ipc::HashedId<u64>,
+    /// Human-readable probe name.
+    pub probe_label: String,
     pub kind: String,
     pub value: String,
 }
@@ -92,7 +95,8 @@ pub struct CoarseBatch {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeRef {
     pub board: crate::ipc::HashedId<u64>,
-    pub name: String,
+    /// `probe_name_hash` of the probe name (serde: 16-digit hex).
+    pub name: crate::ipc::HashedId<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +105,10 @@ pub struct ProbeCatalogItem {
     pub board: crate::ipc::HashedId<u64>,
     /// Human-readable board id from the topology definition.
     pub board_label: String,
-    pub probe: String,
+    /// `probe_name_hash` of the probe name (serde: 16-digit hex).
+    pub probe: crate::ipc::HashedId<u64>,
+    /// Human-readable probe name.
+    pub probe_label: String,
     pub kind: String,
 }
 
@@ -392,11 +399,17 @@ impl ProbeLog {
 fn probe_names(
     catalog: &HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
     probe_id: crate::ipc::HashedId<u64>,
-) -> (crate::ipc::HashedId<u64>, String) {
+) -> (crate::ipc::HashedId<u64>, crate::ipc::HashedId<u64>, String) {
     catalog
         .get(&probe_id)
-        .map(|point| (point.board_hash, point.name.clone()))
-        .unwrap_or_else(|| (crate::ipc::HashedId::new(0), probe_id.to_string()))
+        .map(|point| {
+            (
+                point.board_hash,
+                crate::ipc::probe_name_hash(&point.name),
+                point.name.clone(),
+            )
+        })
+        .unwrap_or_else(|| (crate::ipc::HashedId::ZERO, probe_id, String::new()))
 }
 
 #[must_use]
@@ -404,11 +417,12 @@ pub fn record_view(
     catalog: &HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
     record: &ProbeRecord,
 ) -> ProbeView {
-    let (board, probe) = probe_names(catalog, record.probe_id);
+    let (board, probe, probe_label) = probe_names(catalog, record.probe_id);
     ProbeView {
         virtual_time_ns: record.virtual_time_ns,
         board,
         probe,
+        probe_label,
         kind: record.kind.as_str().to_string(),
         value: display_value(record.kind, record.value),
     }
@@ -451,11 +465,12 @@ pub fn json_view(
     catalog: &HashMap<crate::ipc::HashedId<u64>, ProbePointName>,
     record: &ProbeRecord,
 ) -> crate::contract::ProbeSampleJson {
-    let (board, probe) = probe_names(catalog, record.probe_id);
+    let (board, probe, probe_label) = probe_names(catalog, record.probe_id);
     crate::contract::ProbeSampleJson {
         virtual_time_ns: record.virtual_time_ns,
         board,
         probe,
+        probe_label,
         kind: record.kind.as_str().to_string(),
         value: json_value(record.kind, record.value),
     }
@@ -690,15 +705,45 @@ mod tests {
         );
         assert_eq!(sample.virtual_time_ns, 9);
         assert_eq!(sample.board, crate::ipc::board_id_hash("board"));
-        assert_eq!(sample.probe, "p1");
+        assert_eq!(sample.probe, crate::ipc::probe_name_hash("p1"));
+        assert_eq!(sample.probe_label, "p1");
         assert_eq!(sample.kind, "analog");
         assert_eq!(sample.value, serde_json::json!(3300));
         let missing = json_view(
             &catalog,
             &rec(crate::ipc::HashedId::new(2), 1, ProbeKind::Digital, 1),
         );
-        assert_eq!(missing.board, crate::ipc::HashedId::new(0));
-        assert_eq!(missing.probe, crate::ipc::HashedId::new(2u64).to_string());
+        assert_eq!(missing.board, crate::ipc::HashedId::ZERO);
+        assert_eq!(missing.probe, crate::ipc::HashedId::new(2u64));
+        assert!(missing.probe_label.is_empty());
         assert_eq!(missing.value, serde_json::json!("High"));
+    }
+
+    #[test]
+    fn probe_ref_wire_uses_hex_ids_only() {
+        let bare = ProbeRef {
+            board: crate::ipc::board_id_hash("a"),
+            name: crate::ipc::probe_name_hash("uart0"),
+        };
+        let json = serde_json::to_value(&bare).unwrap();
+        assert_eq!(json["board"], bare.board.to_string());
+        assert_eq!(json["name"], bare.name.to_string());
+        assert!(json.get("name_label").is_none());
+    }
+
+    #[test]
+    fn probe_catalog_item_wire_keeps_hex_and_label() {
+        let item = ProbeCatalogItem {
+            board: crate::ipc::board_id_hash("a"),
+            board_label: "a".into(),
+            probe: crate::ipc::probe_name_hash("uart0"),
+            probe_label: "uart0".into(),
+            kind: "uart".into(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["probe"], item.probe.to_string());
+        assert_eq!(json["probe_label"], "uart0");
+        assert_eq!(json["board"], item.board.to_string());
+        assert_eq!(json["board_label"], "a");
     }
 }

@@ -1,7 +1,8 @@
 //! Action catalog and invoke samples shared by node, arbiter, and server.
 //!
-//! JSON carries names only. Each process derives the same [`sim_kernel::id_hash`]
-//! from those strings. These samples are the non-JSON path and store the hashes.
+//! Public JSON carries both `id_hash` hex ids and human-readable `*_label`
+//! strings. iceoryx samples keep the packed names plus hashes for the
+//! node/arbiter path.
 
 use iceoryx2::prelude::ZeroCopySend;
 use sim_kernel::{ActionCatalogEntry, ParamSpec, id_hash};
@@ -294,8 +295,10 @@ impl AdvertisedAction {
         Ok(AdvertisedAction {
             board_id: board_hash,
             board_label: board_label.into(),
-            device,
-            action,
+            device: sample.device_hash,
+            device_label: device,
+            action: sample.action_hash,
+            action_label: action,
             description: unpack(&sample.description, sample.description_len),
             params,
         })
@@ -348,7 +351,8 @@ impl AdvertisedActionParam {
         let unit = optional_text(&param.unit, param.unit_len);
         let description = optional_text(&param.description, param.description_len);
         Ok(AdvertisedActionParam {
-            name,
+            name: param.name_hash,
+            name_label: name,
             unit,
             description,
             min: flag_f64(param.flags, FLAG_MIN, param.min),
@@ -392,7 +396,7 @@ mod tests {
     use sim_kernel::{ActionSpec, ParamSpec, id_hash};
 
     #[test]
-    fn advertise_round_trip_drops_hashes_from_json_body() {
+    fn advertise_round_trip_keeps_hashes_and_labels() {
         let mut milliseconds = ParamSpec::new("milliseconds");
         milliseconds.unit = Some("ms".into());
         milliseconds.description = Some("押下を維持する仮想時間".into());
@@ -412,9 +416,15 @@ mod tests {
             .expect("unpack");
         assert_eq!(body.board_id, crate::ipc::HashedId::new(9));
         assert_eq!(body.board_label, "board-a");
-        assert_eq!(body.device, "sw1");
-        assert_eq!(body.action, "hold");
-        assert_eq!(body.params[0].name, "milliseconds");
+        assert_eq!(body.device, crate::ipc::HashedId::new(id_hash("sw1")));
+        assert_eq!(body.device_label, "sw1");
+        assert_eq!(body.action, crate::ipc::HashedId::new(id_hash("hold")));
+        assert_eq!(body.action_label, "hold");
+        assert_eq!(
+            body.params[0].name,
+            crate::ipc::HashedId::new(id_hash("milliseconds"))
+        );
+        assert_eq!(body.params[0].name_label, "milliseconds");
         assert_eq!(body.params[0].unit.as_deref(), Some("ms"));
         assert_eq!(body.params[0].min, Some(1.0));
         assert!(body.params[0].max.is_none());

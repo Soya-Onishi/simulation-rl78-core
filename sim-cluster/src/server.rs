@@ -164,7 +164,7 @@ pub enum JobKind {
     ProbeSamples {
         id: String,
         board: crate::ipc::HashedId<u64>,
-        probe: String,
+        probe: crate::ipc::HashedId<u64>,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     },
@@ -454,7 +454,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             from_ns,
             to_ns,
         } => match world.sims.get_mut(&id) {
-            Some(sim) => match query_samples(sim, board, &probe, from_ns, to_ns) {
+            Some(sim) => match query_samples(sim, board, probe, from_ns, to_ns) {
                 Ok(body) => JobReply::ProbeSamples(body),
                 Err(err) => JobReply::Err(err),
             },
@@ -646,21 +646,12 @@ fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(
     if let Some(err) = catalog_invoke_error(&sim.catalog, request) {
         return Err(err);
     }
-    let raw: Vec<(crate::ipc::HashedId<u64>, f64)> = request
-        .params
-        .iter()
-        .map(|(name, value)| (crate::ipc::HashedId::new(sim_kernel::id_hash(name)), *value))
-        .collect();
+    let raw: Vec<(crate::ipc::HashedId<u64>, f64)> =
+        request.params.iter().map(|(k, v)| (*k, *v)).collect();
     let request_id = sim.next_request_id;
     sim.next_request_id = sim.next_request_id.saturating_add(1);
-    let sample = ActionRequest::new(
-        request_id,
-        board_hash,
-        crate::ipc::HashedId::new(sim_kernel::id_hash(&request.device)),
-        crate::ipc::HashedId::new(sim_kernel::id_hash(&request.action)),
-        &raw,
-    )
-    .map_err(|_| ApiError::bad_request("bad_param", "invalid action parameter"))?;
+    let sample = ActionRequest::new(request_id, board_hash, request.device, request.action, &raw)
+        .map_err(|_| ApiError::bad_request("bad_param", "invalid action parameter"))?;
     sim.actions
         .publish_request(&sample)
         .map_err(|err| ApiError::internal(err.to_string()))?;
@@ -815,7 +806,8 @@ fn probe_catalog_items(sim: &Simulation) -> Result<Vec<ProbeCatalogItem>, ApiErr
         .map(|point| ProbeCatalogItem {
             board: point.board_hash,
             board_label: point.board_label.clone(),
-            probe: point.name.clone(),
+            probe: crate::ipc::probe_name_hash(&point.name),
+            probe_label: point.name.clone(),
             kind: point.kind.as_str().to_string(),
         })
         .collect();
@@ -826,29 +818,32 @@ fn probe_catalog_items(sim: &Simulation) -> Result<Vec<ProbeCatalogItem>, ApiErr
 fn resolve_probes(
     sim: &Simulation,
     probes: &[ProbeRef],
-) -> Result<Vec<crate::ipc::HashedId<u64>>, ApiError> {
+) -> Result<(Vec<ProbeRef>, Vec<crate::ipc::HashedId<u64>>), ApiError> {
     require_catalog(sim)?;
+    let mut resolved = Vec::with_capacity(probes.len());
     let mut ids = Vec::with_capacity(probes.len());
     for probe in probes {
         let (board_hash, _) = resolve_board_hex(sim, probe.board)?;
-        let Some((id, _)) = sim
-            .probe_catalog
-            .iter()
-            .find(|(_, point)| point.board_hash == board_hash && point.name == probe.name)
-        else {
+        let Some((id, _)) = sim.probe_catalog.iter().find(|(_, point)| {
+            point.board_hash == board_hash && crate::ipc::probe_name_hash(&point.name) == probe.name
+        }) else {
             return Err(ApiError::not_found(format!(
                 "unknown probe {}/{}",
                 probe.board, probe.name
             )));
         };
         ids.push(*id);
+        resolved.push(ProbeRef {
+            board: board_hash,
+            name: probe.name,
+        });
     }
-    Ok(ids)
+    Ok((resolved, ids))
 }
 
 fn put_watch(sim: &mut Simulation, probes: Vec<ProbeRef>) -> Result<ProbeWatchView, ApiError> {
-    let ids = resolve_probes(sim, &probes)?;
-    sim.watch.probes = probes;
+    let (resolved, ids) = resolve_probes(sim, &probes)?;
+    sim.watch.probes = resolved;
     sim.watch.probe_ids = ids;
     let view = sim.watch.view();
     refresh_watch(sim)?;
@@ -984,21 +979,12 @@ fn query_range(
 fn query_samples(
     sim: &mut Simulation,
     board: crate::ipc::HashedId<u64>,
-    probe: &str,
+    probe: crate::ipc::HashedId<u64>,
     from_ns: Option<u64>,
     to_ns: Option<u64>,
 ) -> Result<ProbeSamplesResponse, ApiError> {
     require_catalog(sim)?;
-    if probe.is_empty() {
-        return Err(ApiError::bad_request("bad_param", "probe is required"));
-    }
-    let ids = resolve_probes(
-        sim,
-        &[ProbeRef {
-            board,
-            name: probe.to_string(),
-        }],
-    )?;
+    let (_resolved, ids) = resolve_probes(sim, &[ProbeRef { board, name: probe }])?;
     let (records, truncated) = if from_ns.is_none() && to_ns.is_none() {
         query_latest(sim, &ids)?
     } else {
@@ -1302,8 +1288,8 @@ mod tests {
     fn invoke_request(board_id: &str, device: &str, action: &str) -> InvokeActionRequest {
         InvokeActionRequest {
             board_id: board_id_hash(board_id),
-            device: device.into(),
-            action: action.into(),
+            device: crate::ipc::HashedId::new(sim_kernel::id_hash(device)),
+            action: crate::ipc::HashedId::new(sim_kernel::id_hash(action)),
             params: Default::default(),
         }
     }
@@ -1312,8 +1298,10 @@ mod tests {
         AdvertisedAction {
             board_id: board_id_hash(board_id),
             board_label: board_id.into(),
-            device: device.into(),
-            action: action.into(),
+            device: crate::ipc::HashedId::new(sim_kernel::id_hash(device)),
+            device_label: device.into(),
+            action: crate::ipc::HashedId::new(sim_kernel::id_hash(action)),
+            action_label: action.into(),
             description: String::new(),
             params: Vec::new(),
         }

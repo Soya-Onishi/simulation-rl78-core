@@ -60,7 +60,7 @@ pub trait SimulationBackend: Send + Sync {
         &self,
         id: &str,
         board: crate::ipc::HashedId<u64>,
-        probe: &str,
+        probe: crate::ipc::HashedId<u64>,
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Result<crate::contract::ProbeSamplesResponse, ApiError>;

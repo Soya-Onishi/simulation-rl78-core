@@ -123,7 +123,7 @@ impl SimulationBackend for TopoMock {
         &self,
         _id: &str,
         _board: crate::ipc::HashedId<u64>,
-        _probe: &str,
+        _probe: crate::ipc::HashedId<u64>,
         _from_ns: Option<u64>,
         _to_ns: Option<u64>,
     ) -> Result<ProbeSamplesResponse, ApiError> {

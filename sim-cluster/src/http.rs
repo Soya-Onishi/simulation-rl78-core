@@ -22,8 +22,8 @@ use tower_http::services::ServeDir;
 use crate::backend::SimulationBackend;
 use crate::contract::{
     ActionList, ApiError, AttachGdbRequest, CreateSimulationRequest, CreateSimulationResponse,
-    GdbSessionInfo, GdbSshCommand, InvokeActionRequest, ProbeSamplesResponse,
-    StartSimulationRequest, StatusEvent, TopologyView, parse_hashed_id, prepare_create_topology,
+    GdbSessionInfo, GdbSshCommand, HashedIdString, InvokeActionRequest, ProbeSamplesResponse,
+    StartSimulationRequest, StatusEvent, TopologyView, prepare_create_topology,
 };
 use crate::gdb::GdbSlot;
 use crate::inspect::{InspectReply, InspectRequest};
@@ -507,8 +507,8 @@ async fn probe_catalog(
 
 #[derive(serde::Deserialize)]
 struct ProbeSamplesQuery {
-    board: String,
-    probe: String,
+    board: HashedIdString,
+    probe: HashedIdString,
     from_ns: Option<String>,
     to_ns: Option<String>,
     viewer: Option<String>,
@@ -532,7 +532,8 @@ async fn probe_samples(
     if query.probe.is_empty() {
         return Err(ApiError::bad_request("bad_param", "probe is required"));
     }
-    let board = parse_hashed_id(&query.board, "board")?;
+    let board = query.board.parse_id("board")?;
+    let probe = query.probe.parse_id("probe")?;
     let from_ns = query.from_ns.as_deref();
     let to_ns = query.to_ns.as_deref();
     let range = ProbeRange::parse(from_ns, to_ns)
@@ -543,7 +544,7 @@ async fn probe_samples(
         backend.probe_samples(
             &id,
             board,
-            &query.probe,
+            probe,
             if latest { None } else { range.from_ns },
             if latest { None } else { range.to_ns },
         )
