@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from topology_dsl import SimulationConfig, Topology
+from topology_dsl import EndpointLoc, PortRef, SimulationConfig, Topology
 
 
 class PairTopo(Topology):
@@ -14,15 +14,15 @@ class PairTopo(Topology):
         self._elf_b = elf_b
 
     def build(self) -> None:
-        a = self.board("a", kind="rl78", elf=self._elf_a)
-        b = self.board("b", kind="rl78", elf=self._elf_b)
+        a = self._board("a", kind="rl78", elf=self._elf_a)
+        b = self._board("b", kind="rl78", elf=self._elf_b)
         a.endpoint("tx", direction="out", payload="uart")
         a.endpoint("rx", direction="in", payload="uart")
         b.endpoint("tx", direction="out", payload="uart")
         b.endpoint("rx", direction="in", payload="uart")
-        self.connect(a.port("tx"), b.port("rx"))
-        self.export("tx", a.port("tx"))
-        self.export("rx", b.port("rx"))
+        self._connect(a.port("tx"), b.port("rx"))
+        self._export("tx", a.port("tx"))
+        self._export("rx", b.port("rx"))
 
 
 class _SysTopo(Topology):
@@ -31,11 +31,11 @@ class _SysTopo(Topology):
         self._left_elf = left_elf
 
     def build(self) -> None:
-        left = self.add_child(PairTopo(name="left", elf_a=self._left_elf))
-        right = self.board("d", kind="rl78")
+        left = self._add_child(PairTopo(name="left", elf_a=self._left_elf))
+        right = self._board("d", kind="rl78")
         right.endpoint("rx", direction="in", payload="uart")
         right.endpoint("tx", direction="out", payload="uart")
-        self.connect(left.port("tx"), right.port("rx"))
+        self._connect(left.port("tx"), right.port("rx"))
 
 
 def nested_config(*, left_elf: str | None = None) -> SimulationConfig:
@@ -76,11 +76,16 @@ class HierarchyToDictTests(unittest.TestCase):
     def test_rejects_deep_connect(self) -> None:
         class Bad(Topology):
             def build(self) -> None:
-                child = self.add_child(PairTopo(name="left"))
-                leaf = child._boards["a"].port("tx")
-                d = self.board("d")
+                child = self._add_child(PairTopo(name="left"))
+                # Bypass export on purpose: leaf port is not visible to parent.
+                leaf = PortRef(
+                    chain=[EndpointLoc(path=f"{child.path}/a", port="tx")],
+                    direction="out",
+                    payload="uart",
+                )
+                d = self._board("d")
                 d.endpoint("rx", direction="in", payload="uart")
-                self.connect(leaf, d.port("rx"))
+                self._connect(leaf, d.port("rx"))
 
         with self.assertRaises(RuntimeError):
             SimulationConfig(
@@ -94,9 +99,9 @@ class HierarchyToDictTests(unittest.TestCase):
 
         class Parent(Topology):
             def build(self) -> None:
-                child = self.add_child(PairTopo(name="left"))
+                child = self._add_child(PairTopo(name="left"))
                 try:
-                    child.board("extra")
+                    child._board("extra")
                 except RuntimeError as err:
                     caught.append(err)
 
@@ -110,8 +115,8 @@ class HierarchyToDictTests(unittest.TestCase):
     def test_rejects_board_child_name_collision(self) -> None:
         class Collision(Topology):
             def build(self) -> None:
-                self.board("left")
-                self.add_child(PairTopo(name="left"))
+                self._board("left")
+                self._add_child(PairTopo(name="left"))
 
         with self.assertRaises(ValueError):
             SimulationConfig(
@@ -137,12 +142,12 @@ class HierarchyToDictTests(unittest.TestCase):
     def test_rejects_duplicate_connect(self) -> None:
         class Dup(Topology):
             def build(self) -> None:
-                a = self.board("a")
-                b = self.board("b")
+                a = self._board("a")
+                b = self._board("b")
                 a.endpoint("tx", direction="out", payload="uart")
                 b.endpoint("rx", direction="in", payload="uart")
-                self.connect(a.port("tx"), b.port("rx"))
-                self.connect(a.port("tx"), b.port("rx"))
+                self._connect(a.port("tx"), b.port("rx"))
+                self._connect(a.port("tx"), b.port("rx"))
 
         with self.assertRaises(ValueError):
             SimulationConfig(

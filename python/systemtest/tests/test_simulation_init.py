@@ -76,7 +76,7 @@ class SimulationInitTests(unittest.TestCase):
 
             class T(Topology):
                 def build(self) -> None:
-                    self.board("a", elf=str(elf))
+                    self._board("a", elf=str(elf))
 
             def config() -> SimulationConfig:
                 return SimulationConfig(

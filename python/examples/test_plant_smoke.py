@@ -14,12 +14,12 @@ from systemtest.fixture import sim_case
 
 class PlantTopo(Topology):
     def build(self) -> None:
-        board = self.board("a", kind="rl78")
+        board = self._board("a", kind="rl78")
         board.endpoint("dac0", direction="out", payload="analog")
-        plant = self.plant("p")
+        plant = self._plant("p")
         plant.endpoint("vin", direction="in", payload="analog")
         plant.endpoint("vout", direction="out", payload="analog")
-        self.connect(board.port("dac0"), plant.port("vin"))
+        self._connect(board.port("dac0"), plant.port("vin"))
 
 
 def plant_config() -> SimulationConfig:

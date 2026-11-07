@@ -106,7 +106,7 @@ class CreateCliTests(unittest.TestCase):
                     "\n"
                     "class T(Topology):\n"
                     "    def build(self):\n"
-                    '        self.board("a", elf="fw.bin")\n'
+                    '        self._board("a", elf="fw.bin")\n'
                     "\n"
                     "@simulation\n"
                     "def demo() -> SimulationConfig:\n"
@@ -160,7 +160,7 @@ class SimulationDiscoveryTests(unittest.TestCase):
             "from topology_dsl import SimulationConfig, Topology, simulation\n"
             "class T(Topology):\n"
             "    def build(self):\n"
-            '        self.board("a")\n'
+            '        self._board("a")\n'
             "@simulation\n"
             "def one() -> SimulationConfig:\n"
             "    return SimulationConfig(1, 1, T(name='demo'))\n"
@@ -195,7 +195,7 @@ class SimulationDiscoveryTests(unittest.TestCase):
                 "from topology_dsl import SimulationConfig, Topology, simulation\n"
                 "class T(Topology):\n"
                 "    def build(self):\n"
-                '        self.board("a")\n'
+                '        self._board("a")\n'
                 "@simulation\n"
                 "def imported() -> SimulationConfig:\n"
                 "    return SimulationConfig(1, 1, T(name='imp'))\n",
@@ -209,7 +209,7 @@ class SimulationDiscoveryTests(unittest.TestCase):
                 "from topology_dsl import SimulationConfig, Topology, simulation\n"
                 "class T(Topology):\n"
                 "    def build(self):\n"
-                '        self.board("a")\n'
+                '        self._board("a")\n'
                 "@simulation\n"
                 "def local() -> SimulationConfig:\n"
                 "    return SimulationConfig(1, 1, T(name='demo'))\n",

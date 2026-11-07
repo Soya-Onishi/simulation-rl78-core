@@ -1,6 +1,6 @@
 """Hierarchical Python DSL for logical multi-board topologies.
 
-Define a concrete ``Topology`` (``build``) and a ``@simulation`` function that
+Define a concrete ``Topology`` (``build`` with ``_board`` / ``_connect`` / ...) and a ``@simulation`` function that
 returns ``SimulationConfig``. ``python -m topology_dsl run|create <script.py>``
 loads the script, requires exactly one ``@simulation`` function, and turns its
 config into flat simulation JSON.
@@ -126,11 +126,19 @@ class Topology(ABC):
             return self.name
         return f"{self._parent.path}/{self.name}"
 
+    @property
+    def is_built(self) -> bool:
+        return self._built
+
+    @property
+    def is_root(self) -> bool:
+        return self._parent is None
+
     @abstractmethod
     def build(self) -> None:
         """Register boards/plants, children, exports, and connections."""
 
-    def board(
+    def _board(
         self, local_name: str, *, kind: str = "rl78", elf: Optional[str] = None
     ) -> Board:
         self._require_building()
@@ -149,15 +157,15 @@ class Topology(ABC):
         self._boards[local_name] = board
         return board
 
-    def plant(self, local_name: str, *, kind: str = "plant") -> Board:
+    def _plant(self, local_name: str, *, kind: str = "plant") -> Board:
         """Register a plant node (no ELF). JSON is still a ``boards[]`` entry."""
-        return self.board(local_name, kind=kind)
+        return self._board(local_name, kind=kind)
 
-    def add_child(self, child: Topology) -> Topology:
+    def _add_child(self, child: Topology) -> Topology:
         self._require_building()
         if not isinstance(child, Topology):
-            raise TypeError("add_child expects a Topology instance")
-        if child._parent is not None:
+            raise TypeError("_add_child expects a Topology instance")
+        if not child.is_root:
             raise ValueError(f"topology {child.name!r} already has a parent")
         if child.name in self._children:
             raise ValueError(f"duplicate child topology name {child.name!r}")
@@ -165,14 +173,14 @@ class Topology(ABC):
             raise ValueError(
                 f"child topology name {child.name!r} conflicts with a board"
             )
-        if child._built:
+        if child.is_built:
             raise ValueError(f"topology {child.name!r} is already built")
-        child._parent = self
+        child._attach_parent(self)
         self._children[child.name] = child
-        child._run_build()
+        child.run_build()
         return child
 
-    def export(self, name: str, endpoint: PortRef) -> PortRef:
+    def _export(self, name: str, endpoint: PortRef) -> PortRef:
         self._require_building()
         if not name:
             raise ValueError("export name must not be empty")
@@ -196,7 +204,7 @@ class Topology(ABC):
         except KeyError as exc:
             raise KeyError(f"topology {self.path!r}: unknown export {name!r}") from exc
 
-    def connect(
+    def _connect(
         self,
         src: PortRef,
         dst: PortRef,
@@ -245,8 +253,8 @@ class Topology(ABC):
             edge["uart_ring_len"] = uart_ring_len
         self._edges.append(edge)
 
-    def _run_build(self) -> None:
-        if self._built:
+    def run_build(self) -> None:
+        if self.is_built:
             raise RuntimeError(f"topology {self.path!r} is already built")
         self._building = True
         try:
@@ -255,10 +263,14 @@ class Topology(ABC):
         finally:
             self._building = False
 
+    def _attach_parent(self, parent: Topology) -> None:
+        self._parent = parent
+
     def _require_building(self) -> None:
         if not self._building:
             raise RuntimeError(
-                f"topology {self.name!r}: board/connect/export/add_child only valid during build()"
+                f"topology {self.name!r}: "
+                "_board/_connect/_export/_add_child only valid during build()"
             )
 
     def _is_visible(self, ref: PortRef) -> bool:
@@ -277,16 +289,16 @@ class Topology(ABC):
                 return True
         return False
 
-    def _collect_boards(self) -> list[Board]:
+    def collect_boards(self) -> list[Board]:
         boards = list(self._boards.values())
         for child in self._children.values():
-            boards.extend(child._collect_boards())
+            boards.extend(child.collect_boards())
         return boards
 
-    def _collect_edges(self) -> list[dict[str, Any]]:
+    def collect_edges(self) -> list[dict[str, Any]]:
         edges = list(self._edges)
         for child in self._children.values():
-            edges.extend(child._collect_edges())
+            edges.extend(child.collect_edges())
         return edges
 
 
@@ -311,14 +323,14 @@ class SimulationConfig:
         """
         if self._cached is not None:
             return copy.deepcopy(self._cached)
-        if self.topology._parent is not None:
+        if not self.topology.is_root:
             raise RuntimeError("SimulationConfig.topology must be a top-level Topology")
-        if not self.topology._built:
-            self.topology._run_build()
-        boards = self.topology._collect_boards()
+        if not self.topology.is_built:
+            self.topology.run_build()
+        boards = self.topology.collect_boards()
         out: dict[str, Any] = {
             "boards": [b.to_dict() for b in boards],
-            "edges": self.topology._collect_edges(),
+            "edges": self.topology.collect_edges(),
             "margin_ns": self.margin_ns,
             "headroom_threshold_ns": self.headroom_threshold_ns,
         }

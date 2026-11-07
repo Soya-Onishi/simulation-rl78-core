@@ -5,12 +5,12 @@ from topology_dsl import SimulationConfig, Topology, simulation
 
 class BoardPlantAnalog(Topology):
     def build(self) -> None:
-        a = self.board("a", kind="rl78")
+        a = self._board("a", kind="rl78")
         a.endpoint("dac0", direction="out", payload="analog")
-        p = self.plant("p")
+        p = self._plant("p")
         p.endpoint("vin", direction="in", payload="analog")
         p.endpoint("vout", direction="out", payload="analog")
-        self.connect(a.port("dac0"), p.port("vin"))
+        self._connect(a.port("dac0"), p.port("vin"))
 
 
 @simulation

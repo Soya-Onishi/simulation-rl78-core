@@ -11,13 +11,13 @@ class TwoBoardSwitch(Topology):
         self._elf_b = elf_b
 
     def build(self) -> None:
-        a = self.board("a", kind="rl78", elf=self._elf_a)
-        b = self.board("b", kind="rl78", elf=self._elf_b)
+        a = self._board("a", kind="rl78", elf=self._elf_a)
+        b = self._board("b", kind="rl78", elf=self._elf_b)
         a.endpoint("uart0_tx", direction="out", payload="uart")
         a.endpoint("uart0_rx", direction="in", payload="uart")
         b.endpoint("uart0_tx", direction="out", payload="uart")
         b.endpoint("uart0_rx", direction="in", payload="uart")
-        self.connect(a.port("uart0_tx"), b.port("uart0_rx"))
+        self._connect(a.port("uart0_tx"), b.port("uart0_rx"))
 
 
 @simulation
