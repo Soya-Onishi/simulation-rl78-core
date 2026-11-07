@@ -529,9 +529,6 @@ async fn probe_samples(
         },
     )
     .await?;
-    if query.probe.is_empty() {
-        return Err(ApiError::bad_request("bad_param", "probe is required"));
-    }
     let board = query.board.parse_id("board")?;
     let probe = query.probe.parse_id("probe")?;
     let from_ns = query.from_ns.as_deref();

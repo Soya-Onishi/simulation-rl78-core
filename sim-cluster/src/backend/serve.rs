@@ -340,9 +340,6 @@ async fn probe_samples(
     Path(id): Path<String>,
     Query(query): Query<SamplesQuery>,
 ) -> Result<Json<ProbeSamplesResponse>, ApiError> {
-    if query.probe.is_empty() {
-        return Err(ApiError::bad_request("bad_param", "probe is required"));
-    }
     let board = query.board.parse_id("board")?;
     let probe = query.probe.parse_id("probe")?;
     let backend = state.backend.clone();
