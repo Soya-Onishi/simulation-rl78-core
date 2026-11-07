@@ -109,13 +109,13 @@ pub struct AdvertisedActionParam {
     pub name: crate::ipc::HashedId<u64>,
     /// Human-readable parameter name.
     pub name_label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<f64>,
@@ -568,6 +568,23 @@ mod tests {
         assert_eq!(json["action_label"], "hold");
         assert_eq!(json["params"][0]["name"], body.params[0].name.to_string());
         assert_eq!(json["params"][0]["name_label"], "milliseconds");
+    }
+
+    #[test]
+    fn advertised_action_param_deserializes_omitted_optionals() {
+        let name = crate::ipc::HashedId::new(id_hash("level"));
+        let parsed: AdvertisedActionParam = serde_json::from_value(serde_json::json!({
+            "name": name.to_string(),
+            "name_label": "level",
+        }))
+        .unwrap();
+        assert_eq!(parsed.name, name);
+        assert_eq!(parsed.name_label, "level");
+        assert_eq!(parsed.unit, None);
+        assert_eq!(parsed.description, None);
+        assert_eq!(parsed.min, None);
+        assert_eq!(parsed.max, None);
+        assert_eq!(parsed.default, None);
     }
 
     #[test]
