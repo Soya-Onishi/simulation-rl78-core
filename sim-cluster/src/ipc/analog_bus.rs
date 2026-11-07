@@ -29,7 +29,7 @@ impl NodeAnalogPorts {
     pub fn open_for_board(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let mut producers = HashMap::new();
@@ -45,11 +45,11 @@ impl NodeAnalogPorts {
                 &edge.to.port,
             );
             let svc_name = names::analog_edge(cluster_key, id);
-            if edge.from.path == board_id {
+            if edge.from.path == board_name {
                 let puber =
                     open_or_create_analog_publisher(node, &svc_name, DEFAULT_ANALOG_RING_LEN)?;
                 producers.insert(id, puber);
-            } else if edge.to.path == board_id {
+            } else if edge.to.path == board_name {
                 let sub =
                     open_or_create_analog_subscriber(node, &svc_name, DEFAULT_ANALOG_RING_LEN)?;
                 consumers.insert(id, sub);

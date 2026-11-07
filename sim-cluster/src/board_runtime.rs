@@ -38,7 +38,7 @@ pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
 pub struct BoardOptions {
     /// When true, [`node!`] calls [`list_catalog`] instead of [`run_node`].
     pub list_catalog: bool,
-    pub board_id: String,
+    pub board_name: String,
     pub cluster_key: String,
     pub iox_root: PathBuf,
     pub topology_path: PathBuf,
@@ -83,7 +83,7 @@ pub fn parse_board_args(
     args: impl IntoIterator<Item = String>,
 ) -> Result<BoardOptions, BoardCliError> {
     let mut list_catalog = false;
-    let mut board_id: Option<String> = None;
+    let mut board_name: Option<String> = None;
     let mut cluster_key: Option<String> = None;
     let mut iox_root: Option<PathBuf> = None;
     let mut topology: Option<PathBuf> = None;
@@ -92,9 +92,9 @@ pub fn parse_board_args(
         match arg.as_str() {
             "-h" | "--help" => return Err(BoardCliError::Help),
             "--list-catalog" => list_catalog = true,
-            "--board-id" => {
-                board_id = Some(iter.next().ok_or_else(|| {
-                    BoardCliError::Message(format!("{prog}: --board-id requires a value"))
+            "--board-name" => {
+                board_name = Some(iter.next().ok_or_else(|| {
+                    BoardCliError::Message(format!("{prog}: --board-name requires a value"))
                 })?);
             }
             "--cluster-key" => {
@@ -122,22 +122,22 @@ pub fn parse_board_args(
     if list_catalog {
         return Ok(BoardOptions {
             list_catalog: true,
-            board_id: board_id.unwrap_or_default(),
+            board_name: board_name.unwrap_or_default(),
             cluster_key: cluster_key.unwrap_or_default(),
             iox_root: iox_root.unwrap_or_default(),
             topology_path: topology.unwrap_or_default(),
         });
     }
-    let (Some(board_id), Some(cluster_key), Some(iox_root), Some(topology_path)) =
-        (board_id, cluster_key, iox_root, topology)
+    let (Some(board_name), Some(cluster_key), Some(iox_root), Some(topology_path)) =
+        (board_name, cluster_key, iox_root, topology)
     else {
         return Err(BoardCliError::Message(format!(
-            "{prog}: --board-id, --cluster-key, --iox-root, and --topology are required"
+            "{prog}: --board-name, --cluster-key, --iox-root, and --topology are required"
         )));
     };
     Ok(BoardOptions {
         list_catalog: false,
-        board_id,
+        board_name,
         cluster_key,
         iox_root,
         topology_path,
@@ -149,7 +149,7 @@ pub fn parse_board_args(
 pub fn board_usage(prog: &str) -> String {
     format!(
         "Usage:\n\
-         {prog} --board-id <id> --cluster-key <key> --iox-root <path> --topology <json>\n\
+         {prog} --board-name <name> --cluster-key <key> --iox-root <path> --topology <json>\n\
          {prog} --list-catalog\n\
          \n\
          Cluster mode is spawned by cluster-arbiter. Starts AwaitingStartup, becomes\n\
@@ -324,28 +324,28 @@ pub fn run_node<E: Entity>(
     opts: BoardOptions,
     build: impl FnOnce() -> (E, BoardPorts, Vec<ProbePoint>),
 ) -> Result<(), BoardError> {
-    let board_id = opts.board_id.as_str();
-    let board_hash = board_id_hash(board_id);
+    let board_name = opts.board_name.as_str();
+    let board_hash = board_id_hash(board_name);
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
     let hashes = crate::topology::build_topology_hashes(&topo)
         .map_err(|err| BoardError::Message(err.to_string()))?;
-    let board = find_board(&topo, board_id)?;
+    let board = find_board(&topo, board_name)?;
     let boards = hashes.boards;
 
     let config = isolated_config(&opts.iox_root)?;
-    let iox_node = create_node(&config, &format!("node-{board_id}-{}", opts.cluster_key))?;
+    let iox_node = create_node(&config, &format!("node-{board_name}-{}", opts.cluster_key))?;
     let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
     let actions = NodeActions::open(&iox_node, &opts.cluster_key, topo.boards.len())?;
     let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
-    let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_id, board, &topo)?;
+    let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_name, board, &topo)?;
 
     let (entity, ports, probe_points) = build();
     let mut probes = NodeProbeRuntime::open(
         &iox_node,
         &opts.cluster_key,
         board_hash,
-        board_id,
+        board_name,
         topo.boards.len(),
         probe_points,
     )?;
@@ -609,11 +609,14 @@ fn reply(actions: &NodeActions, request_id: u64, status: ActionStatus) -> Result
     Ok(())
 }
 
-fn find_board<'a>(topo: &'a LogicalTopology, board_id: &str) -> Result<&'a BoardSpec, BoardError> {
+fn find_board<'a>(
+    topo: &'a LogicalTopology,
+    board_name: &str,
+) -> Result<&'a BoardSpec, BoardError> {
     topo.boards
         .iter()
-        .find(|b| b.id == board_id)
-        .ok_or_else(|| BoardError::Message(format!("board id `{board_id}` not in topology")))
+        .find(|b| b.id == board_name)
+        .ok_or_else(|| BoardError::Message(format!("board name `{board_name}` not in topology")))
 }
 
 fn perform_local_step<E: Entity>(
@@ -719,7 +722,7 @@ mod tests {
         let opts = parse_board_args(
             "prog",
             [
-                "--board-id".into(),
+                "--board-name".into(),
                 "a".into(),
                 "--cluster-key".into(),
                 "k".into(),
@@ -731,7 +734,7 @@ mod tests {
         )
         .unwrap();
         assert!(!opts.list_catalog);
-        assert_eq!(opts.board_id, "a");
+        assert_eq!(opts.board_name, "a");
         assert_eq!(opts.cluster_key, "k");
     }
 
@@ -755,7 +758,7 @@ mod tests {
             "prog",
             [
                 "--list-catalog".into(),
-                "--board-id".into(),
+                "--board-name".into(),
                 "a".into(),
                 "--cluster-key".into(),
                 "k".into(),
@@ -767,7 +770,7 @@ mod tests {
         )
         .unwrap();
         assert!(opts.list_catalog);
-        assert_eq!(opts.board_id, "a");
+        assert_eq!(opts.board_name, "a");
     }
 
     #[test]

@@ -31,7 +31,7 @@ impl NodeUartPorts {
     pub fn open_for_board(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let mut producers = HashMap::new();
@@ -48,10 +48,10 @@ impl NodeUartPorts {
             );
             let svc_name = names::uart_edge(cluster_key, id);
             let capacity = LogicalTopology::uart_ring_len(edge).max(2) as usize;
-            if edge.from.path == board_id {
+            if edge.from.path == board_name {
                 let puber = open_or_create_uart_publisher(node, &svc_name, capacity)?;
                 producers.insert(id, puber);
-            } else if edge.to.path == board_id {
+            } else if edge.to.path == board_name {
                 let sub = open_or_create_uart_subscriber(node, &svc_name, capacity)?;
                 consumers.insert(id, sub);
             }

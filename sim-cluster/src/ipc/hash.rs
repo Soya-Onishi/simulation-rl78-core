@@ -32,14 +32,11 @@ impl Hexable for u64 {
 }
 
 /// Hashed or opaque id stored numerically in-process; serde / [`Display`] use hex.
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HashedId<T: Hexable>(T);
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, ZeroCopySend)]
+pub struct HashedId<T: Hexable + ZeroCopySend>(T);
 
-// SAFETY: transparent wrapper over `T: ZeroCopySend` (same layout as `T`).
-unsafe impl<T: Hexable + ZeroCopySend> ZeroCopySend for HashedId<T> {}
-
-impl<T: Hexable> HashedId<T> {
+impl<T: Hexable + ZeroCopySend> HashedId<T> {
     #[must_use]
     pub const fn new(value: T) -> Self {
         Self(value)
@@ -66,25 +63,25 @@ impl HashedId<u64> {
     }
 }
 
-impl<T: Hexable> From<T> for HashedId<T> {
+impl<T: Hexable + ZeroCopySend> From<T> for HashedId<T> {
     fn from(value: T) -> Self {
         Self::new(value)
     }
 }
 
-impl<T: Hexable> fmt::Debug for HashedId<T> {
+impl<T: Hexable + ZeroCopySend> fmt::Debug for HashedId<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "HashedId({})", self.0.to_hex())
     }
 }
 
-impl<T: Hexable> fmt::Display for HashedId<T> {
+impl<T: Hexable + ZeroCopySend> fmt::Display for HashedId<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0.to_hex())
     }
 }
 
-impl<T: Hexable> FromStr for HashedId<T> {
+impl<T: Hexable + ZeroCopySend> FromStr for HashedId<T> {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -92,17 +89,17 @@ impl<T: Hexable> FromStr for HashedId<T> {
     }
 }
 
-impl<T: Hexable> Serialize for HashedId<T> {
+impl<T: Hexable + ZeroCopySend> Serialize for HashedId<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0.to_hex())
     }
 }
 
-impl<'de, T: Hexable> Deserialize<'de> for HashedId<T> {
+impl<'de, T: Hexable + ZeroCopySend> Deserialize<'de> for HashedId<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct HexVisitor<T>(std::marker::PhantomData<T>);
 
-        impl<'de, T: Hexable> Visitor<'de> for HexVisitor<T> {
+        impl<'de, T: Hexable + ZeroCopySend> Visitor<'de> for HexVisitor<T> {
             type Value = HashedId<T>;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -122,8 +119,8 @@ impl<'de, T: Hexable> Deserialize<'de> for HashedId<T> {
 
 /// Stable 64-bit hash of a board id / path string (UTF-8 bytes).
 #[must_use]
-pub fn board_id_hash(board_id: &str) -> HashedId<u64> {
-    HashedId::new(sim_kernel::id_hash(board_id))
+pub fn board_id_hash(board_name: &str) -> HashedId<u64> {
+    HashedId::new(sim_kernel::id_hash(board_name))
 }
 
 /// Stable 64-bit hash of a port / endpoint name (UTF-8 bytes).

@@ -826,7 +826,7 @@ fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Chil
     for board in &topo.boards {
         let bin = binary_for_kind(opts, &board.kind)?;
         let child = Command::new(bin)
-            .arg("--board-id")
+            .arg("--board-name")
             .arg(&board.id)
             .arg("--cluster-key")
             .arg(&opts.cluster_key)

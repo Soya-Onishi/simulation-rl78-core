@@ -81,14 +81,14 @@ impl UartDataPlaneMap {
     pub fn open(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         board: &BoardSpec,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let NodeUartPorts {
             mut producers,
             mut consumers,
-        } = NodeUartPorts::open_for_board(node, cluster_key, board_id, topo_edges)?;
+        } = NodeUartPorts::open_for_board(node, cluster_key, board_name, topo_edges)?;
 
         let mut pending_rx = Vec::new();
         let mut tx_ep_to_edges: HashMap<String, Vec<crate::ipc::HashedId<u64>>> = HashMap::new();
@@ -104,8 +104,8 @@ impl UartDataPlaneMap {
                 &edge.to.port,
             );
             match (
-                edge.to.path.as_str() == board_id,
-                edge.from.path.as_str() == board_id,
+                edge.to.path.as_str() == board_name,
+                edge.from.path.as_str() == board_name,
             ) {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
@@ -318,14 +318,14 @@ impl AnalogDataPlaneMap {
     pub fn open(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        board_id: &str,
+        board_name: &str,
         board: &BoardSpec,
         topo_edges: &[DirectedEdge],
     ) -> Result<Self, IpcError> {
         let NodeAnalogPorts {
             mut producers,
             mut consumers,
-        } = NodeAnalogPorts::open_for_board(node, cluster_key, board_id, topo_edges)?;
+        } = NodeAnalogPorts::open_for_board(node, cluster_key, board_name, topo_edges)?;
 
         let mut pending_rx = Vec::new();
         let mut tx_ep_to_edges: HashMap<String, Vec<crate::ipc::HashedId<u64>>> = HashMap::new();
@@ -341,8 +341,8 @@ impl AnalogDataPlaneMap {
                 &edge.to.port,
             );
             match (
-                edge.to.path.as_str() == board_id,
-                edge.from.path.as_str() == board_id,
+                edge.to.path.as_str() == board_name,
+                edge.from.path.as_str() == board_name,
             ) {
                 (true, _) => {
                     let Some(sub) = consumers.remove(&id) else {
@@ -515,17 +515,17 @@ impl DataPlane for AnalogDataPlane {
     }
 }
 
-/// Open every data-plane map needed by `board_id` for the given topology.
+/// Open every data-plane map needed by `board_name` for the given topology.
 pub fn open_data_planes(
     node: &Node<ipc::Service>,
     cluster_key: &str,
-    board_id: &str,
+    board_name: &str,
     board: &BoardSpec,
     topo: &LogicalTopology,
 ) -> Result<Vec<Box<dyn DataPlaneMap>>, DataPlaneError> {
     let mut kinds = HashSet::new();
     for edge in &topo.edges {
-        if edge.from.path == board_id || edge.to.path == board_id {
+        if edge.from.path == board_name || edge.to.path == board_name {
             kinds.insert(edge.payload);
         }
     }
@@ -537,12 +537,13 @@ pub fn open_data_planes(
     for kind in kinds {
         match kind {
             PayloadKind::Uart => {
-                let map = UartDataPlaneMap::open(node, cluster_key, board_id, board, &topo.edges)?;
+                let map =
+                    UartDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
                 maps.push(Box::new(map));
             }
             PayloadKind::Analog => {
                 let map =
-                    AnalogDataPlaneMap::open(node, cluster_key, board_id, board, &topo.edges)?;
+                    AnalogDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
                 maps.push(Box::new(map));
             }
             PayloadKind::Digital => {
