@@ -65,16 +65,11 @@ pub fn id_hash_table<'a>(
     let mut table = HashMap::new();
     for id in ids {
         let h = hash(id);
-        match table.get(&h) {
-            Some(existing) if existing != id => {
-                return Err(format!(
-                    "hash collision between '{existing}' and '{id}' (hash={h:#x})"
-                ));
-            }
-            Some(_) => {}
-            None => {
-                table.insert(h, id.to_string());
-            }
+
+        if let Some(existing) = table.insert(h, id.to_string()) && existing != id {
+            return Err(format!(
+                "hash collision between '{existing}' and '{id}' (hash={h:#x})"
+            ));
         }
     }
     Ok(table)
