@@ -60,6 +60,8 @@ class PortRef:
 @dataclass
 class Board:
     id: str
+    # Hierarchical location in the topology tree (may differ from ``id`` later).
+    path: str
     kind: str
     # One firmware source: filesystem path, file://, http(s)://, or
     # base64:<payload>. These are alternatives and are not combined.
@@ -72,7 +74,7 @@ class Board:
         if name in self._endpoints:
             raise ValueError(f"board {self.id!r}: duplicate endpoint {name!r}")
         ref = PortRef(
-            chain=[EndpointLoc(path=self.id, port=name)],
+            chain=[EndpointLoc(path=self.path, port=name)],
             direction=direction,
             payload=payload,
         )
@@ -152,8 +154,10 @@ class Topology(ABC):
             raise ValueError(
                 f"board local name {local_name!r} conflicts with a child topology"
             )
-        board_id = f"{self.path}/{local_name}"
-        board = Board(id=board_id, kind=kind, elf=elf)
+        board_path = f"{self.path}/{local_name}"
+        # Today the wire-facing board id equals the hierarchical path; keep the
+        # fields separate so path comparisons never depend on id remaining so.
+        board = Board(id=board_path, path=board_path, kind=kind, elf=elf)
         self._boards[local_name] = board
         return board
 
@@ -280,7 +284,7 @@ class Topology(ABC):
             board = self._boards.get(local)
             if (
                 board is not None
-                and board.id == last.path
+                and board.path == last.path
                 and last.port in board._endpoints
             ):
                 return True

@@ -171,6 +171,28 @@ class HierarchyToDictTests(unittest.TestCase):
             ).to_dict()
         self.assertIn("duplicate edge", str(ctx.exception))
 
+    def test_endpoint_and_visibility_use_path_not_id(self) -> None:
+        seen: dict[str, str] = {}
+
+        class T(Topology):
+            def build(self) -> None:
+                a = self._board("a")
+                b = self._board("b")
+                a.endpoint("tx", direction="out", payload="uart")
+                b.endpoint("rx", direction="in", payload="uart")
+                # Path references must not depend on id staying equal to path.
+                a.id = "uuid-a"
+                b.id = "uuid-b"
+                seen["a_path"] = a.path
+                seen["a_leaf"] = a.port("tx").leaf.path
+                seen["a_id"] = a.id
+                self._connect(a.port("tx"), b.port("rx"))
+
+        T(name="demo").run_build()
+        self.assertEqual(seen["a_path"], "demo/a")
+        self.assertEqual(seen["a_leaf"], "demo/a")
+        self.assertEqual(seen["a_id"], "uuid-a")
+
 
 if __name__ == "__main__":
     unittest.main()
