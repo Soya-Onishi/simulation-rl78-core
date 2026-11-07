@@ -206,7 +206,7 @@ mod tests {
             }],
             margin_ns: 1,
             headroom_threshold_ns: 1,
-            ready_timeout_ms: 1000,
+            booting_timeout_ms: 1000,
         };
         // No arbiter-side create: TX/RX nodes open_or_create themselves.
         let na = create_node(&config, "uart-a").unwrap();

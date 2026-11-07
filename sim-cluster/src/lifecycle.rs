@@ -1,33 +1,58 @@
 //! Event-driven control-plane state machines (arbiter peers and nodes).
 //!
 //! Unexpected messages do not fail the cluster: they log a warning and leave
-//! the state unchanged. Ready-barrier timeout remains a hard failure at the
+//! the state unchanged. Booting-barrier timeout remains a hard failure at the
 //! arbiter orchestration layer (simulation must not start).
 
-use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
+use crate::control::{ControlToArbiter, ControlToNode, HostStopReason, NodeStateWire};
 
 /// Per-node control-plane state.
 ///
-/// Starts in [`AwaitingStartup`](Self::AwaitingStartup) until the first
-/// [`ControlToNode::StartupRecord`]. After Ready, idle/halt uses
-/// [`Stopped`](Self::Stopped) — the same state as after a breakpoint /
-/// [`ControlToNode::ClusterStop`]. Simulation work runs only in
-/// [`Running`](Self::Running).
+/// Process init is conceptually [`Booting`](Self::Booting). Once the control
+/// loop starts, the node is [`Stopped`](Self::Stopped) — the same idle state as
+/// after a breakpoint / [`ControlToNode::ClusterStop`]. Simulation work runs
+/// only in [`Running`](Self::Running).
+///
+/// Arbiter peers use [`PeerState::Booting`] until the first
+/// [`ControlToArbiter::State`] arrives; nodes normally report [`Stopped`] after
+/// init, so [`Booting`](Self::Booting) is mainly a wire / peer label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeState {
-    /// Waiting for the first usable [`ControlToNode::StartupRecord`].
-    AwaitingStartup,
-    /// Idle: Ready sent and waiting for Start, or halted after ClusterStop / host stop.
+    /// Process init before the control loop (rarely reported on the wire).
+    Booting,
+    /// Idle: waiting for Start, or halted after ClusterStop / host stop.
     Stopped,
     /// Simulation may run.
     Running,
 }
 
+impl NodeState {
+    /// Encode for [`ControlToArbiter::State`].
+    #[must_use]
+    pub fn to_wire(self) -> NodeStateWire {
+        match self {
+            Self::Booting => NodeStateWire::Booting,
+            Self::Stopped => NodeStateWire::Stopped,
+            Self::Running => NodeStateWire::Running,
+        }
+    }
+
+    /// Decode a [`NodeStateWire`] sample.
+    #[must_use]
+    pub fn from_wire(wire: NodeStateWire) -> Self {
+        match wire {
+            NodeStateWire::Booting => Self::Booting,
+            NodeStateWire::Stopped => Self::Stopped,
+            NodeStateWire::Running => Self::Running,
+        }
+    }
+}
+
 /// Side effects requested by [`NodeState::on_message`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeEffect {
-    /// Send [`ControlToArbiter::Ready`] to the arbiter.
-    SendReady,
+    /// Reply to [`ControlToNode::GetState`] with the current [`NodeState`].
+    ReportState,
     /// Apply a new virtual-time ceiling locally.
     SetAllowed { allowed_ns: u64 },
     /// Hold-reset devices and the CPU via [`sim_kernel::Machine::reset`].
@@ -53,13 +78,7 @@ impl NodeState {
     #[must_use]
     pub fn on_message(self, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
         match (self, msg) {
-            (NodeState::AwaitingStartup, ControlToNode::StartupRecord { .. }) => {
-                (NodeState::Stopped, Some(NodeEffect::SendReady))
-            }
-            // Late / republished StartupRecord while idle: re-send Ready for the barrier.
-            (NodeState::Stopped, ControlToNode::StartupRecord { .. }) => {
-                (NodeState::Stopped, Some(NodeEffect::SendReady))
-            }
+            (state, ControlToNode::GetState) => (state, Some(NodeEffect::ReportState)),
             (NodeState::Stopped | NodeState::Running, ControlToNode::Start { allowed_ns }) => (
                 NodeState::Running,
                 Some(NodeEffect::SetAllowed { allowed_ns }),
@@ -77,10 +96,9 @@ impl NodeState {
                 NodeState::Stopped,
                 Some(NodeEffect::Warn(format!("ClusterStop ({reason})"))),
             ),
-            (
-                NodeState::AwaitingStartup | NodeState::Stopped,
-                ControlToNode::ClusterStop { .. },
-            ) => (NodeState::Stopped, None),
+            (NodeState::Booting | NodeState::Stopped, ControlToNode::ClusterStop { .. }) => {
+                (NodeState::Stopped, None)
+            }
             (
                 state,
                 ControlToNode::ProbeWatch {
@@ -112,14 +130,24 @@ impl NodeState {
 /// Per-board peer state on the arbiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerState {
-    /// StartupRecord sent (or about to be); waiting for Ready.
-    AwaitingReady,
-    /// Ready received.
-    Ready,
+    /// Waiting for the first [`ControlToArbiter::State`] (or still reported Booting).
+    Booting,
     /// Start broadcast done for this peer.
     Running,
-    /// Stopped (ClusterStop sent or connection lost).
+    /// Stopped (ClusterStop sent, or reported Stopped after boot).
     Stopped,
+}
+
+impl PeerState {
+    /// Map a node-reported wire state onto the arbiter peer view.
+    #[must_use]
+    pub fn from_node_wire(wire: NodeStateWire) -> Self {
+        match NodeState::from_wire(wire) {
+            NodeState::Booting => Self::Booting,
+            NodeState::Stopped => Self::Stopped,
+            NodeState::Running => Self::Running,
+        }
+    }
 }
 
 /// Side effects for arbiter peer transitions.
@@ -141,18 +169,16 @@ impl PeerState {
     ///
     /// Caller must select the peer via [`ControlToArbiter::from_board`]; this
     /// method does not re-check sender identity.
+    ///
+    /// [`ControlToArbiter::State`] is applied during the Booting barrier via
+    /// [`Self::from_node_wire`]. Late samples after the barrier are ignored
+    /// here without a warning (queued replies to earlier GetState).
     #[must_use]
     pub fn on_message(self, msg: ControlToArbiter) -> (Self, Option<PeerEffect>) {
         match (self, msg) {
-            (PeerState::AwaitingReady, ControlToArbiter::Ready { .. }) => (PeerState::Ready, None),
-            (PeerState::Ready, ControlToArbiter::Ready { from }) => (
-                PeerState::Ready,
-                Some(PeerEffect::Warn(format!(
-                    "duplicate Ready from {from}; ignoring"
-                ))),
-            ),
+            (state, ControlToArbiter::State { .. }) => (state, None),
             (
-                state @ (PeerState::Ready | PeerState::Running | PeerState::Stopped),
+                state @ (PeerState::Booting | PeerState::Running | PeerState::Stopped),
                 ControlToArbiter::TimeReport {
                     from,
                     virtual_time_ns,
@@ -165,17 +191,11 @@ impl PeerState {
                 }),
             ),
             (
-                PeerState::Ready | PeerState::Running | PeerState::Stopped,
+                PeerState::Booting | PeerState::Running | PeerState::Stopped,
                 ControlToArbiter::HostStop { from, reason },
             ) => (
                 PeerState::Stopped,
                 Some(PeerEffect::HostStop { from, reason }),
-            ),
-            (state, msg) => (
-                state,
-                Some(PeerEffect::Warn(format!(
-                    "ignoring {msg:?} in state {state:?}"
-                ))),
             ),
         }
     }
@@ -185,7 +205,7 @@ impl PeerState {
     pub fn on_start_broadcast(self) -> Self {
         match self {
             // Stopped is included so a later host Start resumes the same peers.
-            PeerState::Ready | PeerState::Running | PeerState::Stopped => PeerState::Running,
+            PeerState::Running | PeerState::Stopped => PeerState::Running,
             other => other,
         }
     }
@@ -198,17 +218,34 @@ mod tests {
 
     #[test]
     fn node_happy_path() {
-        let mut s = NodeState::AwaitingStartup;
-        let (n, eff) = s.on_message(ControlToNode::StartupRecord {
-            margin_ns: 1000,
-            headroom_threshold_ns: 100,
-        });
+        let mut s = NodeState::Stopped;
+        let (n, eff) = s.on_message(ControlToNode::GetState);
         assert_eq!(n, NodeState::Stopped);
-        assert_eq!(eff, Some(NodeEffect::SendReady));
+        assert_eq!(eff, Some(NodeEffect::ReportState));
         s = n;
         let (n, eff) = s.on_message(ControlToNode::Start { allowed_ns: 0 });
         assert_eq!(n, NodeState::Running);
         assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 0 }));
+    }
+
+    #[test]
+    fn node_get_state_from_running_and_booting() {
+        let (n, eff) = NodeState::Running.on_message(ControlToNode::GetState);
+        assert_eq!(n, NodeState::Running);
+        assert_eq!(eff, Some(NodeEffect::ReportState));
+        let (n, eff) = NodeState::Booting.on_message(ControlToNode::GetState);
+        assert_eq!(n, NodeState::Booting);
+        assert_eq!(eff, Some(NodeEffect::ReportState));
+    }
+
+    #[test]
+    fn peer_ignores_late_state_without_warn() {
+        let (n, eff) = PeerState::Stopped.on_message(ControlToArbiter::State {
+            from: board_id_hash("a"),
+            state: NodeStateWire::Stopped,
+        });
+        assert_eq!(n, PeerState::Stopped);
+        assert!(eff.is_none());
     }
 
     #[test]
@@ -248,37 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn node_ignores_startup_after_running() {
-        let s = NodeState::Running;
-        let (n, eff) = s.on_message(ControlToNode::StartupRecord {
-            margin_ns: 1000,
-            headroom_threshold_ns: 100,
-        });
-        assert_eq!(n, NodeState::Running);
-        assert!(matches!(eff, Some(NodeEffect::Warn(_))));
-    }
-
-    #[test]
-    fn peer_ready_and_duplicate() {
-        let hash_a = board_id_hash("a");
-        let mut s = PeerState::AwaitingReady;
-        let (n, eff) = s.on_message(ControlToArbiter::Ready { from: hash_a });
-        assert_eq!(n, PeerState::Ready);
-        assert!(eff.is_none());
-        s = n;
-        let (n, eff) = s.on_message(ControlToArbiter::Ready { from: hash_a });
-        assert_eq!(n, PeerState::Ready);
-        assert!(matches!(eff, Some(PeerEffect::Warn(_))));
-    }
-
-    #[test]
     fn peer_start_from_stopped_resumes() {
         assert_eq!(PeerState::Stopped.on_start_broadcast(), PeerState::Running);
-        assert_eq!(PeerState::Ready.on_start_broadcast(), PeerState::Running);
-        assert_eq!(
-            PeerState::AwaitingReady.on_start_broadcast(),
-            PeerState::AwaitingReady
-        );
+        assert_eq!(PeerState::Booting.on_start_broadcast(), PeerState::Booting);
     }
 
     #[test]
@@ -341,13 +350,13 @@ mod tests {
     }
 
     #[test]
-    fn peer_accepts_step_reports_while_ready() {
+    fn peer_accepts_step_reports_while_stopped() {
         let hash_a = board_id_hash("a");
-        let (n, eff) = PeerState::Ready.on_message(ControlToArbiter::TimeReport {
+        let (n, eff) = PeerState::Stopped.on_message(ControlToArbiter::TimeReport {
             from: hash_a,
             virtual_time_ns: 50,
         });
-        assert_eq!(n, PeerState::Ready);
+        assert_eq!(n, PeerState::Stopped);
         assert_eq!(
             eff,
             Some(PeerEffect::TimeReport {
@@ -381,5 +390,21 @@ mod tests {
             eff,
             Some(NodeEffect::ProbeWatch { probe_ids, .. }) if probe_ids.is_empty()
         ));
+    }
+
+    #[test]
+    fn peer_from_node_wire() {
+        assert_eq!(
+            PeerState::from_node_wire(NodeStateWire::Booting),
+            PeerState::Booting
+        );
+        assert_eq!(
+            PeerState::from_node_wire(NodeStateWire::Stopped),
+            PeerState::Stopped
+        );
+        assert_eq!(
+            PeerState::from_node_wire(NodeStateWire::Running),
+            PeerState::Running
+        );
     }
 }

@@ -7,8 +7,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-/// Default Ready-barrier timeout when omitted from topology JSON (milliseconds).
-pub const DEFAULT_READY_TIMEOUT_MS: u64 = 10_000;
+/// Default Booting-barrier timeout when omitted from topology JSON (milliseconds).
+pub const DEFAULT_BOOTING_TIMEOUT_MS: u64 = 10_000;
 
 /// Default UART ring capacity (frames) when an edge omits `uart_ring_len`.
 ///
@@ -90,13 +90,15 @@ pub struct LogicalTopology {
     pub margin_ns: u64,
     /// Required headroom threshold for time reports (nanoseconds). No default.
     pub headroom_threshold_ns: u64,
-    /// Ready-barrier timeout; omitted → [`DEFAULT_READY_TIMEOUT_MS`].
-    #[serde(default = "default_ready_timeout_ms")]
-    pub ready_timeout_ms: u64,
+    /// Booting-barrier timeout; omitted → [`DEFAULT_BOOTING_TIMEOUT_MS`].
+    ///
+    /// Accepts legacy JSON key `ready_timeout_ms` as an alias.
+    #[serde(default = "default_booting_timeout_ms", alias = "ready_timeout_ms")]
+    pub booting_timeout_ms: u64,
 }
 
-fn default_ready_timeout_ms() -> u64 {
-    DEFAULT_READY_TIMEOUT_MS
+fn default_booting_timeout_ms() -> u64 {
+    DEFAULT_BOOTING_TIMEOUT_MS
 }
 
 /// Topology parse / validation failures.
@@ -383,13 +385,24 @@ mod tests {
     }
 
     #[test]
+    fn accepts_legacy_ready_timeout_ms_alias() {
+        let json = sample_json().replacen(
+            "\"headroom_threshold_ns\": 200",
+            "\"headroom_threshold_ns\": 200,\n          \"ready_timeout_ms\": 1234",
+            1,
+        );
+        let topo = parse_logical_topology(&json).unwrap();
+        assert_eq!(topo.booting_timeout_ms, 1234);
+    }
+
+    #[test]
     fn parses_two_board_uart_mesh() {
         let topo = parse_logical_topology(sample_json()).unwrap();
         assert_eq!(topo.boards.len(), 2);
         assert_eq!(topo.edges.len(), 2);
         assert_eq!(topo.margin_ns, 1000);
         assert_eq!(topo.headroom_threshold_ns, 200);
-        assert_eq!(topo.ready_timeout_ms, DEFAULT_READY_TIMEOUT_MS);
+        assert_eq!(topo.booting_timeout_ms, DEFAULT_BOOTING_TIMEOUT_MS);
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[0]), 256);
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[1]), 128);
         assert_eq!(topo.edges[0].from.path, "a");

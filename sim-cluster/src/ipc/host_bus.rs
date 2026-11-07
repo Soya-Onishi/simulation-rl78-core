@@ -69,8 +69,8 @@ impl HostCommandWire {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub enum HostPeerWire {
     Unknown = 0,
-    AwaitingReady = 1,
-    Ready = 2,
+    Booting = 1,
+    // 2 was Ready; keep Running/Stopped discriminants stable for wire readers.
     Running = 3,
     Stopped = 4,
 }
@@ -78,8 +78,7 @@ pub enum HostPeerWire {
 impl HostPeerWire {
     fn from_label(label: &str) -> Self {
         match label {
-            "awaiting_ready" => Self::AwaitingReady,
-            "ready" => Self::Ready,
+            "booting" => Self::Booting,
             "running" => Self::Running,
             "stopped" => Self::Stopped,
             _ => Self::Unknown,
@@ -89,8 +88,7 @@ impl HostPeerWire {
     fn label(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
-            Self::AwaitingReady => "awaiting_ready",
-            Self::Ready => "ready",
+            Self::Booting => "booting",
             Self::Running => "running",
             Self::Stopped => "stopped",
         }

@@ -334,7 +334,7 @@ class SimulationConfig:
     margin_ns: int
     headroom_threshold_ns: int
     topology: Topology
-    ready_timeout_ms: int | None = None
+    booting_timeout_ms: int | None = None
     _cached: dict[str, Any] | None = field(default=None, init=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -358,8 +358,8 @@ class SimulationConfig:
             "margin_ns": self.margin_ns,
             "headroom_threshold_ns": self.headroom_threshold_ns,
         }
-        if self.ready_timeout_ms is not None:
-            out["ready_timeout_ms"] = self.ready_timeout_ms
+        if self.booting_timeout_ms is not None:
+            out["booting_timeout_ms"] = self.booting_timeout_ms
         self._cached = out
         return copy.deepcopy(out)
 

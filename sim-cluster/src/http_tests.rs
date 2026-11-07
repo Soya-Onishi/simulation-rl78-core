@@ -67,7 +67,7 @@ impl SimulationBackend for TopoMock {
             edges: vec![],
             margin_ns: 1000,
             headroom_threshold_ns: 200,
-            ready_timeout_ms: 10_000,
+            booting_timeout_ms: 10_000,
         }))
     }
     fn logs_after(&self, _id: &str, _after: u64) -> Result<Vec<LogEvent>, ApiError> {

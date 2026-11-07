@@ -643,7 +643,7 @@ mod tests {
             ],
             margin_ns: 1_000,
             headroom_threshold_ns: 500,
-            ready_timeout_ms: 1_000,
+            booting_timeout_ms: 1_000,
         }
     }
 
@@ -809,7 +809,7 @@ mod tests {
             }],
             margin_ns: 1_000,
             headroom_threshold_ns: 500,
-            ready_timeout_ms: 1_000,
+            booting_timeout_ms: 1_000,
         };
         let na = create_node(&config, "adp-a").unwrap();
         let np = create_node(&config, "adp-p").unwrap();

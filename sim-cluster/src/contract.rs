@@ -423,7 +423,7 @@ mod tests {
             edges: vec![],
             margin_ns: 1000,
             headroom_threshold_ns: 200,
-            ready_timeout_ms: 10_000,
+            booting_timeout_ms: 10_000,
         }
     }
 
@@ -434,7 +434,7 @@ mod tests {
             edges: vec![],
             margin_ns: 1000,
             headroom_threshold_ns: 200,
-            ready_timeout_ms: 10_000,
+            booting_timeout_ms: 10_000,
         })
         .unwrap_err();
         assert_eq!(err.status, 400);

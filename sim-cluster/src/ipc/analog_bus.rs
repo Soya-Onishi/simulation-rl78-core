@@ -171,7 +171,7 @@ mod tests {
             }],
             margin_ns: 1,
             headroom_threshold_ns: 1,
-            ready_timeout_ms: 1000,
+            booting_timeout_ms: 1000,
         };
         let na = create_node(&config, "analog-a").unwrap();
         let np = create_node(&config, "analog-p").unwrap();
