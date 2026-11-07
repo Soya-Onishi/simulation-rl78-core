@@ -173,7 +173,7 @@ pub fn board_usage(prog: &str) -> String {
 /// ```
 #[macro_export]
 macro_rules! node {
-    ($build:expr $(,)?) => {
+    ($build:expr) => {
         fn main() {
             let mut argv = ::std::env::args();
             let prog = argv
