@@ -360,9 +360,9 @@ impl ApiError {
     }
 }
 
-/// Hex id carried as a plain string in HTTP query parameters.
+/// Hex id carried as a plain string in HTTP query / path parameters.
 ///
-/// API query parameters use this type instead of deserializing
+/// API query and path parameters use this type instead of deserializing
 /// [`crate::ipc::HashedId`] directly so invalid values can return
 /// [`ApiError`] with code `bad_param`, rather than axum's default
 /// rejection response.

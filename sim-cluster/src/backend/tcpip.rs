@@ -704,4 +704,54 @@ mod tests {
         backend.step("sim-1", board_hex).unwrap();
         assert_eq!(*mock.last.lock().unwrap(), format!("step:{board_hex}"));
     }
+
+    #[test]
+    fn board_path_rejects_invalid_hex_as_bad_param() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mock = MockBackend::new();
+        let (base, _join) = rt.block_on({
+            let mock = Arc::clone(&mock);
+            async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let app = router(mock);
+                let join = tokio::spawn(async move {
+                    axum::serve(listener, app).await.unwrap();
+                });
+                (format!("http://{addr}"), join)
+            }
+        });
+
+        let mut inspect = post_json(
+            &format!("{base}/internal/simulations/sim-1/boards/ABCDEF0123456789/inspect"),
+            &InspectRequest::ReadRegs,
+            RPC_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(inspect.status().as_u16(), 400);
+        let inspect_body: ErrorBody =
+            serde_json::from_slice(&inspect.body_mut().read_to_vec().unwrap()).unwrap();
+        assert_eq!(inspect_body.error.code, "bad_param");
+        assert!(
+            inspect_body
+                .error
+                .message
+                .contains("board_id must be a 16-digit lowercase hex string")
+        );
+        assert!(mock.last.lock().unwrap().is_empty());
+
+        let mut step = post(
+            &format!("{base}/internal/simulations/sim-1/boards/not-a-board-id/step"),
+            RPC_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(step.status().as_u16(), 400);
+        let step_body: ErrorBody =
+            serde_json::from_slice(&step.body_mut().read_to_vec().unwrap()).unwrap();
+        assert_eq!(step_body.error.code, "bad_param");
+        assert!(mock.last.lock().unwrap().is_empty());
+    }
 }

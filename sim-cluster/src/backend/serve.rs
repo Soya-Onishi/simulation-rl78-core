@@ -13,7 +13,6 @@ use crate::contract::{
     TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
-use crate::ipc::HashedId;
 use crate::probe_log::{
     CoarseBatch, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
 };
@@ -381,7 +380,7 @@ async fn viewer_detach(
 #[derive(serde::Deserialize)]
 struct BoardPath {
     id: String,
-    board_id: HashedId<u64>,
+    board_id: HashedIdString,
 }
 
 async fn inspect(
@@ -389,9 +388,10 @@ async fn inspect(
     Path(path): Path<BoardPath>,
     Json(req): Json<InspectRequest>,
 ) -> Result<Json<InspectReply>, ApiError> {
+    let board_id = path.board_id.parse_id("board_id")?;
     let backend = state.backend.clone();
     Ok(Json(
-        blocking(move || backend.inspect(&path.id, path.board_id, req)).await?,
+        blocking(move || backend.inspect(&path.id, board_id, req)).await?,
     ))
 }
 
@@ -399,7 +399,8 @@ async fn step(
     State(state): State<AppState>,
     Path(path): Path<BoardPath>,
 ) -> Result<StatusCode, ApiError> {
+    let board_id = path.board_id.parse_id("board_id")?;
     let backend = state.backend.clone();
-    blocking(move || backend.step(&path.id, path.board_id)).await?;
+    blocking(move || backend.step(&path.id, board_id)).await?;
     Ok(StatusCode::OK)
 }
