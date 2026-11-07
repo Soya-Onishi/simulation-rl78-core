@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from topology_dsl import SimulationConfig, Topology
 
-from systemtest import Duration, Simulation, sim_case
+from systemtest import Duration, Simulation
+from systemtest.fixture import sim_case
 
 
 class PlantTopo(Topology):

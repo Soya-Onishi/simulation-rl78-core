@@ -1,4 +1,4 @@
-"""pytest plugin: @sim_case and the sim fixture."""
+"""pytest fixtures and hooks: @sim_case and the sim fixture."""
 
 from __future__ import annotations
 

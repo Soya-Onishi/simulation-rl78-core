@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from systemtest.client import cluster_available
-from systemtest.plugin import pytest_runtest_setup
+from systemtest.fixture import pytest_runtest_setup
 
 
 def test_cluster_available_false_on_connect_error(monkeypatch) -> None:
@@ -14,7 +14,7 @@ def test_cluster_available_false_on_connect_error(monkeypatch) -> None:
 
 
 def test_sim_case_setup_skips_when_server_is_down(monkeypatch) -> None:
-    monkeypatch.setattr("systemtest.plugin.cluster_available", lambda: False)
+    monkeypatch.setattr("systemtest.fixture.cluster_available", lambda: False)
 
     class _Item:
         def get_closest_marker(self, name: str):
