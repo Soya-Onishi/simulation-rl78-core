@@ -1,4 +1,4 @@
-//! Arbiter: create iceoryx services, spawn nodes, Ready barrier, then wait.
+//! Arbiter: create iceoryx services, spawn nodes, Booting barrier, then wait.
 //!
 //! The guest stays stopped until a host `start` command. `stop` halts the
 //! guest without exiting this process, so a later `start` or `reset` can
@@ -28,7 +28,7 @@ use crate::probe_hub::{ArbiterProbeHub, ProbeSample};
 use crate::time_sync::TimeCeiling;
 use crate::topology::{LogicalTopology, TopologyError};
 
-/// Idle poll while waiting for Ready / time-sync (arbiter side).
+/// Idle poll while waiting for Booting barrier / time-sync (arbiter side).
 const ARBITER_POLL_IDLE: Duration = Duration::from_millis(1);
 
 /// Arbiter failures.
@@ -38,8 +38,8 @@ pub enum ArbiterError {
     Io(#[from] std::io::Error),
     #[error("topology error: {0}")]
     Topology(#[from] TopologyError),
-    #[error("ready barrier timed out after {timeout_ms}ms; missing boards: {missing}")]
-    ReadyTimeout { timeout_ms: u64, missing: String },
+    #[error("booting barrier timed out after {timeout_ms}ms; missing boards: {missing}")]
+    BootingTimeout { timeout_ms: u64, missing: String },
     #[error("ipc error: {0}")]
     Ipc(#[from] IpcError),
     #[error("{0}")]
@@ -77,7 +77,7 @@ impl ArbiterOptions {
     }
 }
 
-/// Load topology, spawn nodes, wait for Ready, then follow iceoryx host commands.
+/// Load topology, spawn nodes, wait until nodes leave Booting, then follow iceoryx host commands.
 pub fn run_arbiter(opts: &ArbiterOptions) -> Result<(), ArbiterError> {
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
@@ -97,13 +97,13 @@ pub fn run_arbiter_with_topology(
     run_host_session(opts, topo)
 }
 
-/// Test helper: Ready barrier, immediate Start, then a short time-sync window.
+/// Test helper: Booting barrier, immediate Start, then a short time-sync window.
 #[cfg(test)]
-fn ready_barrier_and_start(
+fn booting_barrier_and_start(
     topo: &LogicalTopology,
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
-    let mut peers = await_ready(topo, control)?;
+    let mut peers = await_booting(topo, control)?;
     control.publish(&ControlToNode::Start { allowed_ns: 0 })?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
@@ -113,53 +113,52 @@ fn ready_barrier_and_start(
     Ok(())
 }
 
-fn await_ready(
+/// How often to re-broadcast [`ControlToNode::GetState`] during the Booting barrier.
+const GET_STATE_REPUBLISH: Duration = Duration::from_millis(50);
+
+fn await_booting(
     topo: &LogicalTopology,
     control: &ArbiterControl,
 ) -> Result<HashMap<String, PeerState>, ArbiterError> {
-    let timeout = Duration::from_millis(topo.ready_timeout_ms);
+    let timeout = Duration::from_millis(topo.booting_timeout_ms);
     let deadline = Instant::now() + timeout;
     let mut peers: HashMap<String, PeerState> = topo
         .boards
         .iter()
-        .map(|b| (b.id.clone(), PeerState::AwaitingReady))
+        .map(|b| (b.id.clone(), PeerState::Booting))
         .collect();
 
-    let startup = ControlToNode::StartupRecord {
-        margin_ns: topo.margin_ns,
-        headroom_threshold_ns: topo.headroom_threshold_ns,
-    };
-    control.publish(&startup)?;
-    let mut last_startup = Instant::now();
+    control.publish(&ControlToNode::GetState)?;
+    let mut last_get_state = Instant::now();
 
-    while peers.values().any(|p| *p != PeerState::Ready) {
+    while peers.values().any(|p| *p == PeerState::Booting) {
         if Instant::now() >= deadline {
-            return Err(ready_timeout(topo, &peers));
+            return Err(booting_timeout(topo, &peers));
         }
-        if last_startup.elapsed() > Duration::from_millis(50)
-            && peers.values().any(|p| *p == PeerState::AwaitingReady)
+
+        if last_get_state.elapsed() >= GET_STATE_REPUBLISH
+            && peers.values().any(|p| *p == PeerState::Booting)
         {
-            let _ = control.publish(&startup);
-            last_startup = Instant::now();
+            control.publish(&ControlToNode::GetState)?;
+            last_get_state = Instant::now();
         }
 
         let mut progressed = false;
         while let Some(msg) = control.try_recv()? {
             match msg {
-                ControlToArbiter::Ready { from } => {
+                ControlToArbiter::State { from, state } => {
                     let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
                         continue;
                     };
-                    let Some(state) = peers.get_mut(&board_id) else {
+                    let Some(peer) = peers.get_mut(&board_id) else {
                         continue;
                     };
-                    let (next, effect) = state.on_message(msg);
-                    warn_peer(&board_id, effect)?;
-                    if next != *state {
-                        log::trace!("peer '{board_id}' {state:?} -> {next:?}");
+                    let next = PeerState::from_node_wire(state);
+                    if next != *peer {
+                        log::trace!("peer '{board_id}' {peer:?} -> {next:?}");
+                        *peer = next;
+                        progressed = true;
                     }
-                    *state = next;
-                    progressed = true;
                 }
                 other => {
                     log::warn!("ignoring unexpected before Start: {other:?}");
@@ -171,7 +170,7 @@ fn await_ready(
         }
     }
 
-    log::info!("Ready barrier complete ({} nodes)", peers.len());
+    log::info!("Booting barrier complete ({} nodes)", peers.len());
     Ok(peers)
 }
 
@@ -309,7 +308,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     );
 
     let mut children = spawn_nodes(opts, topo)?;
-    let mut peers = match await_ready(topo, &control) {
+    let mut peers = match await_booting(topo, &control) {
         Ok(peers) => peers,
         Err(err) => {
             stop_children(&mut children);
@@ -790,6 +789,10 @@ fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Chil
             .arg(&opts.iox_root)
             .arg("--topology")
             .arg(&opts.topology_path)
+            .arg("--margin-ns")
+            .arg(topo.margin_ns.to_string())
+            .arg("--headroom-threshold-ns")
+            .arg(topo.headroom_threshold_ns.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -844,8 +847,7 @@ fn write_status(
 
 fn peer_state_name(state: &PeerState) -> &'static str {
     match state {
-        PeerState::AwaitingReady => "awaiting_ready",
-        PeerState::Ready => "ready",
+        PeerState::Booting => "booting",
         PeerState::Running => "running",
         PeerState::Stopped => "stopped",
     }
@@ -864,15 +866,15 @@ fn broadcast_cluster_stop(
     Ok(())
 }
 
-fn ready_timeout(topo: &LogicalTopology, peers: &HashMap<String, PeerState>) -> ArbiterError {
+fn booting_timeout(topo: &LogicalTopology, peers: &HashMap<String, PeerState>) -> ArbiterError {
     let missing = peers
         .iter()
-        .filter(|(_, p)| **p != PeerState::Ready)
+        .filter(|(_, p)| **p == PeerState::Booting)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>()
         .join(",");
-    ArbiterError::ReadyTimeout {
-        timeout_ms: topo.ready_timeout_ms,
+    ArbiterError::BootingTimeout {
+        timeout_ms: topo.booting_timeout_ms,
         missing,
     }
 }
@@ -960,7 +962,7 @@ mod tests {
         assert_eq!(ceiling.allowed_ns(), 2500);
     }
 
-    fn two_board_topo(ready_timeout_ms: u64) -> LogicalTopology {
+    fn two_board_topo(booting_timeout_ms: u64) -> LogicalTopology {
         LogicalTopology {
             boards: vec![
                 BoardSpec {
@@ -1046,7 +1048,7 @@ mod tests {
             ],
             margin_ns: 1000,
             headroom_threshold_ns: 100,
-            ready_timeout_ms,
+            booting_timeout_ms,
         }
     }
 
@@ -1054,7 +1056,7 @@ mod tests {
         cluster_key: String,
         iox_root: PathBuf,
         board_id: String,
-        send_ready: bool,
+        reply_state: bool,
         inject_host_stop: bool,
         saw_cluster_stop: Option<Arc<Mutex<bool>>>,
     ) {
@@ -1071,10 +1073,12 @@ mod tests {
         while Instant::now() < end {
             while let Ok(Some(msg)) = control.try_recv() {
                 match msg {
-                    ControlToNode::StartupRecord { .. } => {
-                        if send_ready {
-                            let _ = control.publish(&ControlToArbiter::Ready { from: my_hash });
-                            let _ = control.publish(&ControlToArbiter::Ready { from: my_hash });
+                    ControlToNode::GetState => {
+                        if reply_state {
+                            let _ = control.publish(&ControlToArbiter::State {
+                                from: my_hash,
+                                state: crate::control::NodeStateWire::Stopped,
+                            });
                         }
                     }
                     ControlToNode::Start { .. } => {
@@ -1106,14 +1110,14 @@ mod tests {
 
     #[test]
     #[serial]
-    fn ready_barrier_succeeds_with_fake_nodes() {
+    fn booting_barrier_succeeds_with_fake_nodes() {
         let dir = tempfile::tempdir().unwrap();
-        let cluster_key = format!("t-ready-{}", std::process::id());
+        let cluster_key = format!("t-booting-{}", std::process::id());
         let iox_root = dir.path().join("iox");
         let topo = two_board_topo(2_000);
         let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
-        let node = create_node(&config, "arb-test-ready").unwrap();
+        let node = create_node(&config, "arb-test-booting").unwrap();
         let _logs =
             ArbiterLogBus::create(&iox_root, &cluster_key, topo.boards.len(), boards.clone())
                 .unwrap();
@@ -1130,7 +1134,7 @@ mod tests {
             }));
         }
 
-        ready_barrier_and_start(&topo, &control).unwrap();
+        booting_barrier_and_start(&topo, &control).unwrap();
         for j in joins {
             j.join().unwrap();
         }
@@ -1138,7 +1142,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn ready_barrier_times_out_when_node_silent() {
+    fn booting_barrier_times_out_when_node_silent() {
         let dir = tempfile::tempdir().unwrap();
         let cluster_key = format!("t-timeout-{}", std::process::id());
         let iox_root = dir.path().join("iox");
@@ -1163,8 +1167,20 @@ mod tests {
             }));
         }
 
-        let err = ready_barrier_and_start(&topo, &control).unwrap_err();
-        assert!(matches!(err, ArbiterError::ReadyTimeout { .. }));
+        let err = booting_barrier_and_start(&topo, &control).unwrap_err();
+        match err {
+            ArbiterError::BootingTimeout {
+                timeout_ms,
+                missing,
+            } => {
+                assert_eq!(timeout_ms, 200);
+                assert!(
+                    missing.contains('b') || missing == "b",
+                    "expected silent board in missing={missing}"
+                );
+            }
+            other => panic!("expected BootingTimeout, got {other:?}"),
+        }
         for j in joins {
             let _ = j.join();
         }
@@ -1203,7 +1219,7 @@ mod tests {
             }));
         }
 
-        ready_barrier_and_start(&topo, &control).unwrap();
+        booting_barrier_and_start(&topo, &control).unwrap();
         for j in joins {
             j.join().unwrap();
         }

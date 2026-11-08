@@ -72,18 +72,22 @@ impl fmt::Display for HostStopReason {
     }
 }
 
+/// Wire encoding of a node's control-plane state (n2a [`ControlToArbiter::State`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
+pub enum NodeStateWire {
+    Booting = 1,
+    Stopped = 2,
+    Running = 3,
+}
+
 /// Arbiter → node control messages (a2n iceoryx2 sample type).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 #[allow(clippy::large_enum_variant)]
 pub enum ControlToNode {
-    /// Shared startup parameters (always broadcast; see issue #43).
-    StartupRecord {
-        /// Virtual-time skew margin (ns); copied from topology for the node.
-        margin_ns: u64,
-        /// Report when `allowed - now` falls below this (ns).
-        headroom_threshold_ns: u64,
-    },
+    /// Request the node's current control-plane state (always broadcast).
+    GetState,
     /// Simulation may enter Running (always broadcast).
     ///
     /// `allowed_ns` is the current run ceiling: `min(now + margin, until_ns)`
@@ -117,8 +121,11 @@ pub enum ControlToNode {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ZeroCopySend)]
 pub enum ControlToArbiter {
-    /// Control attach complete.
-    Ready { from: HashedId<u64> },
+    /// Reply to [`ControlToNode::GetState`].
+    State {
+        from: HashedId<u64>,
+        state: NodeStateWire,
+    },
     /// Virtual time report.
     TimeReport {
         from: HashedId<u64>,
@@ -137,9 +144,9 @@ impl ControlToArbiter {
     #[must_use]
     pub fn from_board(self) -> HashedId<u64> {
         match self {
-            Self::Ready { from } | Self::TimeReport { from, .. } | Self::HostStop { from, .. } => {
-                from
-            }
+            Self::State { from, .. }
+            | Self::TimeReport { from, .. }
+            | Self::HostStop { from, .. } => from,
         }
     }
 }

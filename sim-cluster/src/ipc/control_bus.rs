@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn control_round_trip_ready() {
+    fn control_round_trip_get_state() {
         let dir = tempfile::tempdir().unwrap();
         let key = format!("rt-{}", std::process::id());
         let root = dir.path().join("iox");
@@ -254,35 +254,35 @@ mod tests {
         let nctl = NodeControl::open(&node, &key, boards).unwrap();
 
         let hash_a = board_id_hash("a");
-        arb.publish(&ControlToNode::StartupRecord {
-            margin_ns: 1,
-            headroom_threshold_ns: 1,
+        arb.publish(&ControlToNode::GetState).unwrap();
+
+        let mut got_get_state = false;
+        for _ in 0..200 {
+            if let Some(ControlToNode::GetState) = nctl.try_recv().unwrap() {
+                got_get_state = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(got_get_state, "node did not receive GetState");
+
+        nctl.publish(&ControlToArbiter::State {
+            from: hash_a,
+            state: crate::control::NodeStateWire::Stopped,
         })
         .unwrap();
 
-        let mut got_startup = false;
+        let mut got_state = false;
         for _ in 0..200 {
-            if let Some(ControlToNode::StartupRecord { .. }) = nctl.try_recv().unwrap() {
-                got_startup = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(got_startup, "node did not receive StartupRecord");
-
-        nctl.publish(&ControlToArbiter::Ready { from: hash_a })
-            .unwrap();
-
-        let mut got_ready = false;
-        for _ in 0..200 {
-            if let Some(ControlToArbiter::Ready { from }) = arb.try_recv().unwrap()
+            if let Some(ControlToArbiter::State { from, state }) = arb.try_recv().unwrap()
                 && from == hash_a
+                && state == crate::control::NodeStateWire::Stopped
             {
-                got_ready = true;
+                got_state = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(got_ready, "arbiter did not receive Ready");
+        assert!(got_state, "arbiter did not receive State");
     }
 }

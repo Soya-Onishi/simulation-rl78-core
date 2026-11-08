@@ -17,7 +17,7 @@ use sim_kernel::{
 use crate::action::{
     ACTION_RECV_CAP, ActionPackError, ActionRequest, ActionResult, ActionStatus, ActionUpstream,
 };
-use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
+use crate::control::{ControlToArbiter, HostStopReason};
 use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
 use crate::elf_source;
 use crate::inspect::InspectServer;
@@ -40,6 +40,13 @@ pub struct BoardOptions {
     pub cluster_key: String,
     pub iox_root: PathBuf,
     pub topology_path: PathBuf,
+    /// Virtual-time skew margin (ns); from arbiter CLI (topology copy).
+    ///
+    /// Accepted for the StartupRecord→CLI migration; the node does not apply
+    /// this locally yet (ceiling still comes from arbiter Allowed/Start).
+    pub margin_ns: u64,
+    /// Report when `allowed - now` falls below this (ns).
+    pub headroom_threshold_ns: u64,
 }
 
 /// Failures from the board framework.
@@ -85,6 +92,8 @@ pub fn parse_board_args(
     let mut cluster_key: Option<String> = None;
     let mut iox_root: Option<PathBuf> = None;
     let mut topology: Option<PathBuf> = None;
+    let mut margin_ns: Option<u64> = None;
+    let mut headroom_threshold_ns: Option<u64> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -110,6 +119,24 @@ pub fn parse_board_args(
                     BoardCliError::Message(format!("{prog}: --topology requires a path"))
                 })?));
             }
+            "--margin-ns" => {
+                let raw = iter.next().ok_or_else(|| {
+                    BoardCliError::Message(format!("{prog}: --margin-ns requires a value"))
+                })?;
+                margin_ns = Some(raw.parse().map_err(|_| {
+                    BoardCliError::Message(format!("{prog}: --margin-ns must be u64"))
+                })?);
+            }
+            "--headroom-threshold-ns" => {
+                let raw = iter.next().ok_or_else(|| {
+                    BoardCliError::Message(format!(
+                        "{prog}: --headroom-threshold-ns requires a value"
+                    ))
+                })?;
+                headroom_threshold_ns = Some(raw.parse().map_err(|_| {
+                    BoardCliError::Message(format!("{prog}: --headroom-threshold-ns must be u64"))
+                })?);
+            }
             other => {
                 return Err(BoardCliError::Message(format!(
                     "{prog}: unknown argument {other}"
@@ -124,13 +151,29 @@ pub fn parse_board_args(
             cluster_key: cluster_key.unwrap_or_default(),
             iox_root: iox_root.unwrap_or_default(),
             topology_path: topology.unwrap_or_default(),
+            margin_ns: margin_ns.unwrap_or(0),
+            headroom_threshold_ns: headroom_threshold_ns.unwrap_or(0),
         });
     }
-    let (Some(board_name), Some(cluster_key), Some(iox_root), Some(topology_path)) =
-        (board_name, cluster_key, iox_root, topology)
+    let (
+        Some(board_name),
+        Some(cluster_key),
+        Some(iox_root),
+        Some(topology_path),
+        Some(margin_ns),
+        Some(headroom_threshold_ns),
+    ) = (
+        board_name,
+        cluster_key,
+        iox_root,
+        topology,
+        margin_ns,
+        headroom_threshold_ns,
+    )
     else {
         return Err(BoardCliError::Message(format!(
-            "{prog}: --board-name, --cluster-key, --iox-root, and --topology are required"
+            "{prog}: --board-name, --cluster-key, --iox-root, --topology, --margin-ns, and \
+             --headroom-threshold-ns are required"
         )));
     };
     Ok(BoardOptions {
@@ -139,6 +182,8 @@ pub fn parse_board_args(
         cluster_key,
         iox_root,
         topology_path,
+        margin_ns,
+        headroom_threshold_ns,
     })
 }
 
@@ -147,11 +192,12 @@ pub fn parse_board_args(
 pub fn board_usage(prog: &str) -> String {
     format!(
         "Usage:\n\
-         {prog} --board-name <name> --cluster-key <key> --iox-root <path> --topology <json>\n\
+         {prog} --board-name <name> --cluster-key <key> --iox-root <path> --topology <json> \
+--margin-ns <ns> --headroom-threshold-ns <ns>\n\
          {prog} --list-catalog\n\
          \n\
-         Cluster mode is spawned by cluster-arbiter. Starts AwaitingStartup, becomes\n\
-         Stopped after StartupRecord (Ready), and runs only after Start.\n\
+         Cluster mode is spawned by cluster-arbiter. After init the control loop is\n\
+         Stopped and runs only after Start.\n\
          \n\
          --list-catalog prints this node's probe and action catalog as JSON on\n\
          stdout and exits. Cluster flags are not required in that mode.\n"
@@ -375,8 +421,9 @@ pub fn run_node<E: Entity>(
 
     let mut data_planes = bind_data_planes(plane_maps, &ports)?;
 
-    let mut state = NodeState::AwaitingStartup;
-    let mut headroom_threshold_ns = 0_u64;
+    // Process init above is the Booting phase; the control loop starts Stopped.
+    let mut state = NodeState::Stopped;
+    let headroom_threshold_ns = opts.headroom_threshold_ns;
     let mut allowed_ns = 0_u64;
     let mut last_time_report: Option<u64> = None;
     let has_actions = !sim.entity().action_catalog().is_empty();
@@ -385,20 +432,16 @@ pub fn run_node<E: Entity>(
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
         while let Some(msg) = control.try_recv()? {
-            if let ControlToNode::StartupRecord {
-                headroom_threshold_ns: thr,
-                ..
-            } = msg
-            {
-                headroom_threshold_ns = thr;
-            }
             let prev = state;
             let (next, effect) = state.on_message(msg);
             if let Some(effect) = effect {
                 match effect {
-                    NodeEffect::SendReady => {
-                        control.publish(&ControlToArbiter::Ready { from: board_hash })?;
-                        log::trace!("Ready");
+                    NodeEffect::ReportState => {
+                        control.publish(&ControlToArbiter::State {
+                            from: board_hash,
+                            state: next.to_wire(),
+                        })?;
+                        log::trace!("State {next:?}");
                     }
                     NodeEffect::SetAllowed {
                         allowed_ns: next_allowed,
@@ -706,12 +749,18 @@ mod tests {
                 "/tmp/iox".into(),
                 "--topology".into(),
                 "/tmp/t.json".into(),
+                "--margin-ns".into(),
+                "1000".into(),
+                "--headroom-threshold-ns".into(),
+                "100".into(),
             ],
         )
         .unwrap();
         assert!(!opts.list_catalog);
         assert_eq!(opts.board_name, "a");
         assert_eq!(opts.cluster_key, "k");
+        assert_eq!(opts.margin_ns, 1000);
+        assert_eq!(opts.headroom_threshold_ns, 100);
     }
 
     #[test]
@@ -753,6 +802,48 @@ mod tests {
     fn parse_board_args_list_catalog_rejects_unknown() {
         let err =
             parse_board_args("prog", ["--list-catalog".into(), "--bogus".into()]).unwrap_err();
+        assert!(matches!(err, BoardCliError::Message(_)));
+    }
+
+    #[test]
+    fn parse_board_args_requires_margin_and_headroom() {
+        let err = parse_board_args(
+            "prog",
+            [
+                "--board-name".into(),
+                "a".into(),
+                "--cluster-key".into(),
+                "k".into(),
+                "--iox-root".into(),
+                "/tmp/iox".into(),
+                "--topology".into(),
+                "/tmp/t.json".into(),
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BoardCliError::Message(_)));
+    }
+
+    #[test]
+    fn parse_board_args_rejects_bad_margin() {
+        let err = parse_board_args(
+            "prog",
+            [
+                "--board-name".into(),
+                "a".into(),
+                "--cluster-key".into(),
+                "k".into(),
+                "--iox-root".into(),
+                "/tmp/iox".into(),
+                "--topology".into(),
+                "/tmp/t.json".into(),
+                "--margin-ns".into(),
+                "nope".into(),
+                "--headroom-threshold-ns".into(),
+                "1".into(),
+            ],
+        )
+        .unwrap_err();
         assert!(matches!(err, BoardCliError::Message(_)));
     }
 
