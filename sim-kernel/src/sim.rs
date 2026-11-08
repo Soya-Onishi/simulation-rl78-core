@@ -81,6 +81,16 @@ impl<E: Entity> Simulator<E> {
         self.allowed
     }
 
+    /// True when `allowed` is at or before `now + max_quantum`.
+    ///
+    /// Cluster boards use this to skip recomputing the shared-memory ceiling
+    /// until the next quantum could actually hit it.
+    #[must_use]
+    pub fn next_quantum_reaches_allowed(&self, allowed: Tick) -> bool {
+        let next_max_vt = self.entity().now() + self.cfg.max_quantum;
+        allowed <= next_max_vt
+    }
+
     /// True when Running and virtual time has reached the multi-board ceiling.
     ///
     /// The sim thread must park on the command channel in this state; returning

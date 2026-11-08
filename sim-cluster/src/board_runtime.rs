@@ -29,9 +29,6 @@ use crate::probe::{NodeProbeRuntime, ProbeError, ProbeWireKind};
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
 use crate::vt_clock::VtClock;
 
-/// Idle sleep when not Running, waiting on the allowed ceiling, or guest-halted.
-pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
-
 /// Options for [`run_node`].
 #[derive(Clone, Debug)]
 pub struct BoardOptions {
@@ -484,7 +481,7 @@ pub fn run_node<E: Entity>(
             }
             state = next;
             if prev != NodeState::Running && state == NodeState::Running {
-                publish_vt_and_refresh_allowed(
+                publish_vt_and_maybe_refresh_allowed(
                     &mut sim,
                     &vt,
                     opts.vt_slot,
@@ -515,9 +512,10 @@ pub fn run_node<E: Entity>(
                 plane.pump_rx()?;
             }
 
-            // Refresh before the ceiling check so a node waiting on the allowed
-            // ceiling sees peers' advancing virtual time in shared memory.
-            publish_vt_and_refresh_allowed(
+            // Publish VT and refresh the allowed ceiling when the next quantum
+            // could hit it, so a node blocked on the ceiling sees peers advance
+            // without a fixed sleep.
+            publish_vt_and_maybe_refresh_allowed(
                 &mut sim,
                 &vt,
                 opts.vt_slot,
@@ -525,14 +523,10 @@ pub fn run_node<E: Entity>(
                 &mut last_allowed,
             );
 
-            if sim.waiting_on_allowed_ceiling() {
-                thread::sleep(BOARD_IDLE_POLL);
-                continue;
-            }
-
-            if sim.state() != SimState::Running {
+            if sim.state() != SimState::Running || sim.waiting_on_allowed_ceiling() {
                 // Do not pump_tx while the guest is not advancing: cross-board
                 // UART must not race ahead of virtual-time sync (ceiling / stop).
+                // Yield instead of sleeping so peers' VT updates are noticed promptly.
                 thread::yield_now();
                 continue;
             }
@@ -540,7 +534,7 @@ pub fn run_node<E: Entity>(
             let polled = sim.poll();
             // Publish the post-poll virtual time before any HostStop so peers
             // see it, and pick up the ceiling derived from the updated slots.
-            publish_vt_and_refresh_allowed(
+            publish_vt_and_maybe_refresh_allowed(
                 &mut sim,
                 &vt,
                 opts.vt_slot,
@@ -645,9 +639,9 @@ fn find_board<'a>(
         .ok_or_else(|| BoardError::Message(format!("board name `{board_name}` not in topology")))
 }
 
-/// Write this board's virtual time to its shared-memory slot, then apply the
-/// recomputed allowed ceiling (`min(min(board slots) + margin_ns, ceiling)`).
-fn publish_vt_and_refresh_allowed<E: Entity>(
+/// Write this board's virtual time to its shared-memory slot, then maybe apply
+/// the recomputed allowed ceiling (`min(min(board slots) + margin_ns, ceiling)`).
+fn publish_vt_and_maybe_refresh_allowed<E: Entity>(
     sim: &mut Simulator<E>,
     vt: &VtClock,
     vt_slot: usize,
@@ -655,19 +649,25 @@ fn publish_vt_and_refresh_allowed<E: Entity>(
     last_allowed: &mut Option<u64>,
 ) {
     vt.write_board_vt(vt_slot, sim.entity().now().0);
-    refresh_allowed(sim, vt, margin_ns, last_allowed);
+    maybe_refresh_allowed(sim, vt, margin_ns, last_allowed);
 }
 
-/// Apply the allowed ceiling currently derived from shared memory.
+/// Apply the allowed ceiling from shared memory when needed.
 ///
-/// Skips `SetAllowed` when the value is unchanged to avoid hammering the
-/// simulator command path on every idle poll.
-fn refresh_allowed<E: Entity>(
+/// Always sets an initial ceiling. Afterwards, recomputes only when the next
+/// quantum could reach the last ceiling, and skips `SetAllowed` when unchanged.
+fn maybe_refresh_allowed<E: Entity>(
     sim: &mut Simulator<E>,
     vt: &VtClock,
     margin_ns: u64,
     last_allowed: &mut Option<u64>,
 ) {
+    if let Some(last) = *last_allowed {
+        if !sim.next_quantum_reaches_allowed(Tick(last)) {
+            return;
+        }
+    }
+
     let allowed = vt.allowed_ns(margin_ns);
     if *last_allowed == Some(allowed) {
         return;

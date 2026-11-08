@@ -405,6 +405,28 @@ fn before_quantum_hook_runs_while_running() {
 }
 
 #[test]
+fn next_quantum_reaches_allowed_tracks_headroom() {
+    let mut sim = Simulator::new(
+        empty_machine(ScriptedCpu::nops(100)),
+        SimConfig {
+            max_quantum: Tick(10),
+        },
+    );
+    assert_eq!(sim.command(Command::Start), Response::Started);
+    assert_eq!(sim.machine().clock().now(), Tick(0));
+    assert!(sim.next_quantum_reaches_allowed(Tick(10)));
+    assert!(!sim.next_quantum_reaches_allowed(Tick(11)));
+    assert_eq!(
+        sim.command(Command::SetAllowed { tick: Tick(100) }),
+        Response::Inspect(InspectResult::Ok)
+    );
+    let _ = sim.poll();
+    let now = sim.machine().clock().now();
+    assert!(sim.next_quantum_reaches_allowed(now + Tick(10)));
+    assert!(!sim.next_quantum_reaches_allowed(now + Tick(11)));
+}
+
+#[test]
 fn allowed_ceiling_hard_blocks_until_raised() {
     let mut sim = Simulator::new(empty_machine(ScriptedCpu::nops(100)), SimConfig::default());
     assert_eq!(
