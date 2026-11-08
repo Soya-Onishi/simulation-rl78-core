@@ -29,9 +29,6 @@ use crate::probe::{NodeProbeRuntime, ProbeError, ProbeWireKind};
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
 use crate::vt_clock::VtClock;
 
-/// Idle sleep when not Running, waiting on the allowed ceiling, or guest-halted.
-pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
-
 /// Options for [`run_node`].
 #[derive(Clone, Debug)]
 pub struct BoardOptions {
@@ -484,7 +481,7 @@ pub fn run_node<E: Entity>(
             }
             state = next;
             if prev != NodeState::Running && state == NodeState::Running {
-                publish_vt_and_refresh_allowed(
+                publish_vt_and_maybe_refresh_allowed(
                     &mut sim,
                     &vt,
                     opts.vt_slot,
@@ -515,9 +512,10 @@ pub fn run_node<E: Entity>(
                 plane.pump_rx()?;
             }
 
-            // Refresh before the ceiling check so a node waiting on the allowed
-            // ceiling sees peers' advancing virtual time in shared memory.
-            publish_vt_and_refresh_allowed(
+            // Publish VT and refresh the allowed ceiling when the next quantum
+            // could hit it, so a node blocked on the ceiling sees peers advance
+            // without a fixed sleep.
+            publish_vt_and_maybe_refresh_allowed(
                 &mut sim,
                 &vt,
                 opts.vt_slot,
@@ -525,14 +523,10 @@ pub fn run_node<E: Entity>(
                 &mut last_allowed,
             );
 
-            if sim.waiting_on_allowed_ceiling() {
-                thread::sleep(BOARD_IDLE_POLL);
-                continue;
-            }
-
-            if sim.state() != SimState::Running {
+            if sim.state() != SimState::Running || sim.waiting_on_allowed_ceiling() {
                 // Do not pump_tx while the guest is not advancing: cross-board
                 // UART must not race ahead of virtual-time sync (ceiling / stop).
+                // Yield instead of sleeping so peers' VT updates are noticed promptly.
                 thread::yield_now();
                 continue;
             }
@@ -540,7 +534,7 @@ pub fn run_node<E: Entity>(
             let polled = sim.poll();
             // Publish the post-poll virtual time before any HostStop so peers
             // see it, and pick up the ceiling derived from the updated slots.
-            publish_vt_and_refresh_allowed(
+            publish_vt_and_maybe_refresh_allowed(
                 &mut sim,
                 &vt,
                 opts.vt_slot,
@@ -645,9 +639,9 @@ fn find_board<'a>(
         .ok_or_else(|| BoardError::Message(format!("board name `{board_name}` not in topology")))
 }
 
-/// Write this board's virtual time to its shared-memory slot, then apply the
-/// recomputed allowed ceiling (`min(min(board slots) + margin_ns, ceiling)`).
-fn publish_vt_and_refresh_allowed<E: Entity>(
+/// Write this board's virtual time to its shared-memory slot, then maybe apply
+/// the recomputed allowed ceiling (`min(min(board slots) + margin_ns, ceiling)`).
+fn publish_vt_and_maybe_refresh_allowed<E: Entity>(
     sim: &mut Simulator<E>,
     vt: &VtClock,
     vt_slot: usize,
@@ -655,19 +649,30 @@ fn publish_vt_and_refresh_allowed<E: Entity>(
     last_allowed: &mut Option<u64>,
 ) {
     vt.write_board_vt(vt_slot, sim.entity().now().0);
-    refresh_allowed(sim, vt, margin_ns, last_allowed);
+    maybe_refresh_allowed(sim, vt, margin_ns, last_allowed);
 }
 
-/// Apply the allowed ceiling currently derived from shared memory.
+/// Apply the allowed ceiling from shared memory when needed.
 ///
-/// Skips `SetAllowed` when the value is unchanged to avoid hammering the
-/// simulator command path on every idle poll.
-fn refresh_allowed<E: Entity>(
+/// Always sets an initial ceiling. Afterwards, skips a full recompute while the
+/// next quantum cannot reach the last ceiling **and** the hard ceiling has not
+/// been lowered below it (host `until` / GDB catch-up write slot 0).
+fn maybe_refresh_allowed<E: Entity>(
     sim: &mut Simulator<E>,
     vt: &VtClock,
     margin_ns: u64,
     last_allowed: &mut Option<u64>,
 ) {
+    if let Some(last) = *last_allowed {
+        if can_skip_allowed_refresh(
+            last,
+            sim.next_quantum_reaches_allowed(Tick(last)),
+            vt.ceiling(),
+        ) {
+            return;
+        }
+    }
+
     let allowed = vt.allowed_ns(margin_ns);
     if *last_allowed == Some(allowed) {
         return;
@@ -676,6 +681,12 @@ fn refresh_allowed<E: Entity>(
         tick: Tick(allowed),
     });
     *last_allowed = Some(allowed);
+}
+
+/// Skip full `allowed_ns` / `SetAllowed` while far from `last` unless slot 0
+/// (`VtClock::ceiling`) was lowered beneath `last`.
+fn can_skip_allowed_refresh(last: u64, next_quantum_reaches: bool, hard_ceiling: u64) -> bool {
+    !next_quantum_reaches && hard_ceiling >= last
 }
 
 fn perform_local_step<E: Entity>(
@@ -727,6 +738,45 @@ mod tests {
         Addr, Breakpoint, Core, Cpu, EventCtl, HasMemoryMap, Machine, MapError, MemoryBus,
         MemoryMapBuilder, Quantum, RegId, Resettable, Rom, SimError, Tick,
     };
+
+    #[test]
+    fn can_skip_allowed_refresh_keeps_far_headroom() {
+        assert!(can_skip_allowed_refresh(10_000, false, u64::MAX));
+        assert!(!can_skip_allowed_refresh(10_000, true, u64::MAX));
+    }
+
+    #[test]
+    fn can_skip_allowed_refresh_notices_lowered_hard_ceiling() {
+        // until / GDB catch-up: arbiter writes a lower slot-0 ceiling.
+        assert!(!can_skip_allowed_refresh(10_000, false, 5_000));
+        assert!(can_skip_allowed_refresh(5_000, false, 5_000));
+    }
+
+    #[test]
+    fn maybe_refresh_allowed_applies_lowered_hard_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let vt = VtClock::create(dir.path(), 1).unwrap();
+        vt.write_board_vt(1, 0);
+        vt.set_ceiling(u64::MAX);
+
+        let mut sim = Simulator::new(
+            fake_machine(vec![FakeOp::Nop; 100]),
+            SimConfig {
+                max_quantum: Tick(10),
+            },
+        );
+        let mut last_allowed = None;
+        maybe_refresh_allowed(&mut sim, &vt, 1_000, &mut last_allowed);
+        assert_eq!(last_allowed, Some(1_000));
+        assert_eq!(sim.allowed(), Some(Tick(1_000)));
+
+        // Far from the last ceiling: would skip without the hard-ceiling check.
+        assert!(!sim.next_quantum_reaches_allowed(Tick(1_000)));
+        vt.set_ceiling(200);
+        maybe_refresh_allowed(&mut sim, &vt, 1_000, &mut last_allowed);
+        assert_eq!(last_allowed, Some(200));
+        assert_eq!(sim.allowed(), Some(Tick(200)));
+    }
 
     #[test]
     fn halt_is_not_cluster_host_stop() {
