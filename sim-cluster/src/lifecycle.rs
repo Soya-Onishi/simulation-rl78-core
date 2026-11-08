@@ -178,7 +178,7 @@ impl PeerState {
         match (self, msg) {
             (state, ControlToArbiter::State { .. }) => (state, None),
             (
-                state @ (PeerState::Booting | PeerState::Running | PeerState::Stopped),
+                state,
                 ControlToArbiter::TimeReport {
                     from,
                     virtual_time_ns,
@@ -190,10 +190,7 @@ impl PeerState {
                     virtual_time_ns,
                 }),
             ),
-            (
-                PeerState::Booting | PeerState::Running | PeerState::Stopped,
-                ControlToArbiter::HostStop { from, reason },
-            ) => (
+            (_, ControlToArbiter::HostStop { from, reason }) => (
                 PeerState::Stopped,
                 Some(PeerEffect::HostStop { from, reason }),
             ),
