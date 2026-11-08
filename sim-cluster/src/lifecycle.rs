@@ -53,8 +53,6 @@ impl NodeState {
 pub enum NodeEffect {
     /// Reply to [`ControlToNode::GetState`] with the current [`NodeState`].
     ReportState,
-    /// Apply a new virtual-time ceiling locally.
-    SetAllowed { allowed_ns: u64 },
     /// Hold-reset devices and the CPU via [`sim_kernel::Machine::reset`].
     Reset,
     /// Replace the probe emit set for `board_hash` (ignore if it is not this node).
@@ -79,16 +77,9 @@ impl NodeState {
     pub fn on_message(self, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
         match (self, msg) {
             (state, ControlToNode::GetState) => (state, Some(NodeEffect::ReportState)),
-            (NodeState::Stopped | NodeState::Running, ControlToNode::Start { allowed_ns }) => (
-                NodeState::Running,
-                Some(NodeEffect::SetAllowed { allowed_ns }),
-            ),
-            // Ceiling may be republished while stopped, immediately after Reset
-            // and before the following Start.
-            (
-                state @ (NodeState::Stopped | NodeState::Running),
-                ControlToNode::Allowed { allowed_ns },
-            ) => (state, Some(NodeEffect::SetAllowed { allowed_ns })),
+            (NodeState::Stopped | NodeState::Running, ControlToNode::Start) => {
+                (NodeState::Running, None)
+            }
             (NodeState::Stopped, ControlToNode::Reset) => {
                 (NodeState::Stopped, Some(NodeEffect::Reset))
             }
@@ -116,7 +107,6 @@ impl NodeState {
             (NodeState::Stopped | NodeState::Running, ControlToNode::GdbStep { board_hash }) => {
                 (NodeState::Stopped, Some(NodeEffect::GdbStep { board_hash }))
             }
-            // Duplicate / late / early messages: warn and stay.
             (state, msg) => (
                 state,
                 Some(NodeEffect::Warn(format!(
@@ -154,10 +144,6 @@ impl PeerState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerEffect {
     Warn(String),
-    TimeReport {
-        from: crate::ipc::HashedId<u64>,
-        virtual_time_ns: u64,
-    },
     HostStop {
         from: crate::ipc::HashedId<u64>,
         reason: HostStopReason,
@@ -177,19 +163,6 @@ impl PeerState {
     pub fn on_message(self, msg: ControlToArbiter) -> (Self, Option<PeerEffect>) {
         match (self, msg) {
             (state, ControlToArbiter::State { .. }) => (state, None),
-            (
-                state,
-                ControlToArbiter::TimeReport {
-                    from,
-                    virtual_time_ns,
-                },
-            ) => (
-                state,
-                Some(PeerEffect::TimeReport {
-                    from,
-                    virtual_time_ns,
-                }),
-            ),
             (_, ControlToArbiter::HostStop { from, reason }) => (
                 PeerState::Stopped,
                 Some(PeerEffect::HostStop { from, reason }),
@@ -201,7 +174,6 @@ impl PeerState {
     #[must_use]
     pub fn on_start_broadcast(self) -> Self {
         match self {
-            // Stopped is included so a later host Start resumes the same peers.
             PeerState::Running | PeerState::Stopped => PeerState::Running,
             other => other,
         }
@@ -220,9 +192,9 @@ mod tests {
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::ReportState));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start { allowed_ns: 0 });
+        let (n, eff) = s.on_message(ControlToNode::Start);
         assert_eq!(n, NodeState::Running);
-        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 0 }));
+        assert!(eff.is_none());
     }
 
     #[test]
@@ -246,10 +218,10 @@ mod tests {
     }
 
     #[test]
-    fn node_start_while_running_updates_allowed() {
-        let (n, eff) = NodeState::Running.on_message(ControlToNode::Start { allowed_ns: 80 });
+    fn node_start_while_running() {
+        let (n, eff) = NodeState::Running.on_message(ControlToNode::Start);
         assert_eq!(n, NodeState::Running);
-        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 80 }));
+        assert!(eff.is_none());
     }
 
     #[test]
@@ -260,25 +232,21 @@ mod tests {
         });
         assert_eq!(n, NodeState::Stopped);
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start { allowed_ns: 50 });
+        let (n, eff) = s.on_message(ControlToNode::Start);
         assert_eq!(n, NodeState::Running);
-        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 50 }));
+        assert!(eff.is_none());
     }
 
     #[test]
-    fn node_reset_then_ceiling_then_start() {
+    fn node_reset_then_start() {
         let mut s = NodeState::Stopped;
         let (n, eff) = s.on_message(ControlToNode::Reset);
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::Reset));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Allowed { allowed_ns: 1_000 });
-        assert_eq!(n, NodeState::Stopped);
-        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 1_000 }));
-        s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start { allowed_ns: 1_000 });
+        let (n, eff) = s.on_message(ControlToNode::Start);
         assert_eq!(n, NodeState::Running);
-        assert_eq!(eff, Some(NodeEffect::SetAllowed { allowed_ns: 1_000 }));
+        assert!(eff.is_none());
     }
 
     #[test]
@@ -325,52 +293,6 @@ mod tests {
             eff,
             Some(NodeEffect::GdbStep {
                 board_hash: crate::ipc::HashedId::new(7)
-            })
-        );
-    }
-
-    #[test]
-    fn peer_time_report_while_stopped() {
-        let hash_a = board_id_hash("a");
-        let (n, eff) = PeerState::Stopped.on_message(ControlToArbiter::TimeReport {
-            from: hash_a,
-            virtual_time_ns: 50,
-        });
-        assert_eq!(n, PeerState::Stopped);
-        assert_eq!(
-            eff,
-            Some(PeerEffect::TimeReport {
-                from: hash_a,
-                virtual_time_ns: 50,
-            })
-        );
-    }
-
-    #[test]
-    fn peer_accepts_step_reports_while_stopped() {
-        let hash_a = board_id_hash("a");
-        let (n, eff) = PeerState::Stopped.on_message(ControlToArbiter::TimeReport {
-            from: hash_a,
-            virtual_time_ns: 50,
-        });
-        assert_eq!(n, PeerState::Stopped);
-        assert_eq!(
-            eff,
-            Some(PeerEffect::TimeReport {
-                from: hash_a,
-                virtual_time_ns: 50,
-            })
-        );
-        let (n, eff) = n.on_message(ControlToArbiter::HostStop {
-            from: hash_a,
-            reason: HostStopReason::Step,
-        });
-        assert_eq!(n, PeerState::Stopped);
-        assert_eq!(
-            eff,
-            Some(PeerEffect::HostStop {
-                from: hash_a,
-                reason: HostStopReason::Step,
             })
         );
     }

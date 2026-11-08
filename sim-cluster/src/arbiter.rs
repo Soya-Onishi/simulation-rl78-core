@@ -4,7 +4,7 @@
 //! guest without exiting this process, so a later `start` or `reset` can
 //! run. `shutdown` on the server→arbiter iceoryx channel ends the process.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -15,7 +15,7 @@ use crate::action::ActionUpstream;
 use crate::arbiter_catalog::{
     apply_probe_catalogs, collect_board_catalogs, publish_action_catalogs,
 };
-use crate::control::{ControlToArbiter, ControlToNode, HostStopReason};
+use crate::control::{ControlToArbiter, ControlToNode, HostStopReason, NodeStateWire};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
     ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterProbeCtrl,
@@ -25,8 +25,8 @@ use crate::ipc::{
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::probe::ProbeWireKind;
 use crate::probe_hub::{ArbiterProbeHub, ProbeSample};
-use crate::time_sync::TimeCeiling;
 use crate::topology::{LogicalTopology, TopologyError};
+use crate::vt_clock::{VtClock, VtClockLease, board_slot_index};
 
 /// Idle poll while waiting for Booting barrier / time-sync (arbiter side).
 const ARBITER_POLL_IDLE: Duration = Duration::from_millis(1);
@@ -104,12 +104,12 @@ fn booting_barrier_and_start(
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
     let mut peers = await_booting(topo, control)?;
-    control.publish(&ControlToNode::Start { allowed_ns: 0 })?;
+    control.publish(&ControlToNode::Start)?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
     log::info!("Start broadcast");
-    run_time_sync(topo, control, &mut peers)?;
+    run_time_sync(control, &mut peers)?;
     Ok(())
 }
 
@@ -174,26 +174,76 @@ fn await_booting(
     Ok(peers)
 }
 
+/// After [`ControlToNode::ClusterStop`], wait until every peer reports
+/// [`NodeStateWire::Stopped`] so the hard ceiling can be reopened safely.
+fn await_peers_stopped(
+    control: &ArbiterControl,
+    peers: &HashMap<String, PeerState>,
+    timeout: Duration,
+) -> Result<(), ArbiterError> {
+    let mut pending: HashSet<String> = peers.keys().cloned().collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + timeout;
+    control.publish(&ControlToNode::GetState)?;
+    let mut last_get_state = Instant::now();
+
+    while !pending.is_empty() {
+        if Instant::now() >= deadline {
+            let mut missing: Vec<_> = pending.into_iter().collect();
+            missing.sort();
+            return Err(ArbiterError::Message(format!(
+                "reset stop barrier timed out; missing Stopped from: {}",
+                missing.join(", ")
+            )));
+        }
+        if last_get_state.elapsed() >= GET_STATE_REPUBLISH {
+            control.publish(&ControlToNode::GetState)?;
+            last_get_state = Instant::now();
+        }
+
+        let mut progressed = false;
+        while let Some(msg) = control.try_recv()? {
+            match msg {
+                ControlToArbiter::State {
+                    from,
+                    state: NodeStateWire::Stopped,
+                } => {
+                    let Some(board_id) = control.resolve_board(from).map(str::to_owned) else {
+                        continue;
+                    };
+                    if pending.remove(&board_id) {
+                        progressed = true;
+                    }
+                }
+                ControlToArbiter::State { from, state } => {
+                    if let Some(board_id) = control.resolve_board(from) {
+                        log::trace!("reset barrier: '{board_id}' still {state:?}");
+                    }
+                }
+                ControlToArbiter::HostStop { .. } => {
+                    // Late HostStop after ClusterStop; ignore during the barrier.
+                }
+            }
+        }
+        if !progressed {
+            thread::sleep(ARBITER_POLL_IDLE);
+        }
+    }
+    log::info!("reset stop barrier complete");
+    Ok(())
+}
+
 #[cfg(test)]
 fn run_time_sync(
-    topo: &LogicalTopology,
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
 ) -> Result<(), ArbiterError> {
-    use crate::time_sync::TimeCeiling;
-
-    let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
-    let mut allowed = ceiling.allowed_ns();
-    control.publish(&ControlToNode::Allowed {
-        allowed_ns: allowed,
-    })?;
-    log::info!("initial Allowed={allowed}");
-
     // TODO(cluster-loop): MVP wall-clock window only. Replace with an open loop
     // until ControlToNode::Shutdown (or equivalent) ends the run.
     let deadline = Instant::now() + Duration::from_millis(300);
     while Instant::now() < deadline {
-        let mut changed = false;
         let mut cluster_stop: Option<(String, HostStopReason)> = None;
         while let Some(msg) = control.try_recv()? {
             let from = msg.from_board();
@@ -205,13 +255,6 @@ fn run_time_sync(
             };
             let (next, effect) = state.on_message(msg);
             match effect.clone() {
-                Some(PeerEffect::TimeReport {
-                    from: _,
-                    virtual_time_ns,
-                }) => {
-                    ceiling.report(&board_id, virtual_time_ns);
-                    changed = true;
-                }
                 Some(PeerEffect::HostStop { from: _, reason }) => {
                     // HostStopReason variants are all cluster-relevant by construction.
                     cluster_stop = Some((board_id.clone(), reason));
@@ -225,15 +268,7 @@ fn run_time_sync(
             broadcast_cluster_stop(control, peers, &source, reason)?;
             return Ok(());
         }
-        if changed {
-            let next_allowed = ceiling.allowed_ns();
-            if next_allowed != allowed {
-                allowed = next_allowed;
-                control.publish(&ControlToNode::Allowed {
-                    allowed_ns: allowed,
-                })?;
-            }
-        }
+        thread::sleep(ARBITER_POLL_IDLE);
     }
     Ok(())
 }
@@ -307,7 +342,22 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         probe_hub.catalog().len()
     );
 
-    let mut children = spawn_nodes(opts, topo)?;
+    let vt = match VtClock::create(&opts.iox_root, topo.boards.len()) {
+        Ok(vt) => vt,
+        Err(err) => {
+            logs.shutdown();
+            return Err(ArbiterError::Io(err));
+        }
+    };
+    // Unlink vt_clock on any exit from this session (including early `?`).
+    let _vt_lease = VtClockLease::new(&opts.iox_root);
+    let mut children = match spawn_nodes(opts, topo) {
+        Ok(children) => children,
+        Err(err) => {
+            logs.shutdown();
+            return Err(err);
+        }
+    };
     let mut peers = match await_booting(topo, &control) {
         Ok(peers) => peers,
         Err(err) => {
@@ -347,22 +397,13 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     if let Err(err) = probe_tx.publish_catalog_done() {
         log::warn!("probe catalog end failed: {err}");
     }
-    let mut ceiling = TimeCeiling::new(topo.boards.iter().map(|b| b.id.clone()), topo.margin_ns);
-    let mut allowed = ceiling.allowed_ns();
     let mut running = false;
     let mut until_cap: Option<u64> = None;
     let mut last_stop_reason: Option<HostStopReason> = None;
     let mut gdb_step: Option<GdbStepPhase> = None;
     let mut last_status = Instant::now();
-    write_status(
-        &host,
-        running,
-        ceiling.virtual_time_ns(),
-        None,
-        topo,
-        &peers,
-    )?;
-    let mut reported_vt = ceiling.virtual_time_ns();
+    write_status(&host, running, vt.min_board_vt(), None, topo, &peers)?;
+    let mut reported_vt = vt.min_board_vt();
     let mut reported_running = running;
     let mut reported_stop_reason = last_stop_reason;
 
@@ -379,8 +420,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     apply_start(
                         &control,
                         &mut peers,
-                        &ceiling,
-                        &mut allowed,
+                        &vt,
                         &mut until_cap,
                         &mut last_stop_reason,
                         &mut running,
@@ -404,16 +444,23 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
                     log::info!("host Reset");
                     gdb_step = None;
                     until_cap = None;
+                    // ClusterStop, freeze ceiling so stragglers cannot race, wait until
+                    // every board reports Stopped, then Reset and open the ceiling.
                     broadcast_cluster_stop(
                         &control,
                         &mut peers,
                         "server",
                         HostStopReason::ExternalStop,
                     )?;
-
+                    vt.set_ceiling(vt.min_board_vt());
+                    await_peers_stopped(
+                        &control,
+                        &peers,
+                        Duration::from_millis(topo.booting_timeout_ms),
+                    )?;
                     control.publish(&ControlToNode::Reset)?;
-                    allowed = allowed_after_reset(&mut ceiling, allowed);
-                    begin_running(&control, &mut peers, allowed)?;
+                    vt.set_ceiling(u64::MAX);
+                    broadcast_start(&control, &mut peers)?;
                     running = true;
                     last_stop_reason = None;
                     log::info!("host Reset: Start");
@@ -449,8 +496,8 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
         match step_time_sync(
             &control,
             &mut peers,
-            &mut ceiling,
-            &mut allowed,
+            &vt,
+            topo,
             &mut until_cap,
             &mut running,
             &mut gdb_step,
@@ -465,16 +512,16 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
             }
         }
 
-        let vt = ceiling.virtual_time_ns();
+        let now_vt = vt.min_board_vt();
         let published_reason = if running { None } else { last_stop_reason };
         if running != reported_running
-            || vt != reported_vt
+            || now_vt != reported_vt
             || published_reason != reported_stop_reason
             || last_status.elapsed() >= Duration::from_millis(100)
         {
-            write_status(&host, running, vt, published_reason, topo, &peers)?;
+            write_status(&host, running, now_vt, published_reason, topo, &peers)?;
             reported_running = running;
-            reported_vt = vt;
+            reported_vt = now_vt;
             reported_stop_reason = published_reason;
             last_status = Instant::now();
         }
@@ -482,6 +529,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
 
     logs.shutdown();
     stop_children(&mut children);
+    // `_vt_lease` Drop unlinks vt_clock.
     result
 }
 
@@ -538,12 +586,26 @@ fn forward_probes(hub: &ArbiterProbeHub, tx: &ArbiterProbeForward) -> Result<(),
     Ok(())
 }
 
-fn begin_running(
-    control: &ArbiterControl,
-    peers: &mut HashMap<String, PeerState>,
-    allowed: u64,
-) -> Result<(), ArbiterError> {
-    broadcast_start(control, peers, allowed)
+/// Virtual time of `source` for GDB catch-up (`until` / ceiling).
+fn gdb_catchup_target(
+    topo: &LogicalTopology,
+    vt: &VtClock,
+    source: &str,
+) -> Result<u64, ArbiterError> {
+    let slot = board_slot(topo, source).ok_or_else(|| {
+        ArbiterError::Message(format!(
+            "gdb catch-up: board '{source}' not found in topology"
+        ))
+    })?;
+    Ok(vt.board_vt(slot))
+}
+
+/// Slot index in [`VtClock`] for `board_id` (topology order, 1-based).
+fn board_slot(topo: &LogicalTopology, board_id: &str) -> Option<usize> {
+    topo.boards
+        .iter()
+        .position(|b| b.id == board_id)
+        .map(board_slot_index)
 }
 
 /// `until_ns` is already at or behind `now`: do not resume.
@@ -557,27 +619,19 @@ fn reached_until(until_ns: Option<u64>, now_ns: u64) -> bool {
     until_ns.is_some_and(|until| now_ns >= until)
 }
 
-fn publish_allowed(control: &ArbiterControl, allowed: u64) -> Result<(), ArbiterError> {
-    control.publish(&ControlToNode::Allowed {
-        allowed_ns: allowed,
-    })?;
-    Ok(())
-}
-
 /// Apply a host Start: stay/stop if `until_ns` is not ahead of now, otherwise
-/// broadcast Start with the run ceiling (Stopped resumes; Running retargets).
-#[allow(clippy::too_many_arguments)]
+/// write the shared-memory ceiling and broadcast Start (Stopped resumes;
+/// Running retargets).
 fn apply_start(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
-    ceiling: &TimeCeiling,
-    allowed: &mut u64,
+    vt: &VtClock,
     until_cap: &mut Option<u64>,
     last_stop_reason: &mut Option<HostStopReason>,
     running: &mut bool,
     until_ns: Option<u64>,
 ) -> Result<(), ArbiterError> {
-    let now = ceiling.virtual_time_ns();
+    let now = vt.min_board_vt();
     if should_stay_stopped(until_ns, now) {
         if *running {
             log::info!("start until_ns={until_ns:?} <= now={now}; Host Stop");
@@ -592,8 +646,8 @@ fn apply_start(
     }
 
     *until_cap = until_ns;
-    *allowed = ceiling.allowed_ns_until(*until_cap);
-    broadcast_start(control, peers, *allowed)?;
+    vt.set_ceiling(until_ns.unwrap_or(u64::MAX));
+    broadcast_start(control, peers)?;
     *running = true;
     *last_stop_reason = None;
     Ok(())
@@ -627,24 +681,15 @@ fn apply_gdb_step(
     Ok(())
 }
 
-/// Guest clocks may already equal the last Allowed. Treat that as `now` so the
-/// republished ceiling is `now + margin` and boards can leave the old ceiling.
-fn allowed_after_reset(ceiling: &mut TimeCeiling, last_allowed: u64) -> u64 {
-    let now = last_allowed.max(ceiling.virtual_time_ns());
-    ceiling.advance_to(now);
-    ceiling.allowed_ns()
-}
-
 fn broadcast_start(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
-    allowed_ns: u64,
 ) -> Result<(), ArbiterError> {
-    control.publish(&ControlToNode::Start { allowed_ns })?;
+    control.publish(&ControlToNode::Start)?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
-    log::info!("Start broadcast allowed_ns={allowed_ns}");
+    log::info!("Start broadcast");
     Ok(())
 }
 
@@ -652,14 +697,13 @@ fn broadcast_start(
 fn step_time_sync(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
-    ceiling: &mut TimeCeiling,
-    allowed: &mut u64,
+    vt: &VtClock,
+    topo: &LogicalTopology,
     until_ns: &mut Option<u64>,
     running: &mut bool,
     gdb_step: &mut Option<GdbStepPhase>,
     last_stop_reason: &mut Option<HostStopReason>,
 ) -> Result<SyncStep, ArbiterError> {
-    let mut changed = false;
     let mut cluster_stop: Option<(String, HostStopReason)> = None;
     let mut gdb_insn: Option<(String, HostStopReason)> = None;
     while let Some(msg) = control.try_recv()? {
@@ -672,13 +716,6 @@ fn step_time_sync(
         };
         let (next, effect) = state.on_message(msg);
         match effect.clone() {
-            Some(PeerEffect::TimeReport {
-                from: _,
-                virtual_time_ns,
-            }) => {
-                ceiling.report(&board_id, virtual_time_ns);
-                changed = true;
-            }
             Some(PeerEffect::HostStop { from: _, reason }) => match gdb_step.as_ref() {
                 Some(GdbStepPhase::WaitInsn { board_id: stepped }) if stepped == &board_id => {
                     gdb_insn = Some((board_id.clone(), reason));
@@ -696,32 +733,23 @@ fn step_time_sync(
         return Ok(SyncStep::Stopped(reason));
     }
     if let Some((source, reason)) = gdb_insn {
-        let target = ceiling.last_report(&source).unwrap_or(0);
+        let target = gdb_catchup_target(topo, vt, &source)?;
         log::info!("gdb Step from '{source}' ({reason}) vt={target}; catch-up");
         *until_ns = Some(target);
-        *allowed = ceiling.allowed_ns_until(*until_ns);
-        broadcast_start(control, peers, *allowed)?;
+        vt.set_ceiling(target);
+        broadcast_start(control, peers)?;
         *running = true;
         *last_stop_reason = None;
         *gdb_step = Some(GdbStepPhase::CatchUp { reason });
         return Ok(SyncStep::Continue);
     }
-    if changed {
-        let next_allowed = ceiling.allowed_ns_until(*until_ns);
-        if next_allowed != *allowed {
-            *allowed = next_allowed;
-            publish_allowed(control, *allowed)?;
-        }
-    }
-    if reached_until(*until_ns, ceiling.virtual_time_ns()) {
+    let now_vt = vt.min_board_vt();
+    if reached_until(*until_ns, now_vt) {
         let reason = match gdb_step {
             Some(GdbStepPhase::CatchUp { reason }) => *reason,
             _ => HostStopReason::Until,
         };
-        log::info!(
-            "until_ns reached at vt={} ({reason}); broadcasting ClusterStop",
-            ceiling.virtual_time_ns()
-        );
+        log::info!("until_ns reached at vt={now_vt} ({reason}); broadcasting ClusterStop");
         *gdb_step = None;
         broadcast_cluster_stop(control, peers, "server", reason)?;
         return Ok(SyncStep::Stopped(reason));
@@ -778,7 +806,7 @@ fn ensure_node_bins(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
 
 fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Child>, ArbiterError> {
     let mut children = Vec::new();
-    for board in &topo.boards {
+    for (index, board) in topo.boards.iter().enumerate() {
         let bin = binary_for_kind(opts, &board.kind)?;
         let child = Command::new(bin)
             .arg("--board-name")
@@ -791,8 +819,8 @@ fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Chil
             .arg(&opts.topology_path)
             .arg("--margin-ns")
             .arg(topo.margin_ns.to_string())
-            .arg("--headroom-threshold-ns")
-            .arg(topo.headroom_threshold_ns.to_string())
+            .arg("--vt-slot")
+            .arg(board_slot_index(index).to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -884,7 +912,7 @@ fn warn_peer(board_id: &str, effect: Option<PeerEffect>) -> Result<(), ArbiterEr
         Some(PeerEffect::Warn(msg)) => {
             log::warn!("warning [{board_id}]: {msg}");
         }
-        Some(PeerEffect::TimeReport { .. }) | Some(PeerEffect::HostStop { .. }) | None => {}
+        Some(PeerEffect::HostStop { .. }) | None => {}
     }
 
     Ok(())
@@ -908,16 +936,6 @@ mod tests {
     use serial_test::serial;
     use std::sync::{Arc, Mutex};
     use std::thread;
-
-    #[test]
-    fn start_from_stopped_uses_run_ceiling_not_now() {
-        let mut ceiling = TimeCeiling::new(["a".into()], 1000);
-        ceiling.report("a", 500);
-        assert_eq!(ceiling.virtual_time_ns(), 500);
-        assert_eq!(ceiling.allowed_ns_until(None), 1500);
-        assert_eq!(ceiling.allowed_ns_until(Some(800)), 800);
-        assert_eq!(ceiling.allowed_ns_until(Some(10_000)), 1500);
-    }
 
     #[test]
     fn stay_stopped_when_until_is_not_ahead_of_now() {
@@ -951,15 +969,40 @@ mod tests {
     }
 
     #[test]
-    fn reset_raises_allowed_to_now_plus_margin() {
-        let mut ceiling = TimeCeiling::new(["a".into(), "b".into()], 1000);
-        ceiling.report("a", 400);
-        ceiling.report("b", 500);
-        // Last published ceiling; guests may already sit here.
-        let last_allowed = 1500;
-        assert_eq!(allowed_after_reset(&mut ceiling, last_allowed), 2500);
-        assert_eq!(ceiling.virtual_time_ns(), 1500);
-        assert_eq!(ceiling.allowed_ns(), 2500);
+    fn board_slot_follows_topology_order() {
+        let topo = two_board_topo(1_000);
+        assert_eq!(board_slot(&topo, "a"), Some(1));
+        assert_eq!(board_slot(&topo, "b"), Some(2));
+        assert_eq!(board_slot(&topo, "c"), None);
+    }
+
+    #[test]
+    fn gdb_catchup_target_reads_source_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let topo = two_board_topo(1_000);
+        let vt = VtClock::create(dir.path(), topo.boards.len()).unwrap();
+        vt.write_board_vt(1, 111);
+        vt.write_board_vt(2, 222);
+        assert_eq!(gdb_catchup_target(&topo, &vt, "a").unwrap(), 111);
+        assert_eq!(gdb_catchup_target(&topo, &vt, "b").unwrap(), 222);
+        assert!(gdb_catchup_target(&topo, &vt, "missing").is_err());
+    }
+
+    #[test]
+    fn apply_start_writes_ceiling_from_until() {
+        let dir = tempfile::tempdir().unwrap();
+        let vt = VtClock::create(dir.path(), 2).unwrap();
+        vt.write_board_vt(1, 10);
+        vt.write_board_vt(2, 20);
+        // Unlimited start.
+        vt.set_ceiling(u64::MAX);
+        assert_eq!(vt.allowed_ns(5), 15);
+        // Hard until below min+margin clamps allowed.
+        vt.set_ceiling(12);
+        assert_eq!(vt.allowed_ns(5), 12);
+        // until behind now → stay-stopped helper.
+        assert!(should_stay_stopped(Some(10), 20));
+        assert!(!should_stay_stopped(Some(30), 20));
     }
 
     fn two_board_topo(booting_timeout_ms: u64) -> LogicalTopology {
@@ -1047,7 +1090,6 @@ mod tests {
                 },
             ],
             margin_ns: 1000,
-            headroom_threshold_ns: 100,
             booting_timeout_ms,
         }
     }
@@ -1081,7 +1123,7 @@ mod tests {
                             });
                         }
                     }
-                    ControlToNode::Start { .. } => {
+                    ControlToNode::Start => {
                         got_start = true;
                         if inject_host_stop {
                             let _ = control.publish(&ControlToArbiter::HostStop {

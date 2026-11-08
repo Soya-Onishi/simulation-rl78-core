@@ -422,7 +422,6 @@ mod tests {
             }],
             edges: vec![],
             margin_ns: 1000,
-            headroom_threshold_ns: 200,
             booting_timeout_ms: 10_000,
         }
     }
@@ -433,7 +432,6 @@ mod tests {
             boards: vec![],
             edges: vec![],
             margin_ns: 1000,
-            headroom_threshold_ns: 200,
             booting_timeout_ms: 10_000,
         })
         .unwrap_err();

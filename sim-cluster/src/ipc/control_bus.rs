@@ -14,8 +14,8 @@ use super::runtime::IpcError;
 
 /// n2a subscriber capacity scales with board count.
 ///
-/// Catalogs no longer arrive on control IPC; headroom covers `Ready` plus later
-/// `TimeReport` / `HostStop` bursts.
+/// Catalogs no longer arrive on control IPC; buffer covers `GetState` replies
+/// and `HostStop` bursts.
 #[must_use]
 fn n2a_subscriber_buffer(board_count: usize) -> usize {
     board_count.max(1) * (MAX_PROBES_PER_BOARD + 1)

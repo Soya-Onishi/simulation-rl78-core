@@ -27,6 +27,5 @@ class TwoBoardUart(Topology):
 def two_board_uart() -> SimulationConfig:
     return SimulationConfig(
         margin_ns=200_000,
-        headroom_threshold_ns=100_000,
         topology=TwoBoardUart(name="demo", elf_a=ELF_TX, elf_b=ELF_RX),
     )

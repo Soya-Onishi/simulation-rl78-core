@@ -25,7 +25,6 @@ class PlantTopo(Topology):
 def plant_config() -> SimulationConfig:
     return SimulationConfig(
         margin_ns=200_000,
-        headroom_threshold_ns=100_000,
         topology=PlantTopo(name="demo"),
     )
 

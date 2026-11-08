@@ -90,19 +90,14 @@ pub enum ControlToNode {
     GetState,
     /// Simulation may enter Running (always broadcast).
     ///
-    /// `allowed_ns` is the current run ceiling: `min(now + margin, until_ns)`
-    /// when capped, otherwise `now + margin`. The node applies queued actions
-    /// at the current virtual time, then may advance up to this value. Later
-    /// [`Self::Allowed`] samples raise the ceiling as peers report.
-    Start { allowed_ns: u64 },
-    /// New virtual-time ceiling (always broadcast).
-    Allowed { allowed_ns: u64 },
+    /// The node reads the shared vt_clock for the allowed virtual-time ceiling.
+    Start,
     /// Host-initiated cluster stop (always broadcast; no ack on same host).
     ClusterStop { reason: HostStopReason },
     /// Hold-reset devices and the CPU via [`sim_kernel::Resettable`].
     ///
     /// The arbiter sends this only after [`Self::ClusterStop`], then
-    /// [`Self::Start`] (which carries the new ceiling).
+    /// [`Self::Start`].
     Reset,
     /// Replace the emit set for one board (always broadcast; nodes ignore others).
     ProbeWatch {
@@ -126,11 +121,6 @@ pub enum ControlToArbiter {
         from: HashedId<u64>,
         state: NodeStateWire,
     },
-    /// Virtual time report.
-    TimeReport {
-        from: HashedId<u64>,
-        virtual_time_ns: u64,
-    },
     /// Host-initiated stop (BP / external / step / unmapped).
     /// Guest-local Halt (sim stays Running) must not be sent.
     HostStop {
@@ -144,9 +134,7 @@ impl ControlToArbiter {
     #[must_use]
     pub fn from_board(self) -> HashedId<u64> {
         match self {
-            Self::State { from, .. }
-            | Self::TimeReport { from, .. }
-            | Self::HostStop { from, .. } => from,
+            Self::State { from, .. } | Self::HostStop { from, .. } => from,
         }
     }
 }
