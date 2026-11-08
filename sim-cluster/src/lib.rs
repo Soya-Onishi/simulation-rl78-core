@@ -30,8 +30,8 @@ pub mod probe;
 pub mod probe_hub;
 mod probe_log;
 pub mod server;
-pub mod time_sync;
 pub mod topology;
+pub mod vt_clock;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
@@ -59,7 +59,6 @@ pub use probe::{
 pub use probe_hub::{ArbiterProbeError, ArbiterProbeHub, ProbeCatalogEntry, ProbeSample};
 pub use server::{ServerError, ServerOptions, run_backend, spawn_worker};
 pub use sim_kernel::{ProbePoint, ProbePolicy, ProbeTap, UartFrame};
-pub use time_sync::TimeCeiling;
 pub use topology::{
     BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
     PortRef, TopologyError, parse_logical_topology,

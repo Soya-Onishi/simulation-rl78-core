@@ -27,6 +27,7 @@ use crate::ipc::{
 use crate::lifecycle::{NodeEffect, NodeState};
 use crate::probe::{NodeProbeRuntime, ProbeError, ProbeWireKind};
 use crate::topology::{BoardSpec, LogicalTopology, TopologyError};
+use crate::vt_clock::VtClock;
 
 /// Idle sleep when not Running, waiting on the allowed ceiling, or guest-halted.
 pub const BOARD_IDLE_POLL: Duration = Duration::from_millis(1);
@@ -42,11 +43,11 @@ pub struct BoardOptions {
     pub topology_path: PathBuf,
     /// Virtual-time skew margin (ns); from arbiter CLI (topology copy).
     ///
-    /// Accepted for the StartupRecord→CLI migration; the node does not apply
-    /// this locally yet (ceiling still comes from arbiter Allowed/Start).
+    /// Used to compute the allowed ceiling from shared memory:
+    /// `min(min(board slots) + margin_ns, arbiter ceiling)`.
     pub margin_ns: u64,
-    /// Report when `allowed - now` falls below this (ns).
-    pub headroom_threshold_ns: u64,
+    /// This board's slot in the shared-memory [`VtClock`] (`1..=N`, topology order).
+    pub vt_slot: usize,
 }
 
 /// Failures from the board framework.
@@ -93,7 +94,7 @@ pub fn parse_board_args(
     let mut iox_root: Option<PathBuf> = None;
     let mut topology: Option<PathBuf> = None;
     let mut margin_ns: Option<u64> = None;
-    let mut headroom_threshold_ns: Option<u64> = None;
+    let mut vt_slot: Option<usize> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -127,14 +128,12 @@ pub fn parse_board_args(
                     BoardCliError::Message(format!("{prog}: --margin-ns must be u64"))
                 })?);
             }
-            "--headroom-threshold-ns" => {
+            "--vt-slot" => {
                 let raw = iter.next().ok_or_else(|| {
-                    BoardCliError::Message(format!(
-                        "{prog}: --headroom-threshold-ns requires a value"
-                    ))
+                    BoardCliError::Message(format!("{prog}: --vt-slot requires a value"))
                 })?;
-                headroom_threshold_ns = Some(raw.parse().map_err(|_| {
-                    BoardCliError::Message(format!("{prog}: --headroom-threshold-ns must be u64"))
+                vt_slot = Some(raw.parse().map_err(|_| {
+                    BoardCliError::Message(format!("{prog}: --vt-slot must be usize"))
                 })?);
             }
             other => {
@@ -152,7 +151,7 @@ pub fn parse_board_args(
             iox_root: iox_root.unwrap_or_default(),
             topology_path: topology.unwrap_or_default(),
             margin_ns: margin_ns.unwrap_or(0),
-            headroom_threshold_ns: headroom_threshold_ns.unwrap_or(0),
+            vt_slot: vt_slot.unwrap_or(0),
         });
     }
     let (
@@ -161,19 +160,19 @@ pub fn parse_board_args(
         Some(iox_root),
         Some(topology_path),
         Some(margin_ns),
-        Some(headroom_threshold_ns),
+        Some(vt_slot),
     ) = (
         board_name,
         cluster_key,
         iox_root,
         topology,
         margin_ns,
-        headroom_threshold_ns,
+        vt_slot,
     )
     else {
         return Err(BoardCliError::Message(format!(
             "{prog}: --board-name, --cluster-key, --iox-root, --topology, --margin-ns, and \
-             --headroom-threshold-ns are required"
+             --vt-slot are required"
         )));
     };
     Ok(BoardOptions {
@@ -183,7 +182,7 @@ pub fn parse_board_args(
         iox_root,
         topology_path,
         margin_ns,
-        headroom_threshold_ns,
+        vt_slot,
     })
 }
 
@@ -193,7 +192,7 @@ pub fn board_usage(prog: &str) -> String {
     format!(
         "Usage:\n\
          {prog} --board-name <name> --cluster-key <key> --iox-root <path> --topology <json> \
---margin-ns <ns> --headroom-threshold-ns <ns>\n\
+--margin-ns <ns> --vt-slot <1..=N>\n\
          {prog} --list-catalog\n\
          \n\
          Cluster mode is spawned by cluster-arbiter. After init the control loop is\n\
@@ -384,6 +383,16 @@ pub fn run_node<E: Entity>(
     let board = find_board(&topo, board_name)?;
     let boards = hashes.boards;
 
+    // Shared-memory virtual-time clock created by the arbiter.
+    let vt = VtClock::open(&opts.iox_root, topo.boards.len())?;
+    if !(1..=topo.boards.len()).contains(&opts.vt_slot) {
+        return Err(BoardError::Message(format!(
+            "--vt-slot {} out of range 1..={}",
+            opts.vt_slot,
+            topo.boards.len()
+        )));
+    }
+
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_name}-{}", opts.cluster_key))?;
     let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
@@ -423,11 +432,9 @@ pub fn run_node<E: Entity>(
 
     // Process init above is the Booting phase; the control loop starts Stopped.
     let mut state = NodeState::Stopped;
-    let headroom_threshold_ns = opts.headroom_threshold_ns;
-    let mut allowed_ns = 0_u64;
-    let mut last_time_report: Option<u64> = None;
     let has_actions = !sim.entity().action_catalog().is_empty();
     let mut pending_actions: VecDeque<ActionRequest> = VecDeque::new();
+    let mut last_allowed: Option<u64> = None;
 
     // TODO: exit when ControlToNode gains a Shutdown (arbiter currently OS-kills).
     loop {
@@ -443,18 +450,13 @@ pub fn run_node<E: Entity>(
                         })?;
                         log::trace!("State {next:?}");
                     }
-                    NodeEffect::SetAllowed {
-                        allowed_ns: next_allowed,
-                    } => {
-                        allowed_ns = next_allowed;
-                        let _ = sim.command(Command::SetAllowed {
-                            tick: Tick(next_allowed),
-                        });
-                    }
                     NodeEffect::Reset => {
-                        last_time_report = None;
                         pending_actions.clear();
                         sim.entity_mut().reset();
+                        // Rewrite this board's slot immediately so peers do not
+                        // keep a stale virtual time after Reset.
+                        vt.write_board_vt(opts.vt_slot, sim.entity().now().0);
+                        last_allowed = None;
                         log::info!("simulator Reset");
                         for plane in &mut data_planes {
                             plane.discard_rx()?;
@@ -469,12 +471,7 @@ pub fn run_node<E: Entity>(
                     }
                     NodeEffect::GdbStep { board_hash: target } => {
                         if target == board_hash {
-                            perform_local_step(
-                                &mut sim,
-                                &control,
-                                board_hash,
-                                &mut last_time_report,
-                            )?;
+                            perform_local_step(&mut sim, &control, board_hash, &vt, opts.vt_slot)?;
                         }
                     }
                     NodeEffect::Warn(msg) => {
@@ -487,6 +484,13 @@ pub fn run_node<E: Entity>(
             }
             state = next;
             if prev != NodeState::Running && state == NodeState::Running {
+                publish_vt_and_refresh_allowed(
+                    &mut sim,
+                    &vt,
+                    opts.vt_slot,
+                    opts.margin_ns,
+                    &mut last_allowed,
+                );
                 let _ = sim.command(Command::Start);
                 probes.set_running(true);
                 log::info!("simulator Start");
@@ -511,7 +515,18 @@ pub fn run_node<E: Entity>(
                 plane.pump_rx()?;
             }
 
+            // Refresh before the ceiling check so a node waiting on the allowed
+            // ceiling sees peers' advancing virtual time in shared memory.
+            publish_vt_and_refresh_allowed(
+                &mut sim,
+                &vt,
+                opts.vt_slot,
+                opts.margin_ns,
+                &mut last_allowed,
+            );
+
             if sim.waiting_on_allowed_ceiling() {
+                thread::sleep(BOARD_IDLE_POLL);
                 continue;
             }
 
@@ -522,17 +537,19 @@ pub fn run_node<E: Entity>(
                 continue;
             }
 
-            match sim.poll() {
+            let polled = sim.poll();
+            // Publish the post-poll virtual time before any HostStop so peers
+            // see it, and pick up the ceiling derived from the updated slots.
+            publish_vt_and_refresh_allowed(
+                &mut sim,
+                &vt,
+                opts.vt_slot,
+                opts.margin_ns,
+                &mut last_allowed,
+            );
+            match polled {
                 Some(Response::Stopped(reason)) => {
                     let virtual_time_ns = sim.entity().now().0;
-                    maybe_time_report(
-                        &control,
-                        board_hash,
-                        virtual_time_ns,
-                        allowed_ns,
-                        headroom_threshold_ns,
-                        &mut last_time_report,
-                    )?;
                     if let Some(host_reason) = cluster_host_stop_reason(&reason) {
                         control.publish(&ControlToArbiter::HostStop {
                             from: board_hash,
@@ -550,17 +567,7 @@ pub fn run_node<E: Entity>(
                 Some(other) => {
                     log::warn!("unexpected sim response {other:?}");
                 }
-                None => {
-                    let virtual_time_ns = sim.entity().now().0;
-                    maybe_time_report(
-                        &control,
-                        board_hash,
-                        virtual_time_ns,
-                        allowed_ns,
-                        headroom_threshold_ns,
-                        &mut last_time_report,
-                    )?;
-                }
+                None => {}
             }
 
             for plane in &mut data_planes {
@@ -638,11 +645,45 @@ fn find_board<'a>(
         .ok_or_else(|| BoardError::Message(format!("board name `{board_name}` not in topology")))
 }
 
+/// Write this board's virtual time to its shared-memory slot, then apply the
+/// recomputed allowed ceiling (`min(min(board slots) + margin_ns, ceiling)`).
+fn publish_vt_and_refresh_allowed<E: Entity>(
+    sim: &mut Simulator<E>,
+    vt: &VtClock,
+    vt_slot: usize,
+    margin_ns: u64,
+    last_allowed: &mut Option<u64>,
+) {
+    vt.write_board_vt(vt_slot, sim.entity().now().0);
+    refresh_allowed(sim, vt, margin_ns, last_allowed);
+}
+
+/// Apply the allowed ceiling currently derived from shared memory.
+///
+/// Skips `SetAllowed` when the value is unchanged to avoid hammering the
+/// simulator command path on every idle poll.
+fn refresh_allowed<E: Entity>(
+    sim: &mut Simulator<E>,
+    vt: &VtClock,
+    margin_ns: u64,
+    last_allowed: &mut Option<u64>,
+) {
+    let allowed = vt.allowed_ns(margin_ns);
+    if *last_allowed == Some(allowed) {
+        return;
+    }
+    let _ = sim.command(Command::SetAllowed {
+        tick: Tick(allowed),
+    });
+    *last_allowed = Some(allowed);
+}
+
 fn perform_local_step<E: Entity>(
     sim: &mut Simulator<E>,
     control: &NodeControl,
     board_hash: crate::ipc::HashedId<u64>,
-    last_time_report: &mut Option<u64>,
+    vt: &VtClock,
+    vt_slot: usize,
 ) -> Result<(), BoardError> {
     match sim.command(Command::Step) {
         Response::Started => {}
@@ -656,11 +697,7 @@ fn perform_local_step<E: Entity>(
         match sim.poll() {
             Some(Response::Stopped(reason)) => {
                 let virtual_time_ns = sim.entity().now().0;
-                control.publish(&ControlToArbiter::TimeReport {
-                    from: board_hash,
-                    virtual_time_ns,
-                })?;
-                *last_time_report = Some(virtual_time_ns);
+                vt.write_board_vt(vt_slot, virtual_time_ns);
                 if let Some(host_reason) = cluster_host_stop_reason(&reason) {
                     control.publish(&ControlToArbiter::HostStop {
                         from: board_hash,
@@ -681,25 +718,6 @@ fn perform_local_step<E: Entity>(
             None => thread::yield_now(),
         }
     }
-}
-
-fn maybe_time_report(
-    control: &NodeControl,
-    board_hash: crate::ipc::HashedId<u64>,
-    virtual_time_ns: u64,
-    allowed_ns: u64,
-    headroom_threshold_ns: u64,
-    last_time_report: &mut Option<u64>,
-) -> Result<(), BoardError> {
-    let headroom = allowed_ns.saturating_sub(virtual_time_ns);
-    if headroom < headroom_threshold_ns && *last_time_report != Some(virtual_time_ns) {
-        control.publish(&ControlToArbiter::TimeReport {
-            from: board_hash,
-            virtual_time_ns,
-        })?;
-        *last_time_report = Some(virtual_time_ns);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -751,8 +769,8 @@ mod tests {
                 "/tmp/t.json".into(),
                 "--margin-ns".into(),
                 "1000".into(),
-                "--headroom-threshold-ns".into(),
-                "100".into(),
+                "--vt-slot".into(),
+                "2".into(),
             ],
         )
         .unwrap();
@@ -760,7 +778,7 @@ mod tests {
         assert_eq!(opts.board_name, "a");
         assert_eq!(opts.cluster_key, "k");
         assert_eq!(opts.margin_ns, 1000);
-        assert_eq!(opts.headroom_threshold_ns, 100);
+        assert_eq!(opts.vt_slot, 2);
     }
 
     #[test]
@@ -806,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_board_args_requires_margin_and_headroom() {
+    fn parse_board_args_requires_margin_and_vt_slot() {
         let err = parse_board_args(
             "prog",
             [
@@ -839,8 +857,31 @@ mod tests {
                 "/tmp/t.json".into(),
                 "--margin-ns".into(),
                 "nope".into(),
-                "--headroom-threshold-ns".into(),
+                "--vt-slot".into(),
                 "1".into(),
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BoardCliError::Message(_)));
+    }
+
+    #[test]
+    fn parse_board_args_rejects_bad_vt_slot() {
+        let err = parse_board_args(
+            "prog",
+            [
+                "--board-name".into(),
+                "a".into(),
+                "--cluster-key".into(),
+                "k".into(),
+                "--iox-root".into(),
+                "/tmp/iox".into(),
+                "--topology".into(),
+                "/tmp/t.json".into(),
+                "--margin-ns".into(),
+                "1000".into(),
+                "--vt-slot".into(),
+                "nope".into(),
             ],
         )
         .unwrap_err();

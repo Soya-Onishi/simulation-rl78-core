@@ -332,7 +332,6 @@ class SimulationConfig:
     """Timing settings plus the root ``Topology`` for one simulation."""
 
     margin_ns: int
-    headroom_threshold_ns: int
     topology: Topology
     booting_timeout_ms: int | None = None
     _cached: dict[str, Any] | None = field(default=None, init=False, repr=False)
@@ -356,7 +355,6 @@ class SimulationConfig:
             "boards": [b.to_dict() for b in boards],
             "edges": edges,
             "margin_ns": self.margin_ns,
-            "headroom_threshold_ns": self.headroom_threshold_ns,
         }
         if self.booting_timeout_ms is not None:
             out["booting_timeout_ms"] = self.booting_timeout_ms

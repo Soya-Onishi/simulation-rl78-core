@@ -642,7 +642,6 @@ mod tests {
                 },
             ],
             margin_ns: 1_000,
-            headroom_threshold_ns: 500,
             booting_timeout_ms: 1_000,
         }
     }
@@ -808,7 +807,6 @@ mod tests {
                 uart_ring_len: None,
             }],
             margin_ns: 1_000,
-            headroom_threshold_ns: 500,
             booting_timeout_ms: 1_000,
         };
         let na = create_node(&config, "adp-a").unwrap();

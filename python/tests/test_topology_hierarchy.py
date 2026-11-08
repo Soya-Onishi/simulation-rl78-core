@@ -41,7 +41,6 @@ class _SysTopo(Topology):
 def nested_config(*, left_elf: str | None = None) -> SimulationConfig:
     return SimulationConfig(
         margin_ns=1000,
-        headroom_threshold_ns=200,
         topology=_SysTopo(name="sys", left_elf=left_elf),
     )
 
@@ -52,7 +51,6 @@ class HierarchyToDictTests(unittest.TestCase):
         ids = {b["id"] for b in out["boards"]}
         self.assertEqual(ids, {"sys/left/a", "sys/left/b", "sys/d"})
         self.assertEqual(out["margin_ns"], 1000)
-        self.assertEqual(out["headroom_threshold_ns"], 200)
 
         self.assertEqual(len(out["edges"]), 2)
         cross = next(
@@ -90,7 +88,6 @@ class HierarchyToDictTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             SimulationConfig(
                 margin_ns=1,
-                headroom_threshold_ns=1,
                 topology=Bad(name="sys"),
             ).to_dict()
 
@@ -107,7 +104,6 @@ class HierarchyToDictTests(unittest.TestCase):
 
         SimulationConfig(
             margin_ns=1,
-            headroom_threshold_ns=1,
             topology=Parent(name="sys"),
         ).to_dict()
         self.assertEqual(len(caught), 1)
@@ -121,7 +117,6 @@ class HierarchyToDictTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SimulationConfig(
                 margin_ns=1,
-                headroom_threshold_ns=1,
                 topology=Collision(name="sys"),
             ).to_dict()
 
@@ -152,7 +147,6 @@ class HierarchyToDictTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SimulationConfig(
                 margin_ns=1,
-                headroom_threshold_ns=1,
                 topology=Dup(name="demo"),
             ).to_dict()
 
@@ -166,7 +160,6 @@ class HierarchyToDictTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             SimulationConfig(
                 margin_ns=1,
-                headroom_threshold_ns=1,
                 topology=Parent(name="sys"),
             ).to_dict()
         self.assertIn("duplicate edge", str(ctx.exception))

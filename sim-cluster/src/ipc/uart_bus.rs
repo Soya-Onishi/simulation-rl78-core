@@ -205,7 +205,6 @@ mod tests {
                 uart_ring_len: Some(8),
             }],
             margin_ns: 1,
-            headroom_threshold_ns: 1,
             booting_timeout_ms: 1000,
         };
         // No arbiter-side create: TX/RX nodes open_or_create themselves.

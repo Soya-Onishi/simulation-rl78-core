@@ -88,8 +88,6 @@ pub struct LogicalTopology {
     pub edges: Vec<DirectedEdge>,
     /// Required virtual-time skew margin (nanoseconds). No implicit default.
     pub margin_ns: u64,
-    /// Required headroom threshold for time reports (nanoseconds). No default.
-    pub headroom_threshold_ns: u64,
     /// Booting-barrier timeout; omitted → [`DEFAULT_BOOTING_TIMEOUT_MS`].
     ///
     /// Accepts legacy JSON key `ready_timeout_ms` as an alias.
@@ -379,16 +377,16 @@ mod tests {
               "uart_ring_len": 128
             }
           ],
-          "margin_ns": 1000,
-          "headroom_threshold_ns": 200
+          "margin_ns": 1000
         }"#
     }
 
     #[test]
     fn accepts_legacy_ready_timeout_ms_alias() {
         let json = sample_json().replacen(
-            "\"headroom_threshold_ns\": 200",
-            "\"headroom_threshold_ns\": 200,\n          \"ready_timeout_ms\": 1234",
+            "\"margin_ns\": 1000",
+            "\"margin_ns\": 1000,
+          \"ready_timeout_ms\": 1234",
             1,
         );
         let topo = parse_logical_topology(&json).unwrap();
@@ -401,7 +399,6 @@ mod tests {
         assert_eq!(topo.boards.len(), 2);
         assert_eq!(topo.edges.len(), 2);
         assert_eq!(topo.margin_ns, 1000);
-        assert_eq!(topo.headroom_threshold_ns, 200);
         assert_eq!(topo.booting_timeout_ms, DEFAULT_BOOTING_TIMEOUT_MS);
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[0]), 256);
         assert_eq!(LogicalTopology::uart_ring_len(&topo.edges[1]), 128);
@@ -419,7 +416,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_margin() {
-        let bad = sample_json().replace("\"margin_ns\": 1000,", "");
+        let bad = sample_json().replace("\"margin_ns\": 1000", "");
         assert!(parse_logical_topology(&bad).is_err());
     }
 
@@ -438,8 +435,7 @@ mod tests {
             ],
             "payload":"uart"
           }],
-          "margin_ns": 1,
-          "headroom_threshold_ns": 1
+          "margin_ns": 1
         }"#;
         let err = parse_logical_topology(bad).unwrap_err();
         assert!(err.to_string().contains("unknown board"));
@@ -484,8 +480,7 @@ mod tests {
               "payload":"uart"
             }
           ],
-          "margin_ns": 1,
-          "headroom_threshold_ns": 1
+          "margin_ns": 1
         }"#;
         let err = parse_logical_topology(text).unwrap_err();
         assert!(err.to_string().contains("duplicate edge"));
@@ -508,8 +503,7 @@ mod tests {
             "route": [],
             "payload":"uart"
           }],
-          "margin_ns": 1,
-          "headroom_threshold_ns": 1
+          "margin_ns": 1
         }"#;
         let err = parse_logical_topology(text).unwrap_err();
         assert!(err.to_string().contains("route must not be empty"));
@@ -535,8 +529,7 @@ mod tests {
             ],
             "payload":"uart"
           }],
-          "margin_ns": 1,
-          "headroom_threshold_ns": 1
+          "margin_ns": 1
         }"#;
         let err = parse_logical_topology(bad_first).unwrap_err();
         assert!(err.to_string().contains("route[0] must equal from"));
@@ -559,8 +552,7 @@ mod tests {
             ],
             "payload":"uart"
           }],
-          "margin_ns": 1,
-          "headroom_threshold_ns": 1
+          "margin_ns": 1
         }"#;
         let err = parse_logical_topology(bad_last).unwrap_err();
         assert!(err.to_string().contains("route[last] must equal to"));
@@ -597,8 +589,7 @@ mod tests {
               "payload": "uart"
             }
           ],
-          "margin_ns": 1,
-          "headroom_threshold_ns": 1
+          "margin_ns": 1
         }"#;
         let topo = parse_logical_topology(text).unwrap();
         assert_eq!(topo.edges[0].route.len(), 3);
@@ -612,7 +603,7 @@ mod tests {
         for elf in ["a.elf", "https://example.test/fw.elf", "base64:AQI="] {
             let elf_json = serde_json::to_string(elf).unwrap();
             let text = format!(
-                r#"{{"boards":[{{"id":"a","kind":"rl78","elf":{elf_json},"endpoints":[]}}],"edges":[],"margin_ns":1,"headroom_threshold_ns":1}}"#
+                r#"{{"boards":[{{"id":"a","kind":"rl78","elf":{elf_json},"endpoints":[]}}],"edges":[],"margin_ns":1}}"#
             );
             let topo = parse_logical_topology(&text).unwrap();
             assert_eq!(topo.boards[0].elf.as_deref(), Some(elf));
@@ -621,11 +612,11 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_elf_and_combined_object() {
-        let scheme = r#"{"boards":[{"id":"a","kind":"rl78","elf":"ftp://example/a.elf","endpoints":[]}],"edges":[],"margin_ns":1,"headroom_threshold_ns":1}"#;
+        let scheme = r#"{"boards":[{"id":"a","kind":"rl78","elf":"ftp://example/a.elf","endpoints":[]}],"edges":[],"margin_ns":1}"#;
         let err = parse_logical_topology(scheme).unwrap_err();
         assert!(err.to_string().contains("unsupported elf URL scheme"));
 
-        let object = r#"{"boards":[{"id":"a","kind":"rl78","elf":{"path":"a.elf","base64":"AQI="},"endpoints":[]}],"edges":[],"margin_ns":1,"headroom_threshold_ns":1}"#;
+        let object = r#"{"boards":[{"id":"a","kind":"rl78","elf":{"path":"a.elf","base64":"AQI="},"endpoints":[]}],"edges":[],"margin_ns":1}"#;
         assert!(parse_logical_topology(object).is_err());
     }
 }

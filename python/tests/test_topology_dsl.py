@@ -112,7 +112,7 @@ class CreateCliTests(unittest.TestCase):
                     "def demo() -> SimulationConfig:\n"
                     "    return SimulationConfig(\n"
                     "        margin_ns=1,\n"
-                    "        headroom_threshold_ns=1,\n"
+                    "        \n"
                     '        topology=T(name="demo"),\n'
                     "    )\n",
                     encoding="utf-8",
@@ -163,10 +163,10 @@ class SimulationDiscoveryTests(unittest.TestCase):
             '        self._board("a")\n'
             "@simulation\n"
             "def one() -> SimulationConfig:\n"
-            "    return SimulationConfig(1, 1, T(name='demo'))\n"
+            "    return SimulationConfig(1, T(name='demo'))\n"
             "@simulation\n"
             "def two() -> SimulationConfig:\n"
-            "    return SimulationConfig(1, 1, T(name='other'))\n"
+            "    return SimulationConfig(1, T(name='other'))\n"
         )
         with TemporaryDirectory() as tmp:
             script = self._write(Path(tmp), body)
@@ -198,7 +198,7 @@ class SimulationDiscoveryTests(unittest.TestCase):
                 '        self._board("a")\n'
                 "@simulation\n"
                 "def imported() -> SimulationConfig:\n"
-                "    return SimulationConfig(1, 1, T(name='imp'))\n",
+                "    return SimulationConfig(1, T(name='imp'))\n",
                 encoding="utf-8",
             )
             script = root / "topo.py"
@@ -212,7 +212,7 @@ class SimulationDiscoveryTests(unittest.TestCase):
                 '        self._board("a")\n'
                 "@simulation\n"
                 "def local() -> SimulationConfig:\n"
-                "    return SimulationConfig(1, 1, T(name='demo'))\n",
+                "    return SimulationConfig(1, T(name='demo'))\n",
                 encoding="utf-8",
             )
             out = _load_config_dict(str(script))

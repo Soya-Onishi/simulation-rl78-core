@@ -17,6 +17,5 @@ class BoardPlantAnalog(Topology):
 def board_plant_analog() -> SimulationConfig:
     return SimulationConfig(
         margin_ns=200_000,
-        headroom_threshold_ns=100_000,
         topology=BoardPlantAnalog(name="demo"),
     )

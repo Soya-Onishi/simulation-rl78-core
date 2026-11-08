@@ -63,7 +63,6 @@ def _empty_topology() -> dict:
         "boards": [],
         "edges": [],
         "margin_ns": 1,
-        "headroom_threshold_ns": 1,
     }
 
 
@@ -81,7 +80,6 @@ class SimulationInitTests(unittest.TestCase):
             def config() -> SimulationConfig:
                 return SimulationConfig(
                     margin_ns=1,
-                    headroom_threshold_ns=1,
                     topology=T(name="demo"),
                 )
 

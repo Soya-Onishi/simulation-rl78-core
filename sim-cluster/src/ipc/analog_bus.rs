@@ -170,7 +170,6 @@ mod tests {
                 uart_ring_len: None,
             }],
             margin_ns: 1,
-            headroom_threshold_ns: 1,
             booting_timeout_ms: 1000,
         };
         let na = create_node(&config, "analog-a").unwrap();
