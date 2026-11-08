@@ -654,8 +654,9 @@ fn publish_vt_and_maybe_refresh_allowed<E: Entity>(
 
 /// Apply the allowed ceiling from shared memory when needed.
 ///
-/// Always sets an initial ceiling. Afterwards, recomputes only when the next
-/// quantum could reach the last ceiling, and skips `SetAllowed` when unchanged.
+/// Always sets an initial ceiling. Afterwards, skips a full recompute while the
+/// next quantum cannot reach the last ceiling **and** the hard ceiling has not
+/// been lowered below it (host `until` / GDB catch-up write slot 0).
 fn maybe_refresh_allowed<E: Entity>(
     sim: &mut Simulator<E>,
     vt: &VtClock,
@@ -663,7 +664,11 @@ fn maybe_refresh_allowed<E: Entity>(
     last_allowed: &mut Option<u64>,
 ) {
     if let Some(last) = *last_allowed {
-        if !sim.next_quantum_reaches_allowed(Tick(last)) {
+        if can_skip_allowed_refresh(
+            last,
+            sim.next_quantum_reaches_allowed(Tick(last)),
+            vt.ceiling(),
+        ) {
             return;
         }
     }
@@ -676,6 +681,12 @@ fn maybe_refresh_allowed<E: Entity>(
         tick: Tick(allowed),
     });
     *last_allowed = Some(allowed);
+}
+
+/// Skip full `allowed_ns` / `SetAllowed` while far from `last` unless slot 0
+/// (`VtClock::ceiling`) was lowered beneath `last`.
+fn can_skip_allowed_refresh(last: u64, next_quantum_reaches: bool, hard_ceiling: u64) -> bool {
+    !next_quantum_reaches && hard_ceiling >= last
 }
 
 fn perform_local_step<E: Entity>(
@@ -727,6 +738,45 @@ mod tests {
         Addr, Breakpoint, Core, Cpu, EventCtl, HasMemoryMap, Machine, MapError, MemoryBus,
         MemoryMapBuilder, Quantum, RegId, Resettable, Rom, SimError, Tick,
     };
+
+    #[test]
+    fn can_skip_allowed_refresh_keeps_far_headroom() {
+        assert!(can_skip_allowed_refresh(10_000, false, u64::MAX));
+        assert!(!can_skip_allowed_refresh(10_000, true, u64::MAX));
+    }
+
+    #[test]
+    fn can_skip_allowed_refresh_notices_lowered_hard_ceiling() {
+        // until / GDB catch-up: arbiter writes a lower slot-0 ceiling.
+        assert!(!can_skip_allowed_refresh(10_000, false, 5_000));
+        assert!(can_skip_allowed_refresh(5_000, false, 5_000));
+    }
+
+    #[test]
+    fn maybe_refresh_allowed_applies_lowered_hard_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let vt = VtClock::create(dir.path(), 1).unwrap();
+        vt.write_board_vt(1, 0);
+        vt.set_ceiling(u64::MAX);
+
+        let mut sim = Simulator::new(
+            fake_machine(vec![FakeOp::Nop; 100]),
+            SimConfig {
+                max_quantum: Tick(10),
+            },
+        );
+        let mut last_allowed = None;
+        maybe_refresh_allowed(&mut sim, &vt, 1_000, &mut last_allowed);
+        assert_eq!(last_allowed, Some(1_000));
+        assert_eq!(sim.allowed(), Some(Tick(1_000)));
+
+        // Far from the last ceiling: would skip without the hard-ceiling check.
+        assert!(!sim.next_quantum_reaches_allowed(Tick(1_000)));
+        vt.set_ceiling(200);
+        maybe_refresh_allowed(&mut sim, &vt, 1_000, &mut last_allowed);
+        assert_eq!(last_allowed, Some(200));
+        assert_eq!(sim.allowed(), Some(Tick(200)));
+    }
 
     #[test]
     fn halt_is_not_cluster_host_stop() {
