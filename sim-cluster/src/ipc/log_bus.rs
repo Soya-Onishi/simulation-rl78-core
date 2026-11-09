@@ -1,14 +1,15 @@
-//! Log pub/sub: nodes → arbiter (`log/n2a`) and arbiter → server (`log/a2s`).
+//! Log pub/sub: nodes → arbiter (`log/n2a`); arbiter → server via mpsc.
 //!
-//! The server creates `log/a2s` before spawning the arbiter. The arbiter creates
-//! `log/n2a` and opens `log/a2s` as the publisher. The arbiter control thread only
-//! enqueues its own records; a dedicated thread forwards those and node samples.
-//! QoS on create and `open_or_create` must stay identical.
+//! The arbiter creates `log/n2a`. A dedicated forwarder thread receives node
+//! samples and local arbiter records, then pushes them on the in-process
+//! arbiter→server channel. QoS on create and `open_or_create` for `log/n2a`
+//! must stay identical.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -21,11 +22,10 @@ use crate::log_msg::{ClusterLog, LogConsole, LogLevel, LogOrigin};
 
 use super::names;
 use super::runtime::{IpcError, create_node, isolated_config};
+use super::server_arbiter::{self, ArbiterToServer};
 
 type N2aLogPub = Publisher<ipc::Service, ClusterLog, ()>;
 type N2aLogSub = Subscriber<ipc::Service, ClusterLog, ()>;
-type A2sLogPub = Publisher<ipc::Service, ClusterLog, ()>;
-type A2sLogSub = Subscriber<ipc::Service, ClusterLog, ()>;
 
 /// Node-side guard. Installing it makes [`log`] macros in this process enqueue
 /// node-originated records; a thread publishes them on `log/n2a`.
@@ -147,19 +147,22 @@ pub struct ArbiterLogBus {
 }
 
 impl ArbiterLogBus {
-    /// Start the forwarder. It owns its own iceoryx node because pub/sub ports are
-    /// single-threaded. Returns after that node has opened the log services.
+    /// Start the forwarder. It owns its own iceoryx node for `log/n2a` because
+    /// pub/sub ports are single-threaded. Server-bound records go through `to_server`.
     pub fn create(
         iox_root: &Path,
         cluster_key: &str,
         board_count: usize,
         boards: HashMap<crate::ipc::HashedId<u64>, String>,
+        to_server: Sender<ArbiterToServer>,
     ) -> Result<Self, IpcError> {
         let queue = Arc::new(LogQueue::new(
             LogOrigin::Arbiter,
             crate::ipc::HashedId::ZERO,
         ));
-        install_process_log(Arc::clone(&queue));
+        // Thread-local so concurrent arbiter threads in one backend process do not
+        // overwrite each other's log destination (unlike the old per-process model).
+        install_thread_log(Arc::clone(&queue));
         let (ready_tx, ready_rx) = mpsc::channel();
         let queue_for_worker = Arc::clone(&queue);
         let iox_root = iox_root.to_path_buf();
@@ -173,6 +176,7 @@ impl ArbiterLogBus {
                     board_count,
                     boards,
                     queue_for_worker,
+                    to_server,
                     ready_tx,
                 );
             }) {
@@ -187,10 +191,12 @@ impl ArbiterLogBus {
                 worker: Some(worker),
             }),
             Ok(Err(err)) => {
+                clear_thread_log(&queue);
                 let _ = worker.join();
                 Err(IpcError::Message(err))
             }
             Err(_) => {
+                clear_thread_log(&queue);
                 let _ = worker.join();
                 Err(IpcError::Message(
                     "log forwarder exited before the log ports were ready".into(),
@@ -201,6 +207,7 @@ impl ArbiterLogBus {
 
     /// Flush queued records and join the forwarder.
     pub fn shutdown(&mut self) {
+        clear_thread_log(&self.queue);
         self.queue.shutdown.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -214,7 +221,13 @@ impl Drop for ArbiterLogBus {
     }
 }
 
+/// Process-wide queue used by board/plant node processes ([`NodeLog`]).
 static PROCESS_LOG: RwLock<Option<Arc<LogQueue>>> = RwLock::new(None);
+
+thread_local! {
+    /// Per-arbiter-thread queue inside `cluster-backend` (in-process arbiter).
+    static THREAD_LOG: RefCell<Option<Arc<LogQueue>>> = const { RefCell::new(None) };
+}
 
 struct ProcessLog;
 
@@ -224,11 +237,13 @@ impl log::Log for ProcessLog {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        let Some(queue) = PROCESS_LOG
-            .read()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone()
-        else {
+        let queue = THREAD_LOG.with(|slot| slot.borrow().clone()).or_else(|| {
+            PROCESS_LOG
+                .read()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone()
+        });
+        let Some(queue) = queue else {
             return;
         };
         queue.push_text(level_from_log(record.level()), &record.args().to_string());
@@ -247,14 +262,36 @@ fn level_from_log(level: log::Level) -> LogLevel {
     }
 }
 
-fn install_process_log(queue: Arc<LogQueue>) {
+fn ensure_process_logger() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let _ = log::set_logger(&ProcessLog);
         log::set_max_level(log::LevelFilter::Trace);
     });
+}
 
+fn install_process_log(queue: Arc<LogQueue>) {
+    ensure_process_logger();
     *PROCESS_LOG.write().unwrap_or_else(|err| err.into_inner()) = Some(queue);
+}
+
+fn install_thread_log(queue: Arc<LogQueue>) {
+    ensure_process_logger();
+    THREAD_LOG.with(|slot| {
+        *slot.borrow_mut() = Some(queue);
+    });
+}
+
+fn clear_thread_log(queue: &Arc<LogQueue>) {
+    THREAD_LOG.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        if guard
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, queue))
+        {
+            *guard = None;
+        }
+    });
 }
 
 fn publish_node_logs(
@@ -307,16 +344,16 @@ fn forward_logs(
     board_count: usize,
     boards: HashMap<crate::ipc::HashedId<u64>, String>,
     queue: Arc<LogQueue>,
+    to_server: Sender<ArbiterToServer>,
     ready: mpsc::Sender<Result<(), String>>,
 ) {
     let opened: Result<_, IpcError> = (|| {
         let config = isolated_config(&iox_root)?;
         let node = create_node(&config, &format!("log-{cluster_key}"))?;
         let n2a_sub = create_n2a_subscriber(&node, &cluster_key, board_count)?;
-        let upstream = open_or_create_a2s_publisher(&node, &cluster_key)?;
-        Ok((node, n2a_sub, upstream))
+        Ok((node, n2a_sub))
     })();
-    let (node, n2a_sub, upstream) = match opened {
+    let (node, n2a_sub) = match opened {
         Ok(ports) => {
             let _ = ready.send(Ok(()));
             ports
@@ -328,11 +365,11 @@ fn forward_logs(
     };
     let _node = node;
     loop {
-        forward_node_logs(&n2a_sub, &upstream, &boards);
-        publish_all(&upstream, queue.take_all());
+        forward_node_logs(&n2a_sub, &to_server, &boards);
+        publish_all(&to_server, queue.take_all());
         if queue.shutdown.load(Ordering::Acquire) {
-            forward_node_logs(&n2a_sub, &upstream, &boards);
-            publish_all(&upstream, queue.take_all());
+            forward_node_logs(&n2a_sub, &to_server, &boards);
+            publish_all(&to_server, queue.take_all());
             break;
         }
         thread::sleep(LOG_WORKER_IDLE);
@@ -341,7 +378,7 @@ fn forward_logs(
 
 fn forward_node_logs(
     n2a_sub: &N2aLogSub,
-    upstream: &A2sLogPub,
+    to_server: &Sender<ArbiterToServer>,
     boards: &HashMap<crate::ipc::HashedId<u64>, String>,
 ) {
     loop {
@@ -352,7 +389,7 @@ fn forward_node_logs(
                 {
                     continue;
                 }
-                let _ = upstream.send_copy(record);
+                let _ = server_arbiter::publish_log(to_server, record);
             }
             Ok(None) => break,
             Err(_) => break,
@@ -360,62 +397,9 @@ fn forward_node_logs(
     }
 }
 
-fn publish_all(upstream: &A2sLogPub, records: VecDeque<ClusterLog>) {
+fn publish_all(to_server: &Sender<ArbiterToServer>, records: VecDeque<ClusterLog>) {
     for record in records {
-        let _ = upstream.send_copy(record);
-    }
-}
-
-/// Server subscriber for arbiter-forwarded [`ClusterLog`] samples.
-pub struct ServerLogInbox {
-    sub: A2sLogSub,
-}
-
-impl ServerLogInbox {
-    pub fn create(node: &Node<ipc::Service>, cluster_key: &str) -> Result<Self, IpcError> {
-        let name = names::log_a2s(cluster_key);
-        let svc_name: ServiceName = name
-            .as_str()
-            .try_into()
-            .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
-        let svc = node
-            .service_builder(&svc_name)
-            .publish_subscribe::<ClusterLog>()
-            .max_publishers(1)
-            .max_subscribers(1)
-            .max_nodes(4)
-            .subscriber_max_buffer_size(64)
-            .history_size(16)
-            .enable_safe_overflow(true)
-            .create()
-            .map_err(|e| IpcError::Message(format!("create log a2s failed: {e:?}")))?;
-        let sub = svc
-            .subscriber_builder()
-            .create()
-            .map_err(|e| IpcError::Message(format!("log a2s subscriber: {e:?}")))?;
-        Ok(Self { sub })
-    }
-
-    pub fn try_recv(&self) -> Result<Option<ClusterLog>, IpcError> {
-        match self
-            .sub
-            .receive()
-            .map_err(|e| IpcError::Message(format!("log a2s receive: {e:?}")))?
-        {
-            Some(sample) => Ok(Some(*sample)),
-            None => Ok(None),
-        }
-    }
-
-    pub fn drain(
-        &self,
-        console: &LogConsole,
-        boards: &HashMap<crate::ipc::HashedId<u64>, String>,
-    ) -> Result<(), IpcError> {
-        while let Some(record) = self.try_recv()? {
-            console.accept(&record, |h| boards.get(&h).map(String::as_str));
-        }
-        Ok(())
+        let _ = server_arbiter::publish_log(to_server, record);
     }
 }
 
@@ -475,40 +459,49 @@ fn open_or_create_n2a_publisher(
         .map_err(|e| IpcError::Message(format!("log n2a publisher {name}: {e:?}")))
 }
 
-fn open_or_create_a2s_publisher(
-    node: &Node<ipc::Service>,
-    cluster_key: &str,
-) -> Result<A2sLogPub, IpcError> {
-    let name = names::log_a2s(cluster_key);
-    let svc_name: ServiceName = name
-        .as_str()
-        .try_into()
-        .map_err(|e| IpcError::Message(format!("bad service name {name}: {e:?}")))?;
-    let svc = node
-        .service_builder(&svc_name)
-        .publish_subscribe::<ClusterLog>()
-        .max_publishers(1)
-        .max_subscribers(1)
-        .max_nodes(4)
-        .subscriber_max_buffer_size(64)
-        .history_size(16)
-        .enable_safe_overflow(true)
-        .open_or_create()
-        .map_err(|e| {
-            IpcError::Message(format!("open_or_create log a2s publisher {name}: {e:?}"))
-        })?;
-    svc.publisher_builder()
-        .create()
-        .map_err(|e| IpcError::Message(format!("log a2s publisher {name}: {e:?}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::hash::{board_hash_table, board_id_hash};
-    use crate::ipc::runtime::{create_node, isolated_config};
+    use crate::ipc::server_arbiter;
     use serial_test::serial;
     use std::time::Duration;
+
+    #[test]
+    #[serial]
+    fn concurrent_arbiter_thread_logs_stay_isolated() {
+        ensure_process_logger();
+        let q1 = Arc::new(LogQueue::new(LogOrigin::Arbiter, crate::ipc::HashedId::ZERO));
+        let q2 = Arc::new(LogQueue::new(LogOrigin::Arbiter, crate::ipc::HashedId::ZERO));
+        let a = Arc::clone(&q1);
+        let b = Arc::clone(&q2);
+        let t1 = thread::spawn(move || {
+            install_thread_log(a);
+            log::info!("from-thread-1");
+            clear_thread_log(
+                THREAD_LOG
+                    .with(|slot| slot.borrow().clone())
+                    .as_ref()
+                    .expect("thread-1 queue"),
+            );
+        });
+        let t2 = thread::spawn(move || {
+            install_thread_log(b);
+            log::info!("from-thread-2");
+            clear_thread_log(
+                THREAD_LOG
+                    .with(|slot| slot.borrow().clone())
+                    .as_ref()
+                    .expect("thread-2 queue"),
+            );
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+        let r1: Vec<_> = q1.take_all().into_iter().map(|r| r.text().to_string()).collect();
+        let r2: Vec<_> = q2.take_all().into_iter().map(|r| r.text().to_string()).collect();
+        assert_eq!(r1, vec!["from-thread-1".to_string()]);
+        assert_eq!(r2, vec!["from-thread-2".to_string()]);
+    }
 
     #[test]
     #[serial]
@@ -517,22 +510,27 @@ mod tests {
         let key = format!("log-rt-{}", std::process::id());
         let root = dir.path().join("iox");
         let boards = board_hash_table(["mcu0"]).unwrap();
-        let config = isolated_config(&root).unwrap();
+        let (server_link, arb_link) = server_arbiter::open_pair();
 
-        let server_node = create_node(&config, "log-server").unwrap();
-        let inbox = ServerLogInbox::create(&server_node, &key).unwrap();
-
-        let _bus = ArbiterLogBus::create(&root, &key, 1, boards).unwrap();
+        let _bus = ArbiterLogBus::create(&root, &key, 1, boards, arb_link.log_tx).unwrap();
         log::info!("Start broadcast");
 
         let hash = board_id_hash("mcu0");
-        let _node_log = NodeLog::start(&root, &key, hash, 1).unwrap();
-        log::info!("Ready");
+        // Emit the node log on another thread so THREAD_LOG (arbiter) does not
+        // intercept it — mirrors board process vs arbiter thread in production.
+        let (release_tx, release_rx) = mpsc::channel();
+        let root_n = root.clone();
+        let key_n = key.clone();
+        let node_thread = thread::spawn(move || {
+            let _node_log = NodeLog::start(&root_n, &key_n, hash, 1).unwrap();
+            log::info!("Ready");
+            let _ = release_rx.recv();
+        });
 
         let mut got_node = false;
         let mut got_arbiter = false;
         for _ in 0..200 {
-            if let Some(record) = inbox.try_recv().unwrap() {
+            if let Some(record) = server_link.inbox.try_recv().unwrap() {
                 match record.origin() {
                     LogOrigin::Node => {
                         assert_eq!(record.board_hash(), hash);
@@ -551,6 +549,8 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        let _ = release_tx.send(());
+        let _ = node_thread.join();
         assert!(got_node, "server did not receive the node log");
         assert!(got_arbiter, "server did not receive the arbiter log");
     }

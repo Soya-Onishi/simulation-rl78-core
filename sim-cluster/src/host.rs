@@ -1,4 +1,4 @@
-//! Logical host commands and status shared by `cluster-backend` and `cluster-arbiter`.
+//! Logical host commands and status shared by `cluster-backend` and the arbiter thread.
 //!
 //! The samples themselves travel on iceoryx (`ctrl/s2a` and `status/a2s`).
 
@@ -19,7 +19,7 @@ pub enum HostCommand {
     /// Stop, [`sim_kernel::Resettable`] reset, raise the ceiling to
     /// `now + margin`, then start.
     Reset,
-    /// Leave the session and exit the arbiter process.
+    /// Leave the session and end the arbiter thread.
     Shutdown,
     /// One gdb step on `board_hash`, then catch peers up to that virtual time.
     Step { board_hash: HashedId<u64> },

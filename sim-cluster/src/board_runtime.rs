@@ -192,7 +192,7 @@ pub fn board_usage(prog: &str) -> String {
 --margin-ns <ns> --vt-slot <1..=N>\n\
          {prog} --list-catalog\n\
          \n\
-         Cluster mode is spawned by cluster-arbiter. After init the control loop is\n\
+         Cluster mode is spawned by the in-process arbiter thread. After init the control loop is\n\
          Stopped and runs only after Start.\n\
          \n\
          --list-catalog prints this node's probe and action catalog as JSON on\n\

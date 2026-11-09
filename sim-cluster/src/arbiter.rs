@@ -1,8 +1,9 @@
-//! Arbiter: create iceoryx services, spawn nodes, Booting barrier, then wait.
+//! Arbiter: create iceoryx services for nodes, spawn boards, Booting barrier,
+//! then follow host commands on the in-process mpsc link from the server.
 //!
 //! The guest stays stopped until a host `start` command. `stop` halts the
-//! guest without exiting this process, so a later `start` or `reset` can
-//! run. `shutdown` on the server→arbiter iceoryx channel ends the process.
+//! guest without exiting this thread, so a later `start` or `reset` can
+//! run. `shutdown` on the server→arbiter channel ends the session.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -11,6 +12,23 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Ensures board/plant children are killed on early return or panic.
+struct ChildGuard {
+    children: Vec<Child>,
+}
+
+impl ChildGuard {
+    fn new(children: Vec<Child>) -> Self {
+        Self { children }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        stop_children(&mut self.children);
+    }
+}
+
 use crate::action::ActionUpstream;
 use crate::arbiter_catalog::{
     apply_probe_catalogs, collect_board_catalogs, publish_action_catalogs,
@@ -18,9 +36,9 @@ use crate::arbiter_catalog::{
 use crate::control::{ControlToArbiter, ControlToNode, HostStopReason, NodeStateWire};
 use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
-    ArbiterControl, ArbiterHostPort, ArbiterLogBus, ArbiterNodeActions, ArbiterProbeCtrl,
-    ArbiterProbeForward, ArbiterServerActions, IpcError, board_hash_table, create_node,
-    isolated_config, new_cluster_key, root_path_for_cluster,
+    ArbiterControl, ArbiterHostPort, ArbiterLink, ArbiterLogBus, ArbiterNodeActions,
+    ArbiterProbeCtrl, ArbiterProbeForward, ArbiterServerActions, IpcError, board_hash_table,
+    create_node, isolated_config, new_cluster_key, open_pair, root_path_for_cluster,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::probe::ProbeWireKind;
@@ -77,24 +95,25 @@ impl ArbiterOptions {
     }
 }
 
-/// Load topology, spawn nodes, wait until nodes leave Booting, then follow iceoryx host commands.
-pub fn run_arbiter(opts: &ArbiterOptions) -> Result<(), ArbiterError> {
+/// Load topology, spawn nodes, wait until nodes leave Booting, then follow host commands.
+pub fn run_arbiter(opts: &ArbiterOptions, link: ArbiterLink) -> Result<(), ArbiterError> {
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
-    run_arbiter_with_topology(opts, &topo)
+    run_arbiter_with_topology(opts, &topo, link)
 }
 
 /// Spawn nodes and stay up until the server publishes `shutdown`.
 ///
-/// Host commands arrive on `ctrl/s2a`. Status is published on `status/a2s`.
+/// Host commands arrive on the in-process server→arbiter mpsc channel.
 pub fn run_arbiter_with_topology(
     opts: &ArbiterOptions,
     topo: &LogicalTopology,
+    link: ArbiterLink,
 ) -> Result<(), ArbiterError> {
     crate::topology::build_topology_hashes(topo)
         .map_err(|err| ArbiterError::Message(err.to_string()))?;
     ensure_node_bins(opts, topo)?;
-    run_host_session(opts, topo)
+    run_host_session(opts, topo, link)
 }
 
 /// Test helper: Booting barrier, immediate Start, then a short time-sync window.
@@ -302,20 +321,35 @@ fn forward_invokes(
     Ok(())
 }
 
-fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(), ArbiterError> {
+fn run_host_session(
+    opts: &ArbiterOptions,
+    topo: &LogicalTopology,
+    link: ArbiterLink,
+) -> Result<(), ArbiterError> {
     let board_ids: Vec<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
     let boards = board_hash_table(board_ids).map_err(ArbiterError::Message)?;
 
     let config = isolated_config(&opts.iox_root)?;
     let node = create_node(&config, &format!("arbiter-{}", opts.cluster_key))?;
-    let host = ArbiterHostPort::open(&node, &opts.cluster_key)?;
+    let host = link.host;
     let control =
         ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards.clone())?;
     let node_actions = ArbiterNodeActions::create(&node, &opts.cluster_key, topo.boards.len())?;
-    let server_actions = ArbiterServerActions::open(&node, &opts.cluster_key, topo.boards.len())?;
-    let probe_ctrl = ArbiterProbeCtrl::open(&node, &opts.cluster_key, topo.boards.len())?;
-    let mut logs =
-        ArbiterLogBus::create(&opts.iox_root, &opts.cluster_key, topo.boards.len(), boards)?;
+    let server_actions = link.server_actions;
+    let probe_ctrl = ArbiterProbeCtrl::open(
+        &node,
+        &opts.cluster_key,
+        topo.boards.len(),
+        link.probe_ctrl_server,
+    )?;
+    let probe_tx = link.probe_forward;
+    let mut logs = ArbiterLogBus::create(
+        &opts.iox_root,
+        &opts.cluster_key,
+        topo.boards.len(),
+        boards,
+        link.log_tx,
+    )?;
     log::info!(
         "loaded topology ({} boards, {} edges, margin_ns={}, cluster_key={})",
         topo.boards.len(),
@@ -351,8 +385,8 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     };
     // Unlink vt_clock on any exit from this session (including early `?`).
     let _vt_lease = VtClockLease::new(&opts.iox_root);
-    let mut children = match spawn_nodes(opts, topo) {
-        Ok(children) => children,
+    let children = match spawn_nodes(opts, topo) {
+        Ok(children) => ChildGuard::new(children),
         Err(err) => {
             logs.shutdown();
             return Err(err);
@@ -361,29 +395,18 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     let mut peers = match await_booting(topo, &control) {
         Ok(peers) => peers,
         Err(err) => {
-            stop_children(&mut children);
             logs.shutdown();
             return Err(err);
         }
     };
     if let Err(err) = publish_action_catalogs(&server_actions, &catalogs) {
-        stop_children(&mut children);
         logs.shutdown();
         return Err(err);
     }
     if let Err(err) = probe_hub.subscribe_catalog(&node) {
-        stop_children(&mut children);
         logs.shutdown();
         return Err(ArbiterError::Message(err.to_string()));
     }
-    let probe_tx = match ArbiterProbeForward::open(&node, &opts.cluster_key) {
-        Ok(tx) => tx,
-        Err(err) => {
-            stop_children(&mut children);
-            logs.shutdown();
-            return Err(ArbiterError::Ipc(err));
-        }
-    };
     for entry in probe_hub.catalog().values() {
         if let Err(err) = probe_tx.publish_catalog(
             entry.board_hash,
@@ -528,7 +551,7 @@ fn run_host_session(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     };
 
     logs.shutdown();
-    stop_children(&mut children);
+    drop(children);
     // `_vt_lease` Drop unlinks vt_clock.
     result
 }
@@ -805,7 +828,8 @@ fn ensure_node_bins(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
 }
 
 fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Child>, ArbiterError> {
-    let mut children = Vec::new();
+    // Guard so a mid-loop spawn failure still kills already-started boards.
+    let mut children = ChildGuard::new(Vec::new());
     for (index, board) in topo.boards.iter().enumerate() {
         let bin = binary_for_kind(opts, &board.kind)?;
         let child = Command::new(bin)
@@ -825,9 +849,9 @@ fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Chil
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()?;
-        children.push(child);
+        children.children.push(child);
     }
-    Ok(children)
+    Ok(std::mem::take(&mut children.children))
 }
 
 fn stop_children(children: &mut Vec<Child>) {
@@ -918,10 +942,11 @@ fn warn_peer(board_id: &str, effect: Option<PeerEffect>) -> Result<(), ArbiterEr
     Ok(())
 }
 
-/// Convenience for the binary: topology path only.
+/// Convenience helper: topology path only (creates a throwaway server link half).
 pub fn run_arbiter_from_path(topology_path: &Path) -> Result<(), ArbiterError> {
     let opts = ArbiterOptions::from_topology_path(topology_path.to_path_buf())?;
-    run_arbiter(&opts)
+    let (_server, link) = open_pair();
+    run_arbiter(&opts, link)
 }
 
 #[cfg(test)]
@@ -1160,9 +1185,15 @@ mod tests {
         let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, "arb-test-booting").unwrap();
-        let _logs =
-            ArbiterLogBus::create(&iox_root, &cluster_key, topo.boards.len(), boards.clone())
-                .unwrap();
+        let (_server, arb_link) = open_pair();
+        let _logs = ArbiterLogBus::create(
+            &iox_root,
+            &cluster_key,
+            topo.boards.len(),
+            boards.clone(),
+            arb_link.log_tx,
+        )
+        .unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
 
@@ -1192,9 +1223,15 @@ mod tests {
         let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, "arb-test-timeout").unwrap();
-        let _logs =
-            ArbiterLogBus::create(&iox_root, &cluster_key, topo.boards.len(), boards.clone())
-                .unwrap();
+        let (_server, arb_link) = open_pair();
+        let _logs = ArbiterLogBus::create(
+            &iox_root,
+            &cluster_key,
+            topo.boards.len(),
+            boards.clone(),
+            arb_link.log_tx,
+        )
+        .unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
 
@@ -1238,9 +1275,15 @@ mod tests {
         let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, "arb-test-hoststop").unwrap();
-        let _logs =
-            ArbiterLogBus::create(&iox_root, &cluster_key, topo.boards.len(), boards.clone())
-                .unwrap();
+        let (_server, arb_link) = open_pair();
+        let _logs = ArbiterLogBus::create(
+            &iox_root,
+            &cluster_key,
+            topo.boards.len(),
+            boards.clone(),
+            arb_link.log_tx,
+        )
+        .unwrap();
         let control =
             ArbiterControl::create(&node, &cluster_key, topo.boards.len(), boards).unwrap();
 
