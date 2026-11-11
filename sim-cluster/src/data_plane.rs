@@ -804,7 +804,7 @@ pub fn bind_data_planes(
 mod tests {
     use std::time::Duration;
 
-    use sim_kernel::{AnalogVoltage, BoardPorts, InPort, OutPort, UartFrame, Wire};
+    use sim_kernel::{AnalogVoltage, BoardPorts, InPort, OutPort, Pulse, UartFrame, Wire};
 
     use super::*;
     use crate::ipc::{create_node, isolated_config, new_cluster_key};
@@ -1084,6 +1084,113 @@ mod tests {
         let mut got = None;
         for _ in 0..100 {
             plane_p.pump_rx().unwrap();
+            let pending = tap.pending();
+            if !pending.is_empty() {
+                got = pending.into_iter().next();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got, Some(sample));
+    }
+
+    fn pulse_board(id: &str, out_name: &str, in_name: &str) -> BoardSpec {
+        BoardSpec {
+            id: id.into(),
+            kind: "plant".into(),
+            elf: None,
+            endpoints: vec![
+                EndpointSpec {
+                    name: out_name.into(),
+                    direction: EndpointDirection::Out,
+                    payload: PayloadKind::Pulse,
+                },
+                EndpointSpec {
+                    name: in_name.into(),
+                    direction: EndpointDirection::In,
+                    payload: PayloadKind::Pulse,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn pulse_dataplane_tx_ipc_rx_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = new_cluster_key();
+        let config = isolated_config(dir.path()).unwrap();
+        let topo = LogicalTopology {
+            boards: vec![
+                pulse_board("plant", "flow_pulse", "unused_in"),
+                pulse_board("board", "unused_out", "flow_pulse"),
+            ],
+            edges: vec![DirectedEdge {
+                from: PortRef {
+                    path: "plant".into(),
+                    port: "flow_pulse".into(),
+                },
+                to: PortRef {
+                    path: "board".into(),
+                    port: "flow_pulse".into(),
+                },
+                route: vec![
+                    PortRef {
+                        path: "plant".into(),
+                        port: "flow_pulse".into(),
+                    },
+                    PortRef {
+                        path: "board".into(),
+                        port: "flow_pulse".into(),
+                    },
+                ],
+                payload: PayloadKind::Pulse,
+                uart_ring_len: None,
+            }],
+            margin_ns: 1_000,
+            booting_timeout_ms: 1_000,
+        };
+        let n_plant = create_node(&config, "pdp-plant").unwrap();
+        let n_board = create_node(&config, "pdp-board").unwrap();
+        let map_plant =
+            PulseDataPlaneMap::open(&n_plant, &key, "plant", &topo.boards[0], &topo.edges).unwrap();
+        let map_board =
+            PulseDataPlaneMap::open(&n_board, &key, "board", &topo.boards[1], &topo.edges).unwrap();
+        let sample = Pulse {
+            hi_width_ns: 1_000_000,
+            lo_width_ns: 1_000_000,
+        };
+
+        {
+            let mut ports_plant = BoardPorts::new();
+            ports_plant
+                .insert_out(OutPort::<Pulse>::new("flow_pulse").unwrap())
+                .unwrap();
+            ports_plant
+                .insert_in(InPort::<Pulse>::new("unused_in").unwrap())
+                .unwrap();
+            let mut plane_plant = map_plant.bind(&ports_plant).unwrap();
+            ports_plant
+                .out_port::<Pulse>("flow_pulse")
+                .unwrap()
+                .on_input(&[sample], 0);
+            plane_plant.pump_tx().unwrap();
+        }
+
+        let mut ports_board = BoardPorts::new();
+        let mut flow_in = InPort::<Pulse>::new("flow_pulse").unwrap();
+        let tap = OutPort::<Pulse>::new("flow_tap").unwrap();
+        let _wire = Wire::new().source(flow_in.port_mut()).sink({
+            let tap = tap.clone();
+            move |values, changed| tap.on_input(values, changed)
+        });
+        ports_board.insert_in(flow_in).unwrap();
+        ports_board
+            .insert_out(OutPort::<Pulse>::new("unused_out").unwrap())
+            .unwrap();
+        let mut plane_board = map_board.bind(&ports_board).unwrap();
+        let mut got = None;
+        for _ in 0..100 {
+            plane_board.pump_rx().unwrap();
             let pending = tap.pending();
             if !pending.is_empty() {
                 got = pending.into_iter().next();

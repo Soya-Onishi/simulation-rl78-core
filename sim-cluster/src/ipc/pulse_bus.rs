@@ -14,6 +14,9 @@ use super::names;
 use super::runtime::IpcError;
 
 /// Default pulse edge subscriber buffer.
+///
+/// Sized for waveform-parameter updates (not per-edge DigitalLevel toggles), so
+/// a smaller ring than analog (256) is enough.
 pub const DEFAULT_PULSE_RING_LEN: usize = 64;
 
 type PulsePub = Publisher<ipc::Service, Pulse, ()>;

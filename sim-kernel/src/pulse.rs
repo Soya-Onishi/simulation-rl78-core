@@ -248,4 +248,24 @@ mod tests {
         let got = levels.lock().expect("levels").clone();
         assert_eq!(got, vec![DigitalLevel::High, DigitalLevel::Low]);
     }
+
+    #[test]
+    fn either_width_zero_stops_without_scheduling() {
+        let ctl = EventCtl::new();
+        ctl.set_now(Tick(0));
+        let mut expander = PulseExpander::new("flow", ctl.clone()).expect("new");
+        let levels = record_levels(expander.level_source_mut());
+        let sink = expander.pulse_sink();
+        sink(
+            &[Pulse {
+                hi_width_ns: 0,
+                lo_width_ns: 1_000,
+            }],
+            0,
+        );
+        assert_eq!(*levels.lock().expect("levels"), vec![DigitalLevel::Low]);
+        assert!(ctl.events().next_deadline().is_none());
+        fire_due(&ctl, Tick(1_000));
+        assert_eq!(*levels.lock().expect("levels"), vec![DigitalLevel::Low]);
+    }
 }

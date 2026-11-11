@@ -35,8 +35,9 @@ unsafe impl ZeroCopySend for DigitalLevel {}
 ///
 /// Used as a board-edge / cluster IPC payload so producers send waveform settings
 /// instead of toggling [`DigitalLevel`] on every edge. A receiver expands the
-/// train onto a GPIO [`SourcePort`]. Both widths `0` (or either width `0`) means
-/// stopped: the expanded line stays [`DigitalLevel::Low`].
+/// train onto a GPIO [`SourcePort`]. If **either** width is `0`, the train is
+/// stopped and the expanded line stays [`DigitalLevel::Low`] ([`Pulse::STOPPED`]
+/// sets both to `0`).
 ///
 /// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
 #[repr(C)]
