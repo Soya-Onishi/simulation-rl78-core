@@ -21,6 +21,7 @@ mod machine;
 mod plant;
 mod ports;
 mod probe;
+mod pulse;
 mod reset;
 mod sim;
 mod stop;
@@ -53,6 +54,7 @@ pub use machine::Machine;
 pub use plant::{Model, Plant};
 pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
 pub use probe::{ProbePoint, ProbePolicy, ProbeSample, ProbeTap};
+pub use pulse::PulseExpander;
 pub use reset::Resettable;
 pub use sim::{
     BeforeQuantum, DEFAULT_MAX_QUANTUM, SimConfig, SimControl, SimEvents, SimState, Simulator,
@@ -62,7 +64,7 @@ pub use stop::StopReason;
 pub use switch::{HoldSwitch, MAX_HOLD_MS};
 pub use virtual_time::{set_global_virtual_time_ns, virtual_time_ns};
 pub use wiring::{
-    AnalogVoltage, DigitalLevel, SolidWire, SourcePort, U0, U1, UartFrame, UartParity,
+    AnalogVoltage, DigitalLevel, Pulse, SolidWire, SourcePort, U0, U1, UartFrame, UartParity,
     UartStopBits, Wire,
 };
 

@@ -23,6 +23,8 @@ pub enum PayloadKind {
     Uart,
     Digital,
     Analog,
+    /// Repeating hi/lo width settings ([`sim_kernel::Pulse`]), expanded to GPIO on RX.
+    Pulse,
 }
 
 /// Direction of an external endpoint relative to the board.

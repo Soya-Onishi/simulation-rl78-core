@@ -31,6 +31,35 @@ pub enum DigitalLevel {
 // `#[repr(u8)]` cannot combine with the ZeroCopySend derive's `#[repr(C)]`.
 unsafe impl ZeroCopySend for DigitalLevel {}
 
+/// Repeating digital pulse train parameters (hi/lo widths in virtual nanoseconds).
+///
+/// Used as a board-edge / cluster IPC payload so producers send waveform settings
+/// instead of toggling [`DigitalLevel`] on every edge. A receiver expands the
+/// train onto a GPIO [`SourcePort`]. Both widths `0` (or either width `0`) means
+/// stopped: the expanded line stays [`DigitalLevel::Low`].
+///
+/// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, ZeroCopySend)]
+pub struct Pulse {
+    pub hi_width_ns: u64,
+    pub lo_width_ns: u64,
+}
+
+impl Pulse {
+    /// Stopped train (receiver holds the line low).
+    pub const STOPPED: Self = Self {
+        hi_width_ns: 0,
+        lo_width_ns: 0,
+    };
+
+    /// True when the train should not toggle (line held low).
+    #[must_use]
+    pub const fn is_stopped(self) -> bool {
+        self.hi_width_ns == 0 || self.lo_width_ns == 0
+    }
+}
+
 /// Analog voltage in microvolts, used as a [`Wire`] payload.
 ///
 /// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
