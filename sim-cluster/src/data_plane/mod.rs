@@ -1,13 +1,21 @@
 //! Board data-plane pumping: topology edges ↔ [`BoardPorts`].
 //!
 //! Control IPC stays in [`crate::board_runtime`]; this module owns payload
-//! fan-in/fan-out. New payload kinds add a map + plane pair and a branch in
-//! [`open_data_planes`] — no inventory / registration macros.
+//! fan-in/fan-out. New payload kinds add a submodule (`analog`, `pulse`,
+//! `scalar`, …) plus a branch in [`open_data_planes`].
 //!
 //! [`open`](UartDataPlaneMap::open) builds edge↔endpoint mapping (and opens
 //! iceoryx ports). [`bind`](UartDataPlaneMap::bind) consumes that map with
 //! [`BoardPorts`] and yields a [`UartDataPlane`] whose [`pump_rx`] /
 //! [`pump_tx`] use pre-wired lanes with no name lookup.
+
+mod analog;
+mod pulse;
+mod scalar;
+
+pub use analog::{AnalogDataPlane, AnalogDataPlaneMap};
+pub use pulse::{PulseDataPlane, PulseDataPlaneMap};
+pub use scalar::{ScalarDataPlane, ScalarDataPlaneMap};
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,17 +23,13 @@ use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::Node;
 use iceoryx2::prelude::ipc;
-use sim_kernel::{AnalogVoltage, BoardPorts, OutPort, Pulse, SourcePort, UartFrame};
+use sim_kernel::{BoardPorts, OutPort, SourcePort, UartFrame};
 
-use crate::ipc::{IpcError, NodeAnalogPorts, NodePulsePorts, NodeUartPorts, edge_id};
+use crate::ipc::{IpcError, NodeUartPorts, edge_id};
 use crate::topology::{BoardSpec, DirectedEdge, EndpointDirection, LogicalTopology, PayloadKind};
 
 type UartPub = Publisher<ipc::Service, UartFrame, ()>;
 type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
-type AnalogPub = Publisher<ipc::Service, AnalogVoltage, ()>;
-type AnalogSub = Subscriber<ipc::Service, AnalogVoltage, ()>;
-type PulsePub = Publisher<ipc::Service, Pulse, ()>;
-type PulseSub = Subscriber<ipc::Service, Pulse, ()>;
 
 /// Failures from data-plane open / bind / pump.
 #[derive(Debug, thiserror::Error)]
@@ -286,469 +290,6 @@ impl DataPlane for UartDataPlane {
     }
 }
 
-struct AnalogRxLane {
-    sub: AnalogSub,
-    port: SourcePort<AnalogVoltage>,
-}
-
-struct AnalogTxLane {
-    port: OutPort<AnalogVoltage>,
-    pubs: Vec<AnalogPub>,
-}
-
-struct AnalogPendingRx {
-    edge_id: crate::ipc::HashedId<u64>,
-    ep: String,
-    sub: AnalogSub,
-}
-
-struct AnalogPendingTx {
-    ep: String,
-    edge_ids: Vec<crate::ipc::HashedId<u64>>,
-}
-
-/// Analog edge↔endpoint mapping opened before board ports exist.
-pub struct AnalogDataPlaneMap {
-    producers: HashMap<crate::ipc::HashedId<u64>, AnalogPub>,
-    pending_rx: Vec<AnalogPendingRx>,
-    pending_tx: Vec<AnalogPendingTx>,
-    required_ins: HashSet<String>,
-    required_outs: HashSet<String>,
-}
-
-impl AnalogDataPlaneMap {
-    pub fn open(
-        node: &Node<ipc::Service>,
-        cluster_key: &str,
-        board_name: &str,
-        board: &BoardSpec,
-        topo_edges: &[DirectedEdge],
-    ) -> Result<Self, IpcError> {
-        let NodeAnalogPorts {
-            mut producers,
-            mut consumers,
-        } = NodeAnalogPorts::open_for_board(node, cluster_key, board_name, topo_edges)?;
-
-        let mut pending_rx = Vec::new();
-        let mut tx_ep_to_edges: HashMap<String, Vec<crate::ipc::HashedId<u64>>> = HashMap::new();
-
-        for edge in topo_edges {
-            if edge.payload != PayloadKind::Analog {
-                continue;
-            }
-            let id = edge_id(
-                &edge.from.path,
-                &edge.from.port,
-                &edge.to.path,
-                &edge.to.port,
-            );
-            match (
-                edge.to.path.as_str() == board_name,
-                edge.from.path.as_str() == board_name,
-            ) {
-                (true, _) => {
-                    let Some(sub) = consumers.remove(&id) else {
-                        return Err(IpcError::Message(format!(
-                            "missing analog consumer for {id}"
-                        )));
-                    };
-                    pending_rx.push(AnalogPendingRx {
-                        edge_id: id,
-                        ep: edge.to.port.clone(),
-                        sub,
-                    });
-                }
-                (false, true) => {
-                    tx_ep_to_edges
-                        .entry(edge.from.port.clone())
-                        .or_default()
-                        .push(id);
-                }
-                (false, false) => {}
-            }
-        }
-
-        let pending_tx: Vec<AnalogPendingTx> = tx_ep_to_edges
-            .into_iter()
-            .map(|(ep, edge_ids)| AnalogPendingTx { ep, edge_ids })
-            .collect();
-
-        let needed: HashSet<crate::ipc::HashedId<u64>> = pending_tx
-            .iter()
-            .flat_map(|t| t.edge_ids.iter().copied())
-            .collect();
-        producers.retain(|id, _| needed.contains(id));
-
-        let mut required_ins = HashSet::new();
-        let mut required_outs = HashSet::new();
-        for ep in &board.endpoints {
-            if ep.payload != PayloadKind::Analog {
-                continue;
-            }
-            match ep.direction {
-                EndpointDirection::In => {
-                    required_ins.insert(ep.name.clone());
-                }
-                EndpointDirection::Out => {
-                    required_outs.insert(ep.name.clone());
-                }
-            }
-        }
-
-        Ok(Self {
-            producers,
-            pending_rx,
-            pending_tx,
-            required_ins,
-            required_outs,
-        })
-    }
-
-    pub fn bind(mut self, ports: &BoardPorts) -> Result<AnalogDataPlane, DataPlaneError> {
-        for name in &self.required_ins {
-            if ports.in_port::<AnalogVoltage>(name).is_none() {
-                return Err(DataPlaneError::Message(format!(
-                    "missing InPort<AnalogVoltage> for topology endpoint `{name}`"
-                )));
-            }
-        }
-        for name in &self.required_outs {
-            if ports.out_port::<AnalogVoltage>(name).is_none() {
-                return Err(DataPlaneError::Message(format!(
-                    "missing OutPort<AnalogVoltage> for topology endpoint `{name}`"
-                )));
-            }
-        }
-
-        let mut rx = Vec::with_capacity(self.pending_rx.len());
-        for pending in self.pending_rx {
-            let port = ports
-                .in_port::<AnalogVoltage>(&pending.ep)
-                .map(|p| p.port().clone())
-                .ok_or_else(|| {
-                    DataPlaneError::Message(format!(
-                        "analog rx: no InPort for endpoint `{}` (edge {})",
-                        pending.ep, pending.edge_id
-                    ))
-                })?;
-            rx.push(AnalogRxLane {
-                sub: pending.sub,
-                port,
-            });
-        }
-
-        let mut tx = Vec::with_capacity(self.pending_tx.len());
-        for pending in self.pending_tx {
-            let port = ports
-                .out_port::<AnalogVoltage>(&pending.ep)
-                .cloned()
-                .ok_or_else(|| {
-                    DataPlaneError::Message(format!(
-                        "analog tx: no OutPort for endpoint `{}`",
-                        pending.ep
-                    ))
-                })?;
-            let mut pubs = Vec::with_capacity(pending.edge_ids.len());
-            for edge_id in pending.edge_ids {
-                let puber = self.producers.remove(&edge_id).ok_or_else(|| {
-                    DataPlaneError::Message(format!("missing analog producer for {edge_id}"))
-                })?;
-                pubs.push(puber);
-            }
-            tx.push(AnalogTxLane { port, pubs });
-        }
-
-        Ok(AnalogDataPlane { rx, tx })
-    }
-}
-
-impl DataPlaneMap for AnalogDataPlaneMap {
-    fn bind(self: Box<Self>, ports: &BoardPorts) -> Result<Box<dyn DataPlane>, DataPlaneError> {
-        Ok(Box::new((*self).bind(ports)?))
-    }
-}
-
-/// Bound analog data plane for one board.
-pub struct AnalogDataPlane {
-    rx: Vec<AnalogRxLane>,
-    tx: Vec<AnalogTxLane>,
-}
-
-impl DataPlane for AnalogDataPlane {
-    fn pump_rx(&mut self) -> Result<(), DataPlaneError> {
-        for lane in &self.rx {
-            for _ in 0..64 {
-                match lane
-                    .sub
-                    .receive()
-                    .map_err(|e| DataPlaneError::Message(format!("analog recv: {e:?}")))?
-                {
-                    Some(sample) => lane.port.drive(*sample),
-                    None => break,
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn pump_tx(&mut self) -> Result<(), DataPlaneError> {
-        for lane in &self.tx {
-            for sample in lane.port.drain_pending() {
-                for puber in &lane.pubs {
-                    if let Err(err) = puber.send_copy(sample) {
-                        log::warn!("analog tx try_send: {err:?}");
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn discard_rx(&mut self) -> Result<(), DataPlaneError> {
-        for lane in &self.rx {
-            while lane
-                .sub
-                .receive()
-                .map_err(|e| DataPlaneError::Message(format!("analog recv: {e:?}")))?
-                .is_some()
-            {}
-        }
-        Ok(())
-    }
-}
-
-struct PulseRxLane {
-    sub: PulseSub,
-    port: SourcePort<Pulse>,
-}
-
-struct PulseTxLane {
-    port: OutPort<Pulse>,
-    pubs: Vec<PulsePub>,
-}
-
-struct PulsePendingRx {
-    edge_id: crate::ipc::HashedId<u64>,
-    ep: String,
-    sub: PulseSub,
-}
-
-struct PulsePendingTx {
-    ep: String,
-    edge_ids: Vec<crate::ipc::HashedId<u64>>,
-}
-
-/// Pulse edge↔endpoint mapping opened before board ports exist.
-pub struct PulseDataPlaneMap {
-    producers: HashMap<crate::ipc::HashedId<u64>, PulsePub>,
-    pending_rx: Vec<PulsePendingRx>,
-    pending_tx: Vec<PulsePendingTx>,
-    required_ins: HashSet<String>,
-    required_outs: HashSet<String>,
-}
-
-impl PulseDataPlaneMap {
-    pub fn open(
-        node: &Node<ipc::Service>,
-        cluster_key: &str,
-        board_name: &str,
-        board: &BoardSpec,
-        topo_edges: &[DirectedEdge],
-    ) -> Result<Self, IpcError> {
-        let NodePulsePorts {
-            mut producers,
-            mut consumers,
-        } = NodePulsePorts::open_for_board(node, cluster_key, board_name, topo_edges)?;
-
-        let mut pending_rx = Vec::new();
-        let mut tx_ep_to_edges: HashMap<String, Vec<crate::ipc::HashedId<u64>>> = HashMap::new();
-
-        for edge in topo_edges {
-            if edge.payload != PayloadKind::Pulse {
-                continue;
-            }
-            let id = edge_id(
-                &edge.from.path,
-                &edge.from.port,
-                &edge.to.path,
-                &edge.to.port,
-            );
-            match (
-                edge.to.path.as_str() == board_name,
-                edge.from.path.as_str() == board_name,
-            ) {
-                (true, _) => {
-                    let Some(sub) = consumers.remove(&id) else {
-                        return Err(IpcError::Message(format!(
-                            "missing pulse consumer for {id}"
-                        )));
-                    };
-                    pending_rx.push(PulsePendingRx {
-                        edge_id: id,
-                        ep: edge.to.port.clone(),
-                        sub,
-                    });
-                }
-                (false, true) => {
-                    tx_ep_to_edges
-                        .entry(edge.from.port.clone())
-                        .or_default()
-                        .push(id);
-                }
-                (false, false) => {}
-            }
-        }
-
-        let pending_tx: Vec<PulsePendingTx> = tx_ep_to_edges
-            .into_iter()
-            .map(|(ep, edge_ids)| PulsePendingTx { ep, edge_ids })
-            .collect();
-
-        let needed: HashSet<crate::ipc::HashedId<u64>> = pending_tx
-            .iter()
-            .flat_map(|t| t.edge_ids.iter().copied())
-            .collect();
-        producers.retain(|id, _| needed.contains(id));
-
-        let mut required_ins = HashSet::new();
-        let mut required_outs = HashSet::new();
-        for ep in &board.endpoints {
-            if ep.payload != PayloadKind::Pulse {
-                continue;
-            }
-            match ep.direction {
-                EndpointDirection::In => {
-                    required_ins.insert(ep.name.clone());
-                }
-                EndpointDirection::Out => {
-                    required_outs.insert(ep.name.clone());
-                }
-            }
-        }
-
-        Ok(Self {
-            producers,
-            pending_rx,
-            pending_tx,
-            required_ins,
-            required_outs,
-        })
-    }
-
-    pub fn bind(mut self, ports: &BoardPorts) -> Result<PulseDataPlane, DataPlaneError> {
-        for name in &self.required_ins {
-            if ports.in_port::<Pulse>(name).is_none() {
-                return Err(DataPlaneError::Message(format!(
-                    "missing InPort<Pulse> for topology endpoint `{name}`"
-                )));
-            }
-        }
-        for name in &self.required_outs {
-            if ports.out_port::<Pulse>(name).is_none() {
-                return Err(DataPlaneError::Message(format!(
-                    "missing OutPort<Pulse> for topology endpoint `{name}`"
-                )));
-            }
-        }
-
-        let mut rx = Vec::with_capacity(self.pending_rx.len());
-        for pending in self.pending_rx {
-            let port = ports
-                .in_port::<Pulse>(&pending.ep)
-                .map(|p| p.port().clone())
-                .ok_or_else(|| {
-                    DataPlaneError::Message(format!(
-                        "pulse rx: no InPort for endpoint `{}` (edge {})",
-                        pending.ep, pending.edge_id
-                    ))
-                })?;
-            rx.push(PulseRxLane {
-                sub: pending.sub,
-                port,
-            });
-        }
-
-        let mut tx = Vec::with_capacity(self.pending_tx.len());
-        for pending in self.pending_tx {
-            let port = ports
-                .out_port::<Pulse>(&pending.ep)
-                .cloned()
-                .ok_or_else(|| {
-                    DataPlaneError::Message(format!(
-                        "pulse tx: no OutPort for endpoint `{}`",
-                        pending.ep
-                    ))
-                })?;
-            let mut pubs = Vec::with_capacity(pending.edge_ids.len());
-            for edge_id in pending.edge_ids {
-                let puber = self.producers.remove(&edge_id).ok_or_else(|| {
-                    DataPlaneError::Message(format!("missing pulse producer for {edge_id}"))
-                })?;
-                pubs.push(puber);
-            }
-            tx.push(PulseTxLane { port, pubs });
-        }
-
-        Ok(PulseDataPlane { rx, tx })
-    }
-}
-
-impl DataPlaneMap for PulseDataPlaneMap {
-    fn bind(self: Box<Self>, ports: &BoardPorts) -> Result<Box<dyn DataPlane>, DataPlaneError> {
-        Ok(Box::new((*self).bind(ports)?))
-    }
-}
-
-/// Bound pulse data plane for one board.
-pub struct PulseDataPlane {
-    rx: Vec<PulseRxLane>,
-    tx: Vec<PulseTxLane>,
-}
-
-impl DataPlane for PulseDataPlane {
-    fn pump_rx(&mut self) -> Result<(), DataPlaneError> {
-        for lane in &self.rx {
-            for _ in 0..64 {
-                match lane
-                    .sub
-                    .receive()
-                    .map_err(|e| DataPlaneError::Message(format!("pulse recv: {e:?}")))?
-                {
-                    Some(sample) => lane.port.drive(*sample),
-                    None => break,
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn pump_tx(&mut self) -> Result<(), DataPlaneError> {
-        for lane in &self.tx {
-            for sample in lane.port.drain_pending() {
-                for puber in &lane.pubs {
-                    if let Err(err) = puber.send_copy(sample) {
-                        log::warn!("pulse tx try_send: {err:?}");
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn discard_rx(&mut self) -> Result<(), DataPlaneError> {
-        for lane in &self.rx {
-            while lane
-                .sub
-                .receive()
-                .map_err(|e| DataPlaneError::Message(format!("pulse recv: {e:?}")))?
-                .is_some()
-            {}
-        }
-        Ok(())
-    }
-}
-
-/// Open every data-plane map needed by `board_name` for the given topology.
 pub fn open_data_planes(
     node: &Node<ipc::Service>,
     cluster_key: &str,
@@ -784,6 +325,11 @@ pub fn open_data_planes(
                     PulseDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
                 maps.push(Box::new(map));
             }
+            PayloadKind::Scalar => {
+                let map =
+                    ScalarDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
+                maps.push(Box::new(map));
+            }
             PayloadKind::Digital => {
                 // Level-only digital IPC remains out of scope; use Pulse for trains.
             }
@@ -804,7 +350,7 @@ pub fn bind_data_planes(
 mod tests {
     use std::time::Duration;
 
-    use sim_kernel::{AnalogVoltage, BoardPorts, InPort, OutPort, Pulse, UartFrame, Wire};
+    use sim_kernel::{AnalogVoltage, BoardPorts, InPort, OutPort, Pulse, Scalar, UartFrame, Wire};
 
     use super::*;
     use crate::ipc::{create_node, isolated_config, new_cluster_key};
@@ -1191,6 +737,112 @@ mod tests {
         let mut got = None;
         for _ in 0..100 {
             plane_board.pump_rx().unwrap();
+            let pending = tap.pending();
+            if !pending.is_empty() {
+                got = pending.into_iter().next();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(got, Some(sample));
+    }
+
+    fn scalar_board(id: &str, out_name: &str, in_name: &str) -> BoardSpec {
+        BoardSpec {
+            id: id.into(),
+            kind: "plant".into(),
+            elf: None,
+            endpoints: vec![
+                EndpointSpec {
+                    name: out_name.into(),
+                    direction: EndpointDirection::Out,
+                    payload: PayloadKind::Scalar,
+                },
+                EndpointSpec {
+                    name: in_name.into(),
+                    direction: EndpointDirection::In,
+                    payload: PayloadKind::Scalar,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn scalar_dataplane_tx_ipc_rx_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = new_cluster_key();
+        let config = isolated_config(dir.path()).unwrap();
+        let topo = LogicalTopology {
+            boards: vec![
+                scalar_board("piping", "inlet_temp_c", "outlet_temp_c"),
+                scalar_board("boiler", "outlet_temp_c", "inlet_temp_c"),
+            ],
+            edges: vec![DirectedEdge {
+                from: PortRef {
+                    path: "piping".into(),
+                    port: "inlet_temp_c".into(),
+                },
+                to: PortRef {
+                    path: "boiler".into(),
+                    port: "inlet_temp_c".into(),
+                },
+                route: vec![
+                    PortRef {
+                        path: "piping".into(),
+                        port: "inlet_temp_c".into(),
+                    },
+                    PortRef {
+                        path: "boiler".into(),
+                        port: "inlet_temp_c".into(),
+                    },
+                ],
+                payload: PayloadKind::Scalar,
+                uart_ring_len: None,
+            }],
+            margin_ns: 1_000,
+            booting_timeout_ms: 1_000,
+        };
+        let n_piping = create_node(&config, "sdp-piping").unwrap();
+        let n_boiler = create_node(&config, "sdp-boiler").unwrap();
+        let map_piping =
+            ScalarDataPlaneMap::open(&n_piping, &key, "piping", &topo.boards[0], &topo.edges)
+                .unwrap();
+        let map_boiler =
+            ScalarDataPlaneMap::open(&n_boiler, &key, "boiler", &topo.boards[1], &topo.edges)
+                .unwrap();
+        let sample = Scalar(20.0);
+
+        {
+            let mut ports_piping = BoardPorts::new();
+            ports_piping
+                .insert_out(OutPort::<Scalar>::new("inlet_temp_c").unwrap())
+                .unwrap();
+            ports_piping
+                .insert_in(InPort::<Scalar>::new("outlet_temp_c").unwrap())
+                .unwrap();
+            let mut plane_piping = map_piping.bind(&ports_piping).unwrap();
+            ports_piping
+                .out_port::<Scalar>("inlet_temp_c")
+                .unwrap()
+                .on_input(&[sample], 0);
+            plane_piping.pump_tx().unwrap();
+        }
+
+        let mut ports_boiler = BoardPorts::new();
+        let mut inlet = InPort::<Scalar>::new("inlet_temp_c").unwrap();
+        let tap = OutPort::<Scalar>::new("inlet_tap").unwrap();
+        let _wire = Wire::new().source(inlet.port_mut()).sink({
+            let tap = tap.clone();
+            move |values, changed| tap.on_input(values, changed)
+        });
+        ports_boiler.insert_in(inlet).unwrap();
+        ports_boiler
+            .insert_out(OutPort::<Scalar>::new("outlet_temp_c").unwrap())
+            .unwrap();
+        let mut plane_boiler = map_boiler.bind(&ports_boiler).unwrap();
+        let mut got = None;
+        for _ in 0..100 {
+            plane_boiler.pump_rx().unwrap();
             let pending = tap.pending();
             if !pending.is_empty() {
                 got = pending.into_iter().next();
