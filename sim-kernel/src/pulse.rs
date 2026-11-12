@@ -138,7 +138,6 @@ impl PulseExpander {
     }
 
     /// Sink for an `InPort<Pulse>` / data-plane RX wire.
-    #[must_use]
     pub fn pulse_sink(&self) -> impl Fn(&[Pulse], usize) + Send + Sync + 'static {
         let handle = Arc::clone(&self.handle);
         move |values: &[Pulse], changed: usize| {
@@ -150,9 +149,9 @@ impl PulseExpander {
 }
 
 impl Resettable for PulseExpander {
-    fn reset(&mut self, _bus: &mut MemoryBus) {
-        self.handle.apply_pulse(Pulse::STOPPED);
-    }
+    /// Combinational expander: do not clear the train here. Upstream sequential
+    /// devices re-drive [`Self::pulse_sink`] after their own reset.
+    fn reset(&mut self, _bus: &mut MemoryBus) {}
 }
 
 impl Device for PulseExpander {
