@@ -1,5 +1,9 @@
 //! Thin plant wrapper: a [`Model`] stepped on a fixed virtual-time grid.
 
+use std::collections::HashMap;
+
+use crate::action::{ActionCatalogEntry, ActionFailure, Device, DeviceError};
+use crate::bus::MemoryBus;
 use crate::clock::{Tick, VirtualClock};
 use crate::entity::{AdvanceCtx, Entity, EntityPoll};
 use crate::virtual_time::set_global_virtual_time_ns;
@@ -22,18 +26,41 @@ pub struct Plant<M: Model> {
     clock: VirtualClock,
     /// Next virtual time at which [`Model::step`] runs.
     next_step_at: Tick,
+    devices: HashMap<u64, Box<dyn Device>>,
+    device_order: Vec<u64>,
 }
 
 impl<M: Model> Plant<M> {
     #[must_use]
     pub fn new(model: M) -> Self {
+        Self::with_devices(model, Vec::new()).expect("empty device list")
+    }
+
+    /// Like [`Self::new`], and retains `devices` for host actions / reset.
+    ///
+    /// # Errors
+    ///
+    /// Two devices hash to the same [`crate::id_hash`] value.
+    pub fn with_devices(model: M, devices: Vec<Box<dyn Device>>) -> Result<Self, DeviceError> {
+        let mut device_order = Vec::with_capacity(devices.len());
+        let mut by_hash = HashMap::with_capacity(devices.len());
+        for device in devices {
+            let hash = device.name_hash();
+            let name = device.name().to_string();
+            if by_hash.insert(hash, device).is_some() {
+                return Err(DeviceError::DuplicateDevice { name });
+            }
+            device_order.push(hash);
+        }
         let clock = VirtualClock::new();
         let next_step_at = clock.now();
-        Self {
+        Ok(Self {
             model,
             clock,
             next_step_at,
-        }
+            devices: by_hash,
+            device_order,
+        })
     }
 
     #[must_use]
@@ -53,6 +80,44 @@ impl<M: Model> Plant<M> {
     #[must_use]
     pub fn next_step_at(&self) -> Tick {
         self.next_step_at
+    }
+
+    #[must_use]
+    pub fn action_catalog(&self) -> Vec<ActionCatalogEntry> {
+        let mut out = Vec::new();
+        for hash in &self.device_order {
+            let device = &self.devices[hash];
+            for spec in device.action_specs() {
+                out.push(ActionCatalogEntry {
+                    device: device.name().to_string(),
+                    device_hash: device.name_hash(),
+                    action: spec.id.clone(),
+                    action_hash: spec.hash,
+                    description: spec.description.clone(),
+                    params: spec.params.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    pub fn poll_actions(&mut self, now: Tick) {
+        for device in self.devices.values_mut() {
+            device.poll(now);
+        }
+    }
+
+    pub fn apply_action(
+        &mut self,
+        device_hash: u64,
+        action_hash: u64,
+        now: Tick,
+        raw: &[(u64, f64)],
+    ) -> Result<(), ActionFailure> {
+        let Some(device) = self.devices.get_mut(&device_hash) else {
+            return Err(ActionFailure::NotFoundDevice);
+        };
+        device.apply(action_hash, now, raw)
     }
 
     fn advance_clock(&mut self, delta: Tick) {
@@ -85,12 +150,34 @@ impl<M: Model> Entity for Plant<M> {
     }
 
     fn reset(&mut self) {
+        let mut bus = MemoryBus::new();
+        for device in self.devices.values_mut() {
+            device.reset(&mut bus);
+        }
         self.model.reset();
         self.next_step_at = self.clock.now();
     }
 
     fn now(&self) -> Tick {
         self.clock.now()
+    }
+
+    fn action_catalog(&self) -> Vec<ActionCatalogEntry> {
+        Plant::action_catalog(self)
+    }
+
+    fn poll_actions(&mut self, now: Tick) {
+        Plant::poll_actions(self, now);
+    }
+
+    fn apply_action(
+        &mut self,
+        device_hash: u64,
+        action_hash: u64,
+        now: Tick,
+        raw: &[(u64, f64)],
+    ) -> Result<(), ActionFailure> {
+        Plant::apply_action(self, device_hash, action_hash, now, raw)
     }
 }
 
