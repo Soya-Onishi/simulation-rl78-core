@@ -13,6 +13,8 @@ struct PulseState {
     hi_ns: u64,
     lo_ns: u64,
     high: bool,
+    /// Virtual time when the current hi/lo phase began.
+    phase_started_at: Tick,
     event_id: Option<EventId>,
 }
 
@@ -23,24 +25,17 @@ struct PulseExpanderHandle {
 }
 
 impl PulseExpanderHandle {
-    fn apply_pulse(self: &Arc<Self>, pulse: Pulse) {
-        let now = self.ctl.now();
-        let mut st = self.state.lock().expect("pulse state");
+    fn is_running(st: &PulseState) -> bool {
+        st.hi_ns > 0 && st.lo_ns > 0
+    }
+
+    fn cancel_event(&self, st: &mut PulseState) {
         if let Some(id) = st.event_id.take() {
             self.ctl.cancel(id);
         }
-        if pulse.is_stopped() {
-            st.hi_ns = 0;
-            st.lo_ns = 0;
-            st.high = false;
-            self.output.drive(DigitalLevel::Low);
-            return;
-        }
-        st.hi_ns = pulse.hi_width_ns;
-        st.lo_ns = pulse.lo_width_ns;
-        st.high = true;
-        self.output.drive(DigitalLevel::High);
-        let at = now.saturating_add(Tick(st.hi_ns));
+    }
+
+    fn schedule_edge(self: &Arc<Self>, st: &mut PulseState, at: Tick) {
         let id = self.ctl.schedule(
             at,
             Box::new(PulseEdgeEvent {
@@ -50,10 +45,85 @@ impl PulseExpanderHandle {
         st.event_id = Some(id);
     }
 
+    fn drive_level(&self, st: &mut PulseState, high: bool) {
+        if st.high == high {
+            return;
+        }
+        st.high = high;
+        self.output.drive(if high {
+            DigitalLevel::High
+        } else {
+            DigitalLevel::Low
+        });
+    }
+
+    fn stop_train(&self, st: &mut PulseState) {
+        self.cancel_event(st);
+        st.hi_ns = 0;
+        st.lo_ns = 0;
+        st.high = false;
+        st.phase_started_at = self.ctl.now();
+        self.output.drive(DigitalLevel::Low);
+    }
+
+    fn start_train(self: &Arc<Self>, st: &mut PulseState, pulse: Pulse, now: Tick) {
+        self.cancel_event(st);
+        st.hi_ns = pulse.hi_width_ns;
+        st.lo_ns = pulse.lo_width_ns;
+        st.high = true;
+        st.phase_started_at = now;
+        self.output.drive(DigitalLevel::High);
+        self.schedule_edge(st, now.saturating_add(Tick(st.hi_ns)));
+    }
+
+    /// Retarget widths while running: keep phase elapsed, cascade overshoot.
+    fn retarget_running(self: &Arc<Self>, st: &mut PulseState, pulse: Pulse, now: Tick) {
+        self.cancel_event(st);
+        let mut elapsed = now.0.saturating_sub(st.phase_started_at.0);
+        let mut high = st.high;
+        st.hi_ns = pulse.hi_width_ns;
+        st.lo_ns = pulse.lo_width_ns;
+
+        loop {
+            let width = if high { st.hi_ns } else { st.lo_ns };
+            if elapsed < width {
+                let remainder = width - elapsed;
+                self.drive_level(st, high);
+                st.phase_started_at = Tick(now.0.saturating_sub(elapsed));
+                self.schedule_edge(st, now.saturating_add(Tick(remainder)));
+                return;
+            }
+            elapsed -= width;
+            high = !high;
+            self.drive_level(st, high);
+        }
+    }
+
+    fn apply_pulse(self: &Arc<Self>, pulse: Pulse) {
+        let now = self.ctl.now();
+        let mut st = self.state.lock().expect("pulse state");
+
+        if st.hi_ns == pulse.hi_width_ns && st.lo_ns == pulse.lo_width_ns {
+            return;
+        }
+
+        if pulse.is_stopped() {
+            self.stop_train(&mut st);
+            return;
+        }
+
+        if !Self::is_running(&st) {
+            self.start_train(&mut st, pulse, now);
+            return;
+        }
+
+        self.retarget_running(&mut st, pulse, now);
+    }
+
     fn on_edge(self: &Arc<Self>, now: Tick) {
         let mut st = self.state.lock().expect("pulse state");
         st.event_id = None;
-        if st.hi_ns == 0 || st.lo_ns == 0 {
+        if !Self::is_running(&st) {
             st.high = false;
             self.output.drive(DigitalLevel::Low);
             return;
@@ -65,15 +135,9 @@ impl PulseExpanderHandle {
             DigitalLevel::Low
         };
         self.output.drive(level);
+        st.phase_started_at = now;
         let width = if st.high { st.hi_ns } else { st.lo_ns };
-        let at = now.saturating_add(Tick(width));
-        let id = self.ctl.schedule(
-            at,
-            Box::new(PulseEdgeEvent {
-                handle: Arc::clone(self),
-            }),
-        );
-        st.event_id = Some(id);
+        self.schedule_edge(&mut st, now.saturating_add(Tick(width)));
     }
 }
 
@@ -94,6 +158,11 @@ impl SimEvent for PulseEdgeEvent {
 /// 2. Wire [`Self::level_source_mut`] to the GPIO sink (while this is the only
 ///    `Arc` holder)
 /// 3. Attach [`Self::pulse_sink`] to the board `InPort<Pulse>` wire
+///
+/// Re-driving an unchanged [`Pulse`] is ignored. A changed running pulse keeps
+/// the current level's elapsed time and reschedules the next edge; overshoot
+/// past the new phase width flips immediately and subtracts from subsequent
+/// phases (cascading when needed).
 pub struct PulseExpander {
     name: String,
     name_hash: u64,
@@ -121,6 +190,7 @@ impl PulseExpander {
                     hi_ns: 0,
                     lo_ns: 0,
                     high: false,
+                    phase_started_at: Tick(0),
                     event_id: None,
                 }),
             }),
@@ -201,6 +271,10 @@ mod tests {
         }
     }
 
+    fn next_deadline(ctl: &EventCtl) -> Option<Tick> {
+        ctl.events().next_deadline()
+    }
+
     #[test]
     fn expanding_pulse_toggles_high_then_low() {
         let ctl = EventCtl::new();
@@ -263,8 +337,125 @@ mod tests {
             0,
         );
         assert_eq!(*levels.lock().expect("levels"), vec![DigitalLevel::Low]);
-        assert!(ctl.events().next_deadline().is_none());
+        assert!(next_deadline(&ctl).is_none());
         fire_due(&ctl, Tick(1_000));
         assert_eq!(*levels.lock().expect("levels"), vec![DigitalLevel::Low]);
+    }
+
+    #[test]
+    fn identical_pulse_does_not_restart_train() {
+        let ctl = EventCtl::new();
+        ctl.set_now(Tick(0));
+        let mut expander = PulseExpander::new("flow", ctl.clone()).expect("new");
+        let levels = record_levels(expander.level_source_mut());
+        let sink = expander.pulse_sink();
+        let pulse = Pulse {
+            hi_width_ns: 1_000,
+            lo_width_ns: 1_000,
+        };
+        sink(&[pulse], 0);
+        ctl.set_now(Tick(400));
+        sink(&[pulse], 0);
+        assert_eq!(next_deadline(&ctl), Some(Tick(1_000)));
+        fire_due(&ctl, Tick(1_000));
+        assert_eq!(
+            *levels.lock().expect("levels"),
+            vec![DigitalLevel::High, DigitalLevel::Low]
+        );
+    }
+
+    #[test]
+    fn retarget_shortens_remaining_hi() {
+        let ctl = EventCtl::new();
+        ctl.set_now(Tick(0));
+        let mut expander = PulseExpander::new("flow", ctl.clone()).expect("new");
+        let levels = record_levels(expander.level_source_mut());
+        let sink = expander.pulse_sink();
+        sink(
+            &[Pulse {
+                hi_width_ns: 10_000_000,
+                lo_width_ns: 20_000_000,
+            }],
+            0,
+        );
+        ctl.set_now(Tick(5_000_000));
+        sink(
+            &[Pulse {
+                hi_width_ns: 8_000_000,
+                lo_width_ns: 22_000_000,
+            }],
+            0,
+        );
+        assert_eq!(*levels.lock().expect("levels"), vec![DigitalLevel::High]);
+        assert_eq!(next_deadline(&ctl), Some(Tick(8_000_000)));
+        fire_due(&ctl, Tick(8_000_000));
+        assert_eq!(
+            *levels.lock().expect("levels"),
+            vec![DigitalLevel::High, DigitalLevel::Low]
+        );
+        assert_eq!(next_deadline(&ctl), Some(Tick(30_000_000)));
+    }
+
+    #[test]
+    fn retarget_overshoot_into_lo() {
+        let ctl = EventCtl::new();
+        ctl.set_now(Tick(0));
+        let mut expander = PulseExpander::new("flow", ctl.clone()).expect("new");
+        let levels = record_levels(expander.level_source_mut());
+        let sink = expander.pulse_sink();
+        sink(
+            &[Pulse {
+                hi_width_ns: 10_000_000,
+                lo_width_ns: 20_000_000,
+            }],
+            0,
+        );
+        ctl.set_now(Tick(8_000_000));
+        sink(
+            &[Pulse {
+                hi_width_ns: 5_000_000,
+                lo_width_ns: 25_000_000,
+            }],
+            0,
+        );
+        assert_eq!(
+            *levels.lock().expect("levels"),
+            vec![DigitalLevel::High, DigitalLevel::Low]
+        );
+        // excess 3ms subtracted from new lo 25ms → next edge in 22ms
+        assert_eq!(next_deadline(&ctl), Some(Tick(30_000_000)));
+        fire_due(&ctl, Tick(30_000_000));
+        assert_eq!(
+            *levels.lock().expect("levels"),
+            vec![DigitalLevel::High, DigitalLevel::Low, DigitalLevel::High]
+        );
+    }
+
+    #[test]
+    fn retarget_overshoot_cascades_across_phases() {
+        let ctl = EventCtl::new();
+        ctl.set_now(Tick(0));
+        let mut expander = PulseExpander::new("flow", ctl.clone()).expect("new");
+        let levels = record_levels(expander.level_source_mut());
+        let sink = expander.pulse_sink();
+        sink(
+            &[Pulse {
+                hi_width_ns: 10_000_000,
+                lo_width_ns: 20_000_000,
+            }],
+            0,
+        );
+        ctl.set_now(Tick(8_000_000));
+        // hi1/lo2 with 8ms into hi → cascade to lo with 1ms remaining
+        sink(
+            &[Pulse {
+                hi_width_ns: 1_000_000,
+                lo_width_ns: 2_000_000,
+            }],
+            0,
+        );
+        let got = levels.lock().expect("levels").clone();
+        assert_eq!(got.last().copied(), Some(DigitalLevel::Low));
+        assert_eq!(next_deadline(&ctl), Some(Tick(9_000_000)));
     }
 }
