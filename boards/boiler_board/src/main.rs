@@ -69,7 +69,12 @@ fn wire_adc_inlets(part: &R7F100Gxl, ports: &mut BoardPorts, probes: &mut Vec<Pr
     for (name, channel) in [("adc_inlet", 0usize), ("adc_outlet", 1)] {
         let mut port = InPort::<AnalogVoltage>::new(name).expect(name);
         let pin = part.adc_input(channel);
-        let tap = ProbeTap::new(name, sim_kernel::ProbePolicy::OnChange);
+        let tap = ProbeTap::new(
+            name,
+            sim_kernel::ProbePolicy::MinInterval {
+                min_ns: 10_000_000,
+            },
+        );
         let _wire = Wire::new()
             .source(port.port_mut())
             .sink(move |values, changed| {
