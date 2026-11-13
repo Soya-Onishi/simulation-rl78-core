@@ -174,9 +174,12 @@ static void kick_uart_byte(unsigned char byte) {
     if (uart_busy) {
         return;
     }
-    uart_busy = 1;
-    heat_cmd_byte = byte;
-    SDR00 = byte;
+
+    if(heat_cmd_byte != byte) {
+        uart_busy = 1;
+        heat_cmd_byte = byte;
+        SDR00 = byte;
+    }
 }
 
 int main(void) {
