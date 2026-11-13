@@ -349,7 +349,10 @@ mod tests {
         ArbiterOptions {
             topology_path: PathBuf::from("t.json"),
             node_bin: bin.clone(),
-            plant_bin: bin,
+            plant_bin: bin.clone(),
+            piping_plant_bin: bin.clone(),
+            boiler_plant_bin: bin.clone(),
+            rl78boiler_bin: bin,
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
         }
