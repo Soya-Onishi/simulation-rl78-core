@@ -419,7 +419,7 @@ pub fn run_node<E: Entity>(
     sim.entity_mut().reset();
     ports.clear_pending();
 
-    let mut inspect = if board.kind == "rl78" {
+    let mut inspect = if crate::is_rl78_kind(&board.kind) {
         Some(InspectServer::bind(&opts.iox_root, board_hash)?)
     } else {
         None

@@ -49,7 +49,8 @@ pub struct EndpointSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardSpec {
     pub id: String,
-    /// Board kind string (e.g. `"rl78"`). Validated later by the node.
+    /// Board kind string (e.g. `"rl78"`, `"plant"`, `"piping-plant"`,
+    /// `"boiler-plant"`, `"rl78boiler"`). The arbiter maps kind → binary.
     pub kind: String,
     /// Optional guest firmware source for the node to load.
     ///

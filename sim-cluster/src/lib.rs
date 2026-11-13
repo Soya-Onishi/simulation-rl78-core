@@ -11,6 +11,7 @@ pub mod action;
 pub mod arbiter;
 mod arbiter_catalog;
 pub mod backend;
+pub mod board_kind;
 pub mod board_runtime;
 pub mod cluster_stop;
 pub mod config;
@@ -35,6 +36,9 @@ pub mod vt_clock;
 
 pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
+pub use board_kind::{
+    KIND_BOILER_PLANT, KIND_PIPING_PLANT, KIND_PLANT, KIND_RL78, KIND_RL78BOILER, is_rl78_kind,
+};
 pub use board_runtime::{
     BoardCliError, BoardError, BoardOptions, CatalogAction, CatalogDump, CatalogProbe, board_usage,
     cluster_host_stop_reason, list_catalog, parse_board_args, run_node,

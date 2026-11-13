@@ -878,11 +878,11 @@ fn attach_gdb_slot(
         .find(|node| node.id == board_id)
         .map(|node| node.kind.as_str())
     {
-        Some("rl78") => {}
+        Some(kind) if crate::is_rl78_kind(kind) => {}
         Some(_) => {
             return Err(ApiError::bad_request(
                 "bad_param",
-                "gdb target must be an rl78 board",
+                "gdb target must be an rl78 or rl78boiler board",
             ));
         }
         None => return Err(ApiError::not_found("unknown board")),
