@@ -23,8 +23,9 @@ make build CCRL=/path/to/ccrl CCRL_LIB=/path/to/rl78em4r.lib
 |------|----------|
 | P0.0 | Flow pulse input; Lo→Hi edges counted |
 | P0.1 / P0.2 | `temp_up` / `temp_down`; rising edge ±1 °C (40–50) |
-| ANI0 / ANI1 | Inlet / outlet thermistor, alternate 1 ms, 10-bit → 0.1 °C |
-| UART0 TX | Heat command 0–100 every 10 ms, 9600 8N1 |
+| ANI0 / ANI1 | Inlet / outlet thermistor, alternate 250 µs, 10-bit → 0.1 °C |
+| UART0 TX | Heat command 0–100 every 10 ms (on change), 9600 8N1 |
+| Flow GPIO sample | Every 250 µs (TAU0 tick) |
 | Flow | Every 100 ms: `flow_01 = min(250, N*5)` (0.1 L/min) |
 | Heat cmd | `cmd = min(100, (60*Q*dT)/15000)` with Q,dT in 0.1 units |
 

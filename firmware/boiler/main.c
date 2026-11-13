@@ -4,10 +4,10 @@
  * Pin map (Q39): P0.0 flow pulse, P0.1 temp_up, P0.2 temp_down,
  * ANI0 inlet thermistor, ANI1 outlet thermistor, UART0 TX heat command.
  *
- * Timing (TAU0 ≈ 1 ms/tick, same TPS0/TDR00 as rl78-uart-sample):
- *   every 1 ms  — sample flow GPIO + alternate ADC
- *   every 10 ms — TX heat command byte
- *   every 100 ms — convert Lo→Hi edge count to flow (0.1 L/min units)
+ * Timing (TAU0 ≈ 250 µs/tick; TPS0 same as rl78-uart-sample, TDR00=625):
+ *   every 250 µs — sample flow GPIO + alternate ADC
+ *   every 10 ms  — TX heat command byte (40 ticks)
+ *   every 100 ms — convert Lo→Hi edge count to flow (0.1 L/min units; 400 ticks)
  */
 
 #define INTST0  0x001E
@@ -43,8 +43,9 @@
 #define DI()
 #endif
 
-#define FLOW_WINDOW_MS 100U
-#define UART_PERIOD_MS 10U
+/* 1 tick = 250 µs (TDR00=625). */
+#define FLOW_WINDOW_TICKS 400U /* 100 ms */
+#define UART_PERIOD_TICKS 40U  /* 10 ms */
 #define SETPOINT_MIN_01 400U /* 40.0 °C */
 #define SETPOINT_MAX_01 500U /* 50.0 °C */
 #define FLOW_MAX_01 250U     /* 25.0 L/min */
@@ -87,7 +88,7 @@ static void init_sau(void) {
 static void init_tau(void) {
     TPS0 = 0x0067;
     TMR00 = 0x0000;
-    TDR00 = 2500;
+    TDR00 = 625; /* ≈ 250 µs/tick (was 2500 ≈ 1 ms) */
     TS0 = 0x0001;
 }
 
@@ -184,7 +185,7 @@ static void kick_uart_byte(unsigned char byte) {
 
 int main(void) {
     unsigned short last_tick = 0;
-    unsigned short ms_mod_100 = 0;
+    unsigned short tick_mod_window = 0;
 
     DI();
     timer_count = 0;
@@ -227,9 +228,9 @@ int main(void) {
 
         while (elapsed > 0U) {
             elapsed--;
-            ms_mod_100++;
-            if (ms_mod_100 >= FLOW_WINDOW_MS) {
-                ms_mod_100 = 0;
+            tick_mod_window++;
+            if (tick_mod_window >= FLOW_WINDOW_TICKS) {
+                tick_mod_window = 0;
             }
 
             sample_flow_gpio();
@@ -248,10 +249,10 @@ int main(void) {
                 }
             }
 
-            if ((ms_mod_100 % UART_PERIOD_MS) == 0U) {
+            if ((tick_mod_window % UART_PERIOD_TICKS) == 0U) {
                 kick_uart_byte(compute_heat_cmd());
             }
-            if (ms_mod_100 == 0U) {
+            if (tick_mod_window == 0U) {
                 update_flow_from_window();
             }
         }
