@@ -29,7 +29,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
-Payload = Literal["uart", "digital", "analog", "pulse"]
+Payload = Literal["uart", "digital", "analog", "pulse", "scalar"]
 Direction = Literal["in", "out"]
 
 

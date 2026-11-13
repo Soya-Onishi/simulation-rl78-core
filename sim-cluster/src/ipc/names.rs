@@ -80,6 +80,12 @@ pub fn pulse_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> Stri
     format!("sim-cluster/{cluster_key}/pulse/{edge_id}")
 }
 
+/// Service name for one directed scalar edge (`edge_id` is already hashed).
+#[must_use]
+pub fn scalar_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
+    format!("sim-cluster/{cluster_key}/scalar/{edge_id}")
+}
+
 /// Service name for one board probe point.
 #[must_use]
 pub fn probe(
@@ -202,6 +208,15 @@ mod tests {
         assert_ne!(pulse_edge("k", a), pulse_edge("k", b));
         assert_eq!(pulse_edge("k", a), pulse_edge("k", a));
         assert!(pulse_edge("k", a).contains("/pulse/"));
+    }
+
+    #[test]
+    fn scalar_edge_names_distinguish_similar_edges() {
+        let a = edge_id("piping", "inlet_temp_c", "boiler", "inlet_temp_c");
+        let b = edge_id("piping_inlet", "", "boiler_inlet", "");
+        assert_ne!(scalar_edge("k", a), scalar_edge("k", b));
+        assert_eq!(scalar_edge("k", a), scalar_edge("k", a));
+        assert!(scalar_edge("k", a).contains("/scalar/"));
     }
 
     #[test]

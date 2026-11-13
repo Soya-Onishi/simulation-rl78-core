@@ -12,6 +12,7 @@ mod probe_ctrl;
 mod probe_forward;
 mod pulse_bus;
 mod runtime;
+mod scalar_bus;
 mod uart_bus;
 
 pub use action_bus::{ArbiterNodeActions, ArbiterServerActions, NodeActions, ServerActions};
@@ -27,9 +28,10 @@ pub use names::{
     analog_edge, ctrl_a2n, ctrl_n2a, ctrl_s2a, edge_id, edge_id_logical, log_a2s, log_n2a,
     probe as probe_service_name, probe_a2s, probe_catalog_a2s, probe_csv_a2n, probe_csv_a2s,
     probe_csv_n2a, probe_csv_s2a, probe_query_a2n, probe_query_a2s, probe_query_n2a,
-    probe_query_s2a, probe_watch_s2a, pulse_edge, status_a2s, uart_edge,
+    probe_query_s2a, probe_watch_s2a, pulse_edge, scalar_edge, status_a2s, uart_edge,
 };
 pub use pulse_bus::NodePulsePorts;
+pub use scalar_bus::NodeScalarPorts;
 pub use probe_bus::{
     ProbeAnalogPub, ProbeAnalogSample, ProbeAnalogSub, ProbeDigitalPub, ProbeDigitalSample,
     ProbeDigitalSub, ProbeUartPub, ProbeUartSample, ProbeUartSub, open_analog_publisher,

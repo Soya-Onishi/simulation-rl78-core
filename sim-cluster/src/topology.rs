@@ -25,6 +25,8 @@ pub enum PayloadKind {
     Analog,
     /// Repeating hi/lo width settings ([`sim_kernel::Pulse`]), expanded to GPIO on RX.
     Pulse,
+    /// Domain `f64` sample ([`sim_kernel::Scalar`]); unit is port-defined.
+    Scalar,
 }
 
 /// Direction of an external endpoint relative to the board.

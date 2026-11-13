@@ -61,6 +61,14 @@ impl Pulse {
     }
 }
 
+/// Unitless / domain-defined `f64` sample on a board edge (e.g. ℃ or L/min).
+///
+/// The numeric meaning is fixed by the topology port name and plant docs, not by
+/// this type. Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, ZeroCopySend)]
+pub struct Scalar(pub f64);
+
 /// Analog voltage in microvolts, used as a [`Wire`] payload.
 ///
 /// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).

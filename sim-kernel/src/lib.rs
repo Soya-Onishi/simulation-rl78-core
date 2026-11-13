@@ -64,8 +64,8 @@ pub use stop::StopReason;
 pub use switch::{HoldSwitch, MAX_HOLD_MS};
 pub use virtual_time::{set_global_virtual_time_ns, virtual_time_ns};
 pub use wiring::{
-    AnalogVoltage, DigitalLevel, Pulse, SolidWire, SourcePort, U0, U1, UartFrame, UartParity,
-    UartStopBits, Wire,
+    AnalogVoltage, DigitalLevel, Pulse, Scalar, SolidWire, SourcePort, U0, U1, UartFrame,
+    UartParity, UartStopBits, Wire,
 };
 
 #[cfg(test)]
