@@ -1,0 +1,14 @@
+[package]
+name = "piping-plant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Piping plant for the water-heater cluster simulation"
+
+[[bin]]
+name = "piping-plant"
+path = "src/main.rs"
+
+[dependencies]
+sim-cluster = { path = "../../sim-cluster" }
+sim-kernel = { path = "../../sim-kernel" }

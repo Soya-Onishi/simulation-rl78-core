@@ -5,6 +5,8 @@ members = [
     "boards/rl78-minimal-board",
     "boards/boiler_board",
     "plants/minimal-plant",
+    "plants/piping-plant",
+    "plants/boiler-plant",
     "sim-kernel",
     "sim-cluster",
 ]

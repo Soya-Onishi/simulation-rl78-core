@@ -17,6 +17,7 @@ mod cpu;
 pub mod elf;
 mod entity;
 mod event;
+mod knob;
 mod machine;
 mod plant;
 mod ports;
@@ -50,6 +51,7 @@ pub use cpu::{
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use entity::{AdvanceCtx, Entity, EntityPoll};
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
+pub use knob::Knob;
 pub use machine::Machine;
 pub use plant::{Model, Plant};
 pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
