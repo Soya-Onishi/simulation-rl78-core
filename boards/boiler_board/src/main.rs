@@ -22,8 +22,8 @@ sim_cluster::node!(g23_machine);
 pub fn g23_machine() -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
     let ctl = EventCtl::new();
     let part = R7F100Gxl::new(ctl.clone());
-    let (mut ports, probes) = wire_board_uart0_tx(&part.core);
-    wire_adc_inlets(&part, &mut ports);
+    let (mut ports, mut probes) = wire_board_uart0_tx(&part.core);
+    wire_adc_inlets(&part, &mut ports, &mut probes);
     let flow_expander = wire_flow_pulse(&part, &ctl, &mut ports);
     let (temp_up, temp_down) = wire_temp_switches(&part);
 
@@ -64,19 +64,22 @@ fn wire_board_uart0_tx(core: &Rl78G23Core) -> (BoardPorts, Vec<ProbePoint>) {
     (ports, vec![ProbePoint::Uart(tap)])
 }
 
-/// `adc_inlet` / `adc_outlet` → ANI0 / ANI1.
-fn wire_adc_inlets(part: &R7F100Gxl, ports: &mut BoardPorts) {
+/// `adc_inlet` / `adc_outlet` → ANI0 / ANI1, with Analog [`ProbePoint`]s.
+fn wire_adc_inlets(part: &R7F100Gxl, ports: &mut BoardPorts, probes: &mut Vec<ProbePoint>) {
     for (name, channel) in [("adc_inlet", 0usize), ("adc_outlet", 1)] {
         let mut port = InPort::<AnalogVoltage>::new(name).expect(name);
         let pin = part.adc_input(channel);
+        let tap = ProbeTap::new(name, sim_kernel::ProbePolicy::OnChange);
         let _wire = Wire::new()
             .source(port.port_mut())
             .sink(move |values, changed| {
                 if let Some(&level) = values.get(changed) {
                     pin.drive(level);
                 }
-            });
+            })
+            .sink(tap.callback());
         ports.insert_in(port).expect(name);
+        probes.push(ProbePoint::Analog(tap));
     }
 }
 
@@ -155,6 +158,16 @@ mod tests {
             probes
                 .iter()
                 .any(|p| matches!(p, ProbePoint::Uart(tap) if tap.name() == "uart0"))
+        );
+        assert!(
+            probes
+                .iter()
+                .any(|p| matches!(p, ProbePoint::Analog(tap) if tap.name() == "adc_inlet"))
+        );
+        assert!(
+            probes
+                .iter()
+                .any(|p| matches!(p, ProbePoint::Analog(tap) if tap.name() == "adc_outlet"))
         );
     }
 
