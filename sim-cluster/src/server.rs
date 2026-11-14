@@ -492,7 +492,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         },
         JobKind::Step { id, board_id } => match world.sims.get_mut(&id) {
             Some(sim) => {
-                if sim.state == "exited" {
+                if arbiter_unavailable(sim) {
                     JobReply::Err(ApiError::conflict("arbiter has exited"))
                 } else {
                     match resolve_board_hex(sim, board_id) {
@@ -603,7 +603,7 @@ fn create_simulation(
 }
 
 fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiError> {
-    if sim.state == "exited" || sim.state == "failed" {
+    if arbiter_unavailable(sim) {
         return Err(ApiError::conflict("arbiter has exited"));
     }
     send_cmd(sim, cmd).map_err(ApiError::internal)
@@ -611,6 +611,11 @@ fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiE
 
 fn send_cmd(sim: &mut Simulation, cmd: HostCommand) -> Result<(), String> {
     sim.host.publish_cmd(cmd).map_err(|err| err.to_string())
+}
+
+/// True when the arbiter thread has exited cleanly or failed.
+fn arbiter_unavailable(sim: &Simulation) -> bool {
+    sim.state == "exited" || sim.state == "failed"
 }
 
 /// Resolve a public board id to (hash, human label).
@@ -639,7 +644,7 @@ fn status_event(sim: &Simulation) -> StatusEvent {
 }
 
 fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(), ApiError> {
-    if sim.state == "exited" {
+    if arbiter_unavailable(sim) {
         return Err(ApiError::conflict("arbiter has exited"));
     }
     let (board_hash, _) = resolve_board_hex(sim, request.board_id)?;
