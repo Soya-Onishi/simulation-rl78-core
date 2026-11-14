@@ -39,7 +39,7 @@ help:
 build: build-rust build-web
 
 build-rust:
-	cd "$(ROOT)" && $(CARGO) build -p sim-cluster --bin $(BACKEND_BIN) --bin $(FRONTEND_BIN) $(CARGO_FLAGS)
+	cd "$(ROOT)" && $(CARGO) build --workspace $(CARGO_FLAGS)
 
 build-web:
 	cd "$(ROOT)/sim-cluster/frontend" && $(NPM) ci && $(NPM) run build
@@ -66,6 +66,7 @@ run: build
 	  setsid "$(TARGET_DIR)/$(BACKEND_BIN)" --config "$(BACKEND_CONFIG)" & \
 	  pids="$$!"; \
 	  echo "Started $(BACKEND_BIN) (pid $$pids, config $(BACKEND_CONFIG))"; \
+	  sleep 5; \
 	  setsid "$(TARGET_DIR)/$(FRONTEND_BIN)" --config "$(FRONTEND_CONFIG)" & \
 	  fp="$$!"; \
 	  pids="$$pids $$fp"; \
