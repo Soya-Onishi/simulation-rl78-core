@@ -104,7 +104,9 @@ fn booting_barrier_and_start(
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
     let mut peers = await_booting(topo, control)?;
-    control.publish(&ControlToNode::Start)?;
+    control.publish(&ControlToNode::Start {
+        until_ns: u64::MAX,
+    })?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
@@ -175,7 +177,7 @@ fn await_booting(
 }
 
 /// After [`ControlToNode::ClusterStop`], wait until every peer reports
-/// [`NodeStateWire::Stopped`] so the hard ceiling can be reopened safely.
+/// [`NodeStateWire::Stopped`] before Reset / Start.
 fn await_peers_stopped(
     control: &ArbiterControl,
     peers: &HashMap<String, PeerState>,
@@ -448,23 +450,21 @@ fn run_host_session(
                     log::info!("host Reset");
                     gdb_step = None;
                     until_cap = None;
-                    // ClusterStop, freeze ceiling so stragglers cannot race, wait until
-                    // every board reports Stopped, then Reset and open the ceiling.
+                    // ClusterStop, wait until every board reports Stopped, then Reset + Start.
+                    // Slot 0 is remote-host min VT (not until); do not use it as a freeze ceiling.
                     broadcast_cluster_stop(
                         &control,
                         &mut peers,
                         "server",
                         HostStopReason::ExternalStop,
                     )?;
-                    vt.set_ceiling(vt.min_board_vt());
                     await_peers_stopped(
                         &control,
                         &peers,
                         Duration::from_millis(topo.booting_timeout_ms),
                     )?;
                     control.publish(&ControlToNode::Reset)?;
-                    vt.set_ceiling(u64::MAX);
-                    broadcast_start(&control, &mut peers)?;
+                    broadcast_start(&control, &mut peers, None)?;
                     running = true;
                     last_stop_reason = None;
                     log::info!("host Reset: Start");
@@ -624,8 +624,8 @@ fn reached_until(until_ns: Option<u64>, now_ns: u64) -> bool {
 }
 
 /// Apply a host Start: stay/stop if `until_ns` is not ahead of now, otherwise
-/// write the shared-memory ceiling and broadcast Start (Stopped resumes;
-/// Running retargets).
+/// broadcast Start with `until_ns` (Stopped resumes; Running retargets).
+/// Slot 0 is not written — remote min VT only; until is carried on the Start message.
 fn apply_start(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
@@ -650,8 +650,7 @@ fn apply_start(
     }
 
     *until_cap = until_ns;
-    vt.set_ceiling(until_ns.unwrap_or(u64::MAX));
-    broadcast_start(control, peers)?;
+    broadcast_start(control, peers, until_ns)?;
     *running = true;
     *last_stop_reason = None;
     Ok(())
@@ -688,12 +687,15 @@ fn apply_gdb_step(
 fn broadcast_start(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
+    until_ns: Option<u64>,
 ) -> Result<(), ArbiterError> {
-    control.publish(&ControlToNode::Start)?;
+    control.publish(&ControlToNode::Start {
+        until_ns: until_ns.unwrap_or(u64::MAX),
+    })?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
-    log::info!("Start broadcast");
+    log::info!("Start broadcast until_ns={until_ns:?}");
     Ok(())
 }
 
@@ -740,8 +742,7 @@ fn step_time_sync(
         let target = gdb_catchup_target(topo, vt, &source)?;
         log::info!("gdb Step from '{source}' ({reason}) vt={target}; catch-up");
         *until_ns = Some(target);
-        vt.set_ceiling(target);
-        broadcast_start(control, peers)?;
+        broadcast_start(control, peers, Some(target))?;
         *running = true;
         *last_stop_reason = None;
         *gdb_step = Some(GdbStepPhase::CatchUp { reason });
@@ -1048,18 +1049,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_start_writes_ceiling_from_until() {
+    fn allowed_uses_remote_min_not_until_slot() {
         let dir = tempfile::tempdir().unwrap();
         let vt = VtClock::create(dir.path(), 2).unwrap();
         vt.write_board_vt(1, 10);
         vt.write_board_vt(2, 20);
-        // Unlimited start.
-        vt.set_ceiling(u64::MAX);
+        // No remote → allowed = min(boards) + margin.
+        vt.set_remote_min_ns(u64::MAX);
         assert_eq!(vt.allowed_ns(5), 15);
-        // Hard until below min+margin clamps allowed.
-        vt.set_ceiling(12);
-        assert_eq!(vt.allowed_ns(5), 12);
-        // until behind now → stay-stopped helper.
+        // Remote min below local min → allowed = remote + margin.
+        vt.set_remote_min_ns(8);
+        assert_eq!(vt.allowed_ns(5), 13);
+        // until behind now → stay-stopped helper (until is not in slot 0).
         assert!(should_stay_stopped(Some(10), 20));
         assert!(!should_stay_stopped(Some(30), 20));
     }
@@ -1182,7 +1183,7 @@ mod tests {
                             });
                         }
                     }
-                    ControlToNode::Start => {
+                    ControlToNode::Start { .. } => {
                         got_start = true;
                         if inject_host_stop {
                             let _ = control.publish(&ControlToArbiter::HostStop {

@@ -4,5 +4,6 @@ listen:
 servers:
   - ip: 127.0.0.1
     port: 8091
+    max_nodes: 16
 # Relative to this YAML file's directory. Checked into the repo for unit tests.
 web_root: web_root

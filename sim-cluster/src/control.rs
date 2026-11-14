@@ -90,8 +90,10 @@ pub enum ControlToNode {
     GetState,
     /// Simulation may enter Running (always broadcast).
     ///
-    /// The node reads the shared vt_clock for the allowed virtual-time ceiling.
-    Start,
+    /// `until_ns` caps node `SetAllowed` together with
+    /// [`crate::vt_clock::VtClock::allowed_ns`] (`u64::MAX` = no host until).
+    /// Slot 0 of vt_clock is remote-host min VT, not until.
+    Start { until_ns: u64 },
     /// Host-initiated cluster stop (always broadcast; no ack on same host).
     ClusterStop { reason: HostStopReason },
     /// Hold-reset devices and the CPU via [`sim_kernel::Resettable`].

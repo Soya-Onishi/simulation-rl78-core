@@ -32,6 +32,7 @@ iceoryx2-bb-system-types = "0.9.3"
 sim-kernel = { path = "../sim-kernel" }
 log = "0.4"
 memmap2 = "0.9"
+socket2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

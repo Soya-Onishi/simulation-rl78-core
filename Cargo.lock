@@ -1465,6 +1465,7 @@ dependencies = [
  "serde_yaml",
  "serial_test",
  "sim-kernel",
+ "socket2",
  "tempfile",
  "thiserror",
  "tokio",
