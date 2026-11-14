@@ -39,6 +39,7 @@ help:
 build: build-rust build-web
 
 build-rust:
+	git submodule update --init --resursive
 	cd "$(ROOT)" && $(CARGO) build --workspace $(CARGO_FLAGS)
 
 build-web:
