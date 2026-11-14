@@ -1,0 +1,18 @@
+[package]
+name = "boiler_board"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "RL78 water-heater board process for multi-board cluster simulation"
+
+[[bin]]
+name = "boiler_board"
+path = "src/main.rs"
+
+[dependencies]
+rl78 = { path = "../../hw/cpus/rl78" }
+sim-cluster = { path = "../../sim-cluster" }
+sim-kernel = { path = "../../sim-kernel" }
+
+[dev-dependencies]
+serial_test = "3.5.0"

@@ -23,6 +23,10 @@ pub enum PayloadKind {
     Uart,
     Digital,
     Analog,
+    /// Repeating hi/lo width settings ([`sim_kernel::Pulse`]), expanded to GPIO on RX.
+    Pulse,
+    /// Domain `f64` sample ([`sim_kernel::Scalar`]); unit is port-defined.
+    Scalar,
 }
 
 /// Direction of an external endpoint relative to the board.
@@ -45,7 +49,8 @@ pub struct EndpointSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardSpec {
     pub id: String,
-    /// Board kind string (e.g. `"rl78"`). Validated later by the node.
+    /// Board kind string (e.g. `"rl78"`, `"plant"`, `"piping-plant"`,
+    /// `"boiler-plant"`, `"rl78boiler"`). The arbiter maps kind → binary.
     pub kind: String,
     /// Optional guest firmware source for the node to load.
     ///

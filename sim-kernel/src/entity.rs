@@ -52,7 +52,7 @@ pub trait Entity: Send {
         ))
     }
 
-    /// Host-invocable actions. Empty for a plant.
+    /// Host-invocable actions. Default empty; [`crate::Plant`] may override.
     #[must_use]
     fn action_catalog(&self) -> Vec<ActionCatalogEntry> {
         Vec::new()

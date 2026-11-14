@@ -68,9 +68,16 @@ pub enum ArbiterError {
 #[derive(Clone, Debug)]
 pub struct ArbiterOptions {
     pub topology_path: PathBuf,
+    /// Binary for [`crate::KIND_RL78`]. Default: `rl78-minimal-board` next to the arbiter.
     pub node_bin: PathBuf,
-    /// Plant node binary (`kind == "plant"`). Default: `minimal-plant` next to the arbiter.
+    /// Binary for [`crate::KIND_PLANT`]. Default: `minimal-plant` next to the arbiter.
     pub plant_bin: PathBuf,
+    /// Binary for [`crate::KIND_PIPING_PLANT`]. Default: `piping-plant` next to the arbiter.
+    pub piping_plant_bin: PathBuf,
+    /// Binary for [`crate::KIND_BOILER_PLANT`]. Default: `boiler-plant` next to the arbiter.
+    pub boiler_plant_bin: PathBuf,
+    /// Binary for [`crate::KIND_RL78BOILER`]. Default: `boiler_board` next to the arbiter.
+    pub rl78boiler_bin: PathBuf,
     /// Unique key for this cluster instance (iceoryx isolation + service names).
     pub cluster_key: String,
     /// Absolute iceoryx root path for this cluster.
@@ -89,6 +96,9 @@ impl ArbiterOptions {
             topology_path,
             node_bin: exe_dir.join("rl78-minimal-board"),
             plant_bin: exe_dir.join("minimal-plant"),
+            piping_plant_bin: exe_dir.join("piping-plant"),
+            boiler_plant_bin: exe_dir.join("boiler-plant"),
+            rl78boiler_bin: exe_dir.join("boiler_board"),
             cluster_key,
             iox_root,
         })
@@ -785,44 +795,50 @@ fn analog_millivolts_u16(uv: i64) -> u16 {
     uv.saturating_div(1000).clamp(0, i64::from(u16::MAX)) as u16
 }
 
+const KNOWN_KINDS: &str = "rl78, plant, piping-plant, boiler-plant, or rl78boiler";
+
 pub(crate) fn binary_for_kind<'a>(
     opts: &'a ArbiterOptions,
     kind: &str,
 ) -> Result<&'a PathBuf, ArbiterError> {
     match kind {
-        "rl78" => Ok(&opts.node_bin),
-        "plant" => Ok(&opts.plant_bin),
+        crate::KIND_RL78 => Ok(&opts.node_bin),
+        crate::KIND_PLANT => Ok(&opts.plant_bin),
+        crate::KIND_PIPING_PLANT => Ok(&opts.piping_plant_bin),
+        crate::KIND_BOILER_PLANT => Ok(&opts.boiler_plant_bin),
+        crate::KIND_RL78BOILER => Ok(&opts.rl78boiler_bin),
         other => Err(ArbiterError::Message(format!(
-            "unknown board kind `{other}` (expected rl78 or plant)"
+            "unknown board kind `{other}` (expected {KNOWN_KINDS})"
         ))),
     }
 }
 
+fn missing_bin_hint(kind: &str) -> &'static str {
+    match kind {
+        crate::KIND_RL78 => "build rl78-minimal-board or pass --node-bin",
+        crate::KIND_PLANT => "build minimal-plant or pass --plant-bin",
+        crate::KIND_PIPING_PLANT => "build piping-plant or pass --piping-plant-bin",
+        crate::KIND_BOILER_PLANT => "build boiler-plant or pass --boiler-plant-bin",
+        crate::KIND_RL78BOILER => "build boiler_board or pass --rl78boiler-bin",
+        _ => "pass the matching --*-bin flag",
+    }
+}
+
 fn ensure_node_bins(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(), ArbiterError> {
-    let mut need_rl78 = false;
-    let mut need_plant = false;
+    let mut checked = HashSet::new();
     for board in &topo.boards {
-        match board.kind.as_str() {
-            "rl78" => need_rl78 = true,
-            "plant" => need_plant = true,
-            other => {
-                return Err(ArbiterError::Message(format!(
-                    "unknown board kind `{other}` (expected rl78 or plant)"
-                )));
-            }
+        if !checked.insert(board.kind.as_str()) {
+            continue;
         }
-    }
-    if need_rl78 && !opts.node_bin.is_file() {
-        return Err(ArbiterError::Message(format!(
-            "board binary not found at {} (build rl78-minimal-board or pass --node-bin)",
-            opts.node_bin.display()
-        )));
-    }
-    if need_plant && !opts.plant_bin.is_file() {
-        return Err(ArbiterError::Message(format!(
-            "plant binary not found at {} (build minimal-plant or pass --plant-bin)",
-            opts.plant_bin.display()
-        )));
+        let bin = binary_for_kind(opts, &board.kind)?;
+        if !bin.is_file() {
+            return Err(ArbiterError::Message(format!(
+                "{} binary not found at {} ({})",
+                board.kind,
+                bin.display(),
+                missing_bin_hint(&board.kind)
+            )));
+        }
     }
     Ok(())
 }
@@ -980,17 +996,69 @@ mod tests {
     }
 
     #[test]
-    fn binary_for_kind_selects_rl78_and_plant() {
+    fn binary_for_kind_selects_known_kinds() {
         let opts = ArbiterOptions {
             topology_path: PathBuf::from("t.json"),
             node_bin: PathBuf::from("/tmp/rl78-minimal-board"),
             plant_bin: PathBuf::from("/tmp/minimal-plant"),
+            piping_plant_bin: PathBuf::from("/tmp/piping-plant"),
+            boiler_plant_bin: PathBuf::from("/tmp/boiler-plant"),
+            rl78boiler_bin: PathBuf::from("/tmp/boiler_board"),
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
         };
-        assert_eq!(binary_for_kind(&opts, "rl78").unwrap(), &opts.node_bin);
-        assert_eq!(binary_for_kind(&opts, "plant").unwrap(), &opts.plant_bin);
+        assert_eq!(
+            binary_for_kind(&opts, crate::KIND_RL78).unwrap(),
+            &opts.node_bin
+        );
+        assert_eq!(
+            binary_for_kind(&opts, crate::KIND_PLANT).unwrap(),
+            &opts.plant_bin
+        );
+        assert_eq!(
+            binary_for_kind(&opts, crate::KIND_PIPING_PLANT).unwrap(),
+            &opts.piping_plant_bin
+        );
+        assert_eq!(
+            binary_for_kind(&opts, crate::KIND_BOILER_PLANT).unwrap(),
+            &opts.boiler_plant_bin
+        );
+        assert_eq!(
+            binary_for_kind(&opts, crate::KIND_RL78BOILER).unwrap(),
+            &opts.rl78boiler_bin
+        );
         assert!(binary_for_kind(&opts, "avr").is_err());
+    }
+
+    #[test]
+    fn ensure_node_bins_reports_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present-bin");
+        fs::write(&present, b"x").unwrap();
+        let opts = ArbiterOptions {
+            topology_path: PathBuf::from("t.json"),
+            node_bin: present,
+            plant_bin: dir.path().join("missing-plant"),
+            piping_plant_bin: dir.path().join("missing-piping"),
+            boiler_plant_bin: dir.path().join("missing-boiler"),
+            rl78boiler_bin: dir.path().join("missing-rl78boiler"),
+            cluster_key: "k".into(),
+            iox_root: PathBuf::from("/tmp/iox"),
+        };
+        let topo = LogicalTopology {
+            boards: vec![BoardSpec {
+                id: "p".into(),
+                kind: crate::KIND_PLANT.into(),
+                elf: None,
+                endpoints: vec![],
+            }],
+            edges: vec![],
+            margin_ns: 1,
+            booting_timeout_ms: 1000,
+        };
+        let err = ensure_node_bins(&opts, &topo).unwrap_err().to_string();
+        assert!(err.contains("plant binary not found"), "{err}");
+        assert!(err.contains("--plant-bin"), "{err}");
     }
 
     #[test]

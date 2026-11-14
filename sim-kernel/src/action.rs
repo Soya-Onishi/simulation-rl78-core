@@ -149,6 +149,7 @@ pub trait Device: Send + Resettable {
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeviceError {
     EmptyName,
+    BadConfig,
     DuplicateDevice { name: String },
 }
 
@@ -156,6 +157,7 @@ impl std::fmt::Display for DeviceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyName => write!(f, "device name is empty"),
+            Self::BadConfig => write!(f, "device configuration is invalid"),
             Self::DuplicateDevice { name } => write!(f, "duplicate device '{name}'"),
         }
     }

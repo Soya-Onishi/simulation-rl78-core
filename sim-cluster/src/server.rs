@@ -532,6 +532,9 @@ fn create_simulation(
         topology_path: topo_path.clone(),
         node_bin: exe_dir.join("rl78-minimal-board"),
         plant_bin: exe_dir.join("minimal-plant"),
+        piping_plant_bin: exe_dir.join("piping-plant"),
+        boiler_plant_bin: exe_dir.join("boiler-plant"),
+        rl78boiler_bin: exe_dir.join("boiler_board"),
         cluster_key: id.clone(),
         iox_root: iox_root.clone(),
     };

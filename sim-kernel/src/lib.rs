@@ -17,10 +17,12 @@ mod cpu;
 pub mod elf;
 mod entity;
 mod event;
+mod knob;
 mod machine;
 mod plant;
 mod ports;
 mod probe;
+mod pulse;
 mod reset;
 mod sim;
 mod stop;
@@ -49,10 +51,12 @@ pub use cpu::{
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use entity::{AdvanceCtx, Entity, EntityPoll};
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
+pub use knob::Knob;
 pub use machine::Machine;
 pub use plant::{Model, Plant};
 pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
 pub use probe::{ProbePoint, ProbePolicy, ProbeSample, ProbeTap};
+pub use pulse::PulseExpander;
 pub use reset::Resettable;
 pub use sim::{
     BeforeQuantum, DEFAULT_MAX_QUANTUM, SimConfig, SimControl, SimEvents, SimState, Simulator,
@@ -62,8 +66,8 @@ pub use stop::StopReason;
 pub use switch::{HoldSwitch, MAX_HOLD_MS};
 pub use virtual_time::{set_global_virtual_time_ns, virtual_time_ns};
 pub use wiring::{
-    AnalogVoltage, DigitalLevel, SolidWire, SourcePort, U0, U1, UartFrame, UartParity,
-    UartStopBits, Wire,
+    AnalogVoltage, DigitalLevel, Pulse, Scalar, SolidWire, SourcePort, U0, U1, UartFrame,
+    UartParity, UartStopBits, Wire,
 };
 
 #[cfg(test)]
