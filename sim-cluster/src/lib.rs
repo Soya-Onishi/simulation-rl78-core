@@ -34,7 +34,7 @@ pub mod server;
 pub mod topology;
 pub mod vt_clock;
 
-pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
+pub use arbiter::{ArbiterError, ArbiterOptions};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
 pub use board_kind::{
     KIND_BOILER_PLANT, KIND_PIPING_PLANT, KIND_PLANT, KIND_RL78, KIND_RL78BOILER, is_rl78_kind,

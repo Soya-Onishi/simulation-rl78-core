@@ -6,8 +6,7 @@
 //! run. `shutdown` on the server→arbiter channel ends the session.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,7 +37,7 @@ use crate::host::{HostCommand, SessionNode, SessionStatus};
 use crate::ipc::{
     ArbiterControl, ArbiterHostPort, ArbiterLink, ArbiterLogBus, ArbiterNodeActions,
     ArbiterProbeCtrl, ArbiterProbeForward, ArbiterServerActions, IpcError, board_hash_table,
-    create_node, isolated_config, new_cluster_key, open_pair, root_path_for_cluster,
+    create_node, isolated_config,
 };
 use crate::lifecycle::{PeerEffect, PeerState};
 use crate::probe::ProbeWireKind;
@@ -64,7 +63,7 @@ pub enum ArbiterError {
     Message(String),
 }
 
-/// Options for [`run_arbiter`].
+/// Options for [`run_arbiter_with_topology`].
 #[derive(Clone, Debug)]
 pub struct ArbiterOptions {
     pub topology_path: PathBuf,
@@ -82,34 +81,6 @@ pub struct ArbiterOptions {
     pub cluster_key: String,
     /// Absolute iceoryx root path for this cluster.
     pub iox_root: PathBuf,
-}
-
-impl ArbiterOptions {
-    pub fn from_topology_path(topology_path: PathBuf) -> Result<Self, ArbiterError> {
-        let exe = std::env::current_exe().map_err(ArbiterError::Io)?;
-        let exe_dir = exe
-            .parent()
-            .ok_or_else(|| ArbiterError::Message("current_exe has no parent".into()))?;
-        let cluster_key = new_cluster_key();
-        let iox_root = root_path_for_cluster(&cluster_key);
-        Ok(Self {
-            topology_path,
-            node_bin: exe_dir.join("rl78-minimal-board"),
-            plant_bin: exe_dir.join("minimal-plant"),
-            piping_plant_bin: exe_dir.join("piping-plant"),
-            boiler_plant_bin: exe_dir.join("boiler-plant"),
-            rl78boiler_bin: exe_dir.join("boiler_board"),
-            cluster_key,
-            iox_root,
-        })
-    }
-}
-
-/// Load topology, spawn nodes, wait until nodes leave Booting, then follow host commands.
-pub fn run_arbiter(opts: &ArbiterOptions, link: ArbiterLink) -> Result<(), ArbiterError> {
-    let text = fs::read_to_string(&opts.topology_path)?;
-    let topo = LogicalTopology::from_json_str(&text)?;
-    run_arbiter_with_topology(opts, &topo, link)
 }
 
 /// Spawn nodes and stay up until the server publishes `shutdown`.
@@ -958,23 +929,18 @@ fn warn_peer(board_id: &str, effect: Option<PeerEffect>) -> Result<(), ArbiterEr
     Ok(())
 }
 
-/// Convenience helper: topology path only (creates a throwaway server link half).
-pub fn run_arbiter_from_path(topology_path: &Path) -> Result<(), ArbiterError> {
-    let opts = ArbiterOptions::from_topology_path(topology_path.to_path_buf())?;
-    let (_server, link) = open_pair();
-    run_arbiter(&opts, link)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::{
         ArbiterControl, NodeControl, board_hash_table, board_id_hash, create_node, isolated_config,
+        open_pair,
     };
     use crate::topology::{
         BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, PayloadKind, PortRef,
     };
     use serial_test::serial;
+    use std::fs;
     use std::sync::{Arc, Mutex};
     use std::thread;
 
