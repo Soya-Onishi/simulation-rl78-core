@@ -243,8 +243,6 @@ impl ProbeQueryReplyWire {
     }
 }
 
-type WatchPub = Publisher<ipc::Service, ProbeWatchWire, ()>;
-type WatchSub = Subscriber<ipc::Service, ProbeWatchWire, ()>;
 type QueryPub = Publisher<ipc::Service, ProbeQueryWire, ()>;
 type QuerySub = Subscriber<ipc::Service, ProbeQueryWire, ()>;
 type ReplyPub = Publisher<ipc::Service, ProbeQueryReplyWire, ()>;
@@ -336,97 +334,11 @@ fn node_slots(board_count: usize) -> usize {
     board_count.max(1) + 4
 }
 
-/// Server-owned watch publisher and query ports.
-pub struct ServerProbeCtrl {
-    watch: WatchPub,
-    query: QueryPub,
-    reply: ReplySub,
-    csv: QueryPub,
-    csv_reply: ReplySub,
-}
-
-impl ServerProbeCtrl {
-    pub fn create(
-        node: &Node<ipc::Service>,
-        cluster_key: &str,
-        board_count: usize,
-    ) -> Result<Self, IpcError> {
-        let watch_name = names::probe_watch_s2a(cluster_key);
-        let query_name = names::probe_query_s2a(cluster_key);
-        let reply_name = names::probe_query_a2s(cluster_key);
-        let csv_name = names::probe_csv_s2a(cluster_key);
-        let csv_reply_name = names::probe_csv_a2s(cluster_key);
-        let watch = qos::<ProbeWatchWire>(node, &watch_name, 1, 1, 4, WATCH_BUFFER, true, true)?;
-        let query = qos::<ProbeQueryWire>(node, &query_name, 1, 1, 4, WATCH_BUFFER, true, true)?;
-        let reply = qos::<ProbeQueryReplyWire>(
-            node,
-            &reply_name,
-            1,
-            1,
-            4,
-            QUERY_BUFFER.saturating_mul(board_count.max(1)),
-            false,
-            true,
-        )?;
-        let csv = qos::<ProbeQueryWire>(node, &csv_name, 1, 1, 4, WATCH_BUFFER, true, true)?;
-        let csv_reply = qos::<ProbeQueryReplyWire>(
-            node,
-            &csv_reply_name,
-            1,
-            1,
-            4,
-            QUERY_BUFFER.saturating_mul(board_count.max(1)),
-            true,
-            true,
-        )?;
-        Ok(Self {
-            watch: publisher(watch, &watch_name)?,
-            query: publisher(query, &query_name)?,
-            reply: subscriber(reply, &reply_name)?,
-            csv: publisher(csv, &csv_name)?,
-            csv_reply: subscriber(csv_reply, &csv_reply_name)?,
-        })
-    }
-
-    pub fn publish_watch(&self, sample: ProbeWatchWire) -> Result<(), IpcError> {
-        self.watch
-            .send_copy(sample)
-            .map_err(|e| IpcError::Message(format!("probe watch s2a send: {e:?}")))?;
-        Ok(())
-    }
-
-    pub fn publish_query(&self, sample: ProbeQueryWire) -> Result<(), IpcError> {
-        self.query
-            .send_copy(sample)
-            .map_err(|e| IpcError::Message(format!("probe query s2a send: {e:?}")))?;
-        Ok(())
-    }
-
-    pub fn try_reply(&self) -> Result<Option<ProbeQueryReplyWire>, IpcError> {
-        recv(&self.reply, "probe query a2s")
-    }
-
-    pub fn publish_csv(&self, sample: ProbeQueryWire) -> Result<(), IpcError> {
-        self.csv
-            .send_copy(sample)
-            .map_err(|e| IpcError::Message(format!("probe csv s2a send: {e:?}")))?;
-        Ok(())
-    }
-
-    pub fn try_csv_reply(&self) -> Result<Option<ProbeQueryReplyWire>, IpcError> {
-        recv(&self.csv_reply, "probe csv a2s")
-    }
-}
-
-/// Arbiter side of server watch/query channels and node query channels.
+/// Arbiter side: server legs via mpsc, node query/csv legs via iceoryx.
 pub struct ArbiterProbeCtrl {
-    watch_s2a: WatchSub,
-    query_s2a: QuerySub,
-    query_a2s: ReplyPub,
+    server: super::server_arbiter::ArbiterProbeServer,
     query_a2n: QueryPub,
     query_n2a: ReplySub,
-    csv_s2a: QuerySub,
-    csv_a2s: ReplyPub,
     csv_a2n: QueryPub,
     csv_n2a: ReplySub,
 }
@@ -436,26 +348,11 @@ impl ArbiterProbeCtrl {
         node: &Node<ipc::Service>,
         cluster_key: &str,
         board_count: usize,
+        server: super::server_arbiter::ArbiterProbeServer,
     ) -> Result<Self, IpcError> {
         let slots = node_slots(board_count);
-        let watch_name = names::probe_watch_s2a(cluster_key);
-        let query_s2a_name = names::probe_query_s2a(cluster_key);
-        let query_a2s_name = names::probe_query_a2s(cluster_key);
         let query_a2n_name = names::probe_query_a2n(cluster_key);
         let query_n2a_name = names::probe_query_n2a(cluster_key);
-        let watch = qos::<ProbeWatchWire>(node, &watch_name, 1, 1, 4, WATCH_BUFFER, true, false)?;
-        let query_s2a =
-            qos::<ProbeQueryWire>(node, &query_s2a_name, 1, 1, 4, WATCH_BUFFER, true, false)?;
-        let query_a2s = qos::<ProbeQueryReplyWire>(
-            node,
-            &query_a2s_name,
-            1,
-            1,
-            4,
-            QUERY_BUFFER.saturating_mul(board_count.max(1)),
-            false,
-            false,
-        )?;
         let query_a2n = qos::<ProbeQueryWire>(
             node,
             &query_a2n_name,
@@ -476,22 +373,8 @@ impl ArbiterProbeCtrl {
             false,
             true,
         )?;
-        let csv_s2a_name = names::probe_csv_s2a(cluster_key);
-        let csv_a2s_name = names::probe_csv_a2s(cluster_key);
         let csv_a2n_name = names::probe_csv_a2n(cluster_key);
         let csv_n2a_name = names::probe_csv_n2a(cluster_key);
-        let csv_s2a =
-            qos::<ProbeQueryWire>(node, &csv_s2a_name, 1, 1, 4, WATCH_BUFFER, true, false)?;
-        let csv_a2s = qos::<ProbeQueryReplyWire>(
-            node,
-            &csv_a2s_name,
-            1,
-            1,
-            4,
-            QUERY_BUFFER.saturating_mul(board_count.max(1)),
-            true,
-            false,
-        )?;
         let csv_a2n = qos::<ProbeQueryWire>(
             node,
             &csv_a2n_name,
@@ -513,24 +396,20 @@ impl ArbiterProbeCtrl {
             true,
         )?;
         Ok(Self {
-            watch_s2a: subscriber(watch, &watch_name)?,
-            query_s2a: subscriber(query_s2a, &query_s2a_name)?,
-            query_a2s: blocking_publisher(query_a2s, &query_a2s_name)?,
+            server,
             query_a2n: publisher(query_a2n, &query_a2n_name)?,
             query_n2a: subscriber(query_n2a, &query_n2a_name)?,
-            csv_s2a: subscriber(csv_s2a, &csv_s2a_name)?,
-            csv_a2s: publisher(csv_a2s, &csv_a2s_name)?,
             csv_a2n: publisher(csv_a2n, &csv_a2n_name)?,
             csv_n2a: subscriber(csv_n2a, &csv_n2a_name)?,
         })
     }
 
     pub fn try_watch(&self) -> Result<Option<ProbeWatchWire>, IpcError> {
-        recv(&self.watch_s2a, "probe watch s2a")
+        self.server.try_watch()
     }
 
     pub fn try_query(&self) -> Result<Option<ProbeQueryWire>, IpcError> {
-        recv(&self.query_s2a, "probe query s2a")
+        self.server.try_query()
     }
 
     pub fn publish_query_to_nodes(&self, sample: ProbeQueryWire) -> Result<(), IpcError> {
@@ -545,14 +424,11 @@ impl ArbiterProbeCtrl {
     }
 
     pub fn publish_reply_to_server(&self, sample: ProbeQueryReplyWire) -> Result<(), IpcError> {
-        self.query_a2s
-            .send_copy(sample)
-            .map_err(|e| IpcError::Message(format!("probe query a2s send: {e:?}")))?;
-        Ok(())
+        self.server.publish_reply_to_server(sample)
     }
 
     pub fn try_csv(&self) -> Result<Option<ProbeQueryWire>, IpcError> {
-        recv(&self.csv_s2a, "probe csv s2a")
+        self.server.try_csv()
     }
 
     pub fn publish_csv_to_nodes(&self, sample: ProbeQueryWire) -> Result<(), IpcError> {
@@ -567,10 +443,7 @@ impl ArbiterProbeCtrl {
     }
 
     pub fn publish_csv_to_server(&self, sample: ProbeQueryReplyWire) -> Result<(), IpcError> {
-        self.csv_a2s
-            .send_copy(sample)
-            .map_err(|e| IpcError::Message(format!("probe csv a2s send: {e:?}")))?;
-        Ok(())
+        self.server.publish_csv_to_server(sample)
     }
 }
 
@@ -685,6 +558,7 @@ mod tests {
     use super::*;
     use crate::ipc::HashedId;
     use crate::ipc::runtime::{create_node, isolated_config};
+    use crate::ipc::server_arbiter;
     use crate::probe_log::{ProbeKind, ProbeRecord};
 
     #[test]
@@ -692,10 +566,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = format!("pq-{}", std::process::id());
         let config = isolated_config(&dir.path().join("iox")).unwrap();
-        let server_node = create_node(&config, "pq-server").unwrap();
-        let server = ServerProbeCtrl::create(&server_node, &key, 1).unwrap();
+        let (server_link, arb_link) = server_arbiter::open_pair();
+        let server = server_link.probe_ctrl;
         let arb_node = create_node(&config, "pq-arb").unwrap();
-        let arb = ArbiterProbeCtrl::open(&arb_node, &key, 1).unwrap();
+        let arb = ArbiterProbeCtrl::open(&arb_node, &key, 1, arb_link.probe_ctrl_server).unwrap();
         let node = create_node(&config, "pq-node").unwrap();
         let node_q = NodeProbeQuery::open(&node, &key, 1).unwrap();
 

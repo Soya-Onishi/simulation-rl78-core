@@ -13,10 +13,6 @@ path = "src/bin/simulation_frontend.rs"
 name = "cluster-backend"
 path = "src/bin/cluster_backend.rs"
 
-[[bin]]
-name = "cluster-arbiter"
-path = "src/bin/cluster_arbiter.rs"
-
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["fs"] }

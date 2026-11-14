@@ -1,11 +1,11 @@
 //! Multi-board cluster support: logical topology, singleton server, and
-//! arbiter/board process helpers.
+//! arbiter/board helpers.
 //!
-//! Process IPC (iceoryx2 pub/sub) lives here so [`sim_kernel`] stays free of
-//! transport dependencies. Architecture crates and the single-board CLI are
-//! unchanged. Board/plant binaries use [`node!`] + [`board_runtime::run_node`]
-//! for the shared cluster participation loop (see `rl78-minimal-board` /
-//! `minimal-plant`).
+//! Arbiter↔node IPC (iceoryx2 pub/sub) lives here so [`sim_kernel`] stays free
+//! of transport dependencies. Server↔arbiter uses in-process mpsc. Architecture
+//! crates and the single-board CLI are unchanged. Board/plant binaries use
+//! [`node!`] + [`board_runtime::run_node`] for the shared cluster participation
+//! loop (see `rl78-minimal-board` / `minimal-plant`).
 
 pub mod action;
 pub mod arbiter;
@@ -34,7 +34,7 @@ pub mod server;
 pub mod topology;
 pub mod vt_clock;
 
-pub use arbiter::{ArbiterError, ArbiterOptions, run_arbiter, run_arbiter_from_path};
+pub use arbiter::{ArbiterError, ArbiterOptions};
 pub use backend::{LocalBackend, SimulationBackend, TcpipBackend};
 pub use board_kind::{
     KIND_BOILER_PLANT, KIND_PIPING_PLANT, KIND_PLANT, KIND_RL78, KIND_RL78BOILER, is_rl78_kind,

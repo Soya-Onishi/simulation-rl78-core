@@ -1,20 +1,19 @@
 //! Long-lived simulation worker used by `cluster-backend`.
 //!
 //! Internal HTTP is served by [`crate::backend::serve_internal`]; this module
-//! owns arbiter processes and the control-plane job queue used by
+//! owns per-simulation arbiter threads and the control-plane job queue used by
 //! [`crate::backend::LocalBackend`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use iceoryx2::prelude::{Node, ipc};
-
 use crate::action::{ActionRequest, ActionUpstream};
+use crate::arbiter::{ArbiterOptions, run_arbiter_with_topology};
 use crate::backend::LocalBackend;
 use crate::contract::{
     ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
@@ -25,7 +24,7 @@ use crate::inspect::{InspectReply, InspectRequest, inspect_rpc, inspect_sock_pat
 use crate::ipc::{
     IpcError, MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeQueryWire, ProbeWatchWire,
     ServerActions, ServerHostPort, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox,
-    board_id_hash, create_node, isolated_config, new_cluster_key, root_path_for_cluster,
+    board_id_hash, new_cluster_key, open_pair, root_path_for_cluster,
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
@@ -41,23 +40,18 @@ const LOG_CAP: usize = 100;
 /// Live batches kept while `/probes/stream` is between reconnects.
 const WATCH_PENDING_KEEP: usize = 64;
 
+/// Max wait after Shutdown before dropping the arbiter [`JoinHandle`].
+const ARBITER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Options for [`spawn_worker`].
-#[derive(Clone, Debug)]
-pub struct ServerOptions {
-    /// Path to the `cluster-arbiter` executable.
-    pub arbiter_bin: PathBuf,
-}
+#[derive(Clone, Debug, Default)]
+pub struct ServerOptions {}
 
 impl ServerOptions {
-    /// Sibling `cluster-arbiter` next to this process.
+    /// Construct options for the current `cluster-backend` process.
     pub fn from_current_exe() -> Result<Self, ServerError> {
-        let exe = std::env::current_exe().map_err(ServerError::Io)?;
-        let exe_dir = exe
-            .parent()
-            .ok_or_else(|| ServerError::Message("current_exe has no parent".into()))?;
-        Ok(Self {
-            arbiter_bin: exe_dir.join("cluster-arbiter"),
-        })
+        let _ = std::env::current_exe().map_err(ServerError::Io)?;
+        Ok(Self {})
     }
 }
 
@@ -225,13 +219,12 @@ struct World {
     sims: HashMap<String, Simulation>,
 }
 
-type IoxNode = Node<ipc::Service>;
-
 struct Simulation {
     id: String,
     topo_path: PathBuf,
     topology: TopologyView,
-    child: Option<Child>,
+    /// `true` = clean exit, `false` = error or panic inside the arbiter thread.
+    arbiter: Option<JoinHandle<bool>>,
     host: ServerHostPort,
     state: String,
     virtual_time_ns: u64,
@@ -253,7 +246,6 @@ struct Simulation {
     viewer: Option<String>,
     csv_job: Option<CsvJob>,
     iox_root: PathBuf,
-    _iox: IoxNode,
 }
 
 struct CsvJob {
@@ -290,12 +282,6 @@ impl ProbeWatch {
 
 /// Start the worker thread and return a [`LocalBackend`] to it.
 pub fn spawn_worker(opts: ServerOptions) -> Result<std::sync::Arc<LocalBackend>, ServerError> {
-    if !opts.arbiter_bin.is_file() {
-        return Err(ServerError::Message(format!(
-            "cluster-arbiter not found at {} (build the arbiter binary first)",
-            opts.arbiter_bin.display()
-        )));
-    }
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || worker_loop(rx, opts));
     Ok(LocalBackend::new(tx))
@@ -303,7 +289,7 @@ pub fn spawn_worker(opts: ServerOptions) -> Result<std::sync::Arc<LocalBackend>,
 
 /// Accept internal HTTP until the process is killed.
 ///
-/// Arbiter processes come and go; this function does not return when one exits.
+/// Arbiter threads come and go; this function does not return when one exits.
 pub fn run_backend(listen: &str, opts: ServerOptions) -> Result<(), ServerError> {
     let backend = spawn_worker(opts)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -506,7 +492,7 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
         },
         JobKind::Step { id, board_id } => match world.sims.get_mut(&id) {
             Some(sim) => {
-                if sim.state == "exited" {
+                if arbiter_unavailable(sim) {
                     JobReply::Err(ApiError::conflict("arbiter has exited"))
                 } else {
                     match resolve_board_hex(sim, board_id) {
@@ -528,34 +514,31 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
 
 fn create_simulation(
     topo: LogicalTopology,
-    opts: &ServerOptions,
+    _opts: &ServerOptions,
 ) -> Result<Simulation, ServerError> {
     let id = new_cluster_key();
     let iox_root = root_path_for_cluster(&id);
-    let config = isolated_config(&iox_root)?;
-    let iox = create_node(&config, &format!("server-{id}"))?;
-    let inbox = ServerLogInbox::create(&iox, &id)?;
-    let host = ServerHostPort::create(&iox, &id)?;
-    let actions = ServerActions::create(&iox, &id, topo.boards.len())?;
-    let probe_inbox = ServerProbeInbox::create(&iox, &id)?;
-    let probe_ctrl = ServerProbeCtrl::create(&iox, &id, topo.boards.len())?;
+    let (server_link, arbiter_link) = open_pair();
     let hashes =
         build_topology_hashes(&topo).map_err(|err| ServerError::Message(err.to_string()))?;
     let boards = hashes.boards;
     let topology = TopologyView::from_logical(&topo);
     let topo_path = write_temp_topology(&topo)?;
-    let child = Command::new(&opts.arbiter_bin)
-        .arg("--topology")
-        .arg(&topo_path)
-        .arg("--cluster-key")
-        .arg(&id)
-        .arg("--iox-root")
-        .arg(&iox_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    let nodes = topo
+    let exe = std::env::current_exe().map_err(ServerError::Io)?;
+    let exe_dir = exe
+        .parent()
+        .ok_or_else(|| ServerError::Message("current_exe has no parent".into()))?;
+    let arbiter_opts = ArbiterOptions {
+        topology_path: topo_path.clone(),
+        node_bin: exe_dir.join("rl78-minimal-board"),
+        plant_bin: exe_dir.join("minimal-plant"),
+        piping_plant_bin: exe_dir.join("piping-plant"),
+        boiler_plant_bin: exe_dir.join("boiler-plant"),
+        rl78boiler_bin: exe_dir.join("boiler_board"),
+        cluster_key: id.clone(),
+        iox_root: iox_root.clone(),
+    };
+    let nodes: Vec<SessionNode> = topo
         .boards
         .iter()
         .map(|board| SessionNode {
@@ -564,12 +547,33 @@ fn create_simulation(
             state: "starting".into(),
         })
         .collect();
+    let thread_id = id.clone();
+    let arbiter_topo = topo;
+    let arbiter = thread::Builder::new()
+        .name(format!("arbiter-{thread_id}"))
+        .spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                run_arbiter_with_topology(&arbiter_opts, &arbiter_topo, arbiter_link)
+            }));
+            match result {
+                Ok(Ok(())) => true,
+                Ok(Err(err)) => {
+                    eprintln!("cluster-backend {thread_id}: arbiter exited: {err}");
+                    false
+                }
+                Err(_) => {
+                    eprintln!("cluster-backend {thread_id}: arbiter thread panicked");
+                    false
+                }
+            }
+        })
+        .map_err(ServerError::Io)?;
     Ok(Simulation {
         id,
         topo_path,
         topology,
-        child: Some(child),
-        host,
+        arbiter: Some(arbiter),
+        host: server_link.host,
         state: "stopped".into(),
         virtual_time_ns: 0,
         stop_reason: None,
@@ -577,10 +581,10 @@ fn create_simulation(
         logs: VecDeque::new(),
         next_seq: 1,
         boards,
-        inbox,
-        actions,
-        probe_inbox,
-        probe_ctrl,
+        inbox: server_link.inbox,
+        actions: server_link.actions,
+        probe_inbox: server_link.probe_inbox,
+        probe_ctrl: server_link.probe_ctrl,
         probe_catalog: HashMap::new(),
         catalog_ready: false,
         action_catalog_ready: false,
@@ -595,12 +599,11 @@ fn create_simulation(
         viewer: None,
         csv_job: None,
         iox_root,
-        _iox: iox,
     })
 }
 
 fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiError> {
-    if sim.state == "exited" {
+    if arbiter_unavailable(sim) {
         return Err(ApiError::conflict("arbiter has exited"));
     }
     send_cmd(sim, cmd).map_err(ApiError::internal)
@@ -608,6 +611,11 @@ fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiE
 
 fn send_cmd(sim: &mut Simulation, cmd: HostCommand) -> Result<(), String> {
     sim.host.publish_cmd(cmd).map_err(|err| err.to_string())
+}
+
+/// True when the arbiter thread has exited cleanly or failed.
+fn arbiter_unavailable(sim: &Simulation) -> bool {
+    sim.state == "exited" || sim.state == "failed"
 }
 
 /// Resolve a public board id to (hash, human label).
@@ -636,7 +644,7 @@ fn status_event(sim: &Simulation) -> StatusEvent {
 }
 
 fn queue_invoke(sim: &mut Simulation, request: &InvokeActionRequest) -> Result<(), ApiError> {
-    if sim.state == "exited" {
+    if arbiter_unavailable(sim) {
         return Err(ApiError::conflict("arbiter has exited"));
     }
     let (board_hash, _) = resolve_board_hex(sim, request.board_id)?;
@@ -1183,22 +1191,25 @@ fn poll_simulation(sim: &mut Simulation) {
     poll_actions(sim);
     poll_probes(sim);
     ingest_csv_replies(sim);
-    if let Some(child) = sim.child.as_mut() {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let code = status.code().unwrap_or(-1);
+    if sim
+        .arbiter
+        .as_ref()
+        .is_some_and(JoinHandle::is_finished)
+    {
+        let handle = sim.arbiter.take().expect("finished arbiter handle");
+        match handle.join() {
+            Ok(true) => {
                 sim.state = "exited".into();
-                append_log(
-                    sim,
-                    "info",
-                    "server",
-                    None,
-                    &format!("arbiter exited ({code})"),
-                );
-                sim.child = None;
+                append_log(sim, "info", "server", None, "arbiter thread exited");
             }
-            Ok(None) => {}
-            Err(err) => eprintln!("cluster-backend {}: wait arbiter: {err}", sim.id),
+            Ok(false) => {
+                sim.state = "failed".into();
+                append_log(sim, "error", "server", None, "arbiter thread failed");
+            }
+            Err(_) => {
+                sim.state = "failed".into();
+                append_log(sim, "error", "server", None, "arbiter thread panicked");
+            }
         }
     }
 }
@@ -1259,12 +1270,35 @@ fn temp_path(prefix: &str, ext: &str) -> PathBuf {
 
 impl Drop for Simulation {
     fn drop(&mut self) {
-        let _ = send_cmd(self, HostCommand::Shutdown);
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        join_arbiter(self);
         let _ = fs::remove_file(&self.topo_path);
+    }
+}
+
+fn join_arbiter(sim: &mut Simulation) {
+    let _ = send_cmd(sim, HostCommand::Shutdown);
+    let Some(handle) = sim.arbiter.take() else {
+        return;
+    };
+    let started = Instant::now();
+    while !handle.is_finished() {
+        if started.elapsed() >= ARBITER_JOIN_TIMEOUT {
+            // Drop without join: thread may linger; dropping server Senders makes
+            // arbiter `try_cmd` observe disconnect and treat it as Shutdown.
+            eprintln!(
+                "cluster-backend {}: arbiter join timed out after {}s; abandoning JoinHandle",
+                sim.id,
+                ARBITER_JOIN_TIMEOUT.as_secs()
+            );
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    match handle.join() {
+        Ok(true) => {}
+        Ok(false) | Err(_) => {
+            sim.state = "failed".into();
+        }
     }
 }
 

@@ -184,83 +184,6 @@ impl NodeActions {
     }
 }
 
-/// Server side: publish requests, receive catalog rows and results.
-pub struct ServerActions {
-    s2a: ReqPub,
-    a2s: UpSub,
-}
-
-impl ServerActions {
-    pub fn create(
-        node: &Node<ipc::Service>,
-        cluster_key: &str,
-        board_count: usize,
-    ) -> Result<Self, IpcError> {
-        let s2a_name = names::action_s2a(cluster_key);
-        let a2s_name = names::action_a2s(cluster_key);
-        let s2a = qos::<ActionRequest>(node, &s2a_name, 1, 1, 4, ACTION_RECV_CAP, true)?;
-        let a2s =
-            qos::<ActionUpstream>(node, &a2s_name, 1, 1, 4, upstream_buffer(board_count), true)?;
-        Ok(Self {
-            s2a: publisher(s2a, &s2a_name)?,
-            a2s: subscriber(a2s, &a2s_name)?,
-        })
-    }
-
-    pub fn publish_request(&self, request: &ActionRequest) -> Result<(), IpcError> {
-        self.s2a
-            .send_copy(*request)
-            .map_err(|e| IpcError::Message(format!("action s2a send: {e:?}")))?;
-        Ok(())
-    }
-
-    pub fn try_upstream(&self) -> Result<Option<ActionUpstream>, IpcError> {
-        recv(&self.a2s, "action a2s")
-    }
-}
-
-/// Arbiter side of the server action channels.
-pub struct ArbiterServerActions {
-    s2a: ReqSub,
-    a2s: UpPub,
-}
-
-impl ArbiterServerActions {
-    pub fn open(
-        node: &Node<ipc::Service>,
-        cluster_key: &str,
-        board_count: usize,
-    ) -> Result<Self, IpcError> {
-        let s2a_name = names::action_s2a(cluster_key);
-        let a2s_name = names::action_a2s(cluster_key);
-        let s2a = qos::<ActionRequest>(node, &s2a_name, 1, 1, 4, ACTION_RECV_CAP, false)?;
-        let a2s = qos::<ActionUpstream>(
-            node,
-            &a2s_name,
-            1,
-            1,
-            4,
-            upstream_buffer(board_count),
-            false,
-        )?;
-        Ok(Self {
-            s2a: subscriber(s2a, &s2a_name)?,
-            a2s: publisher(a2s, &a2s_name)?,
-        })
-    }
-
-    pub fn try_request(&self) -> Result<Option<ActionRequest>, IpcError> {
-        recv(&self.s2a, "action s2a")
-    }
-
-    pub fn publish_upstream(&self, msg: &ActionUpstream) -> Result<(), IpcError> {
-        self.a2s
-            .send_copy(*msg)
-            .map_err(|e| IpcError::Message(format!("action a2s send: {e:?}")))?;
-        Ok(())
-    }
-}
-
 fn recv<T: Copy + std::fmt::Debug + ZeroCopySend>(
     sub: &Subscriber<ipc::Service, T, ()>,
     what: &str,
@@ -279,16 +202,15 @@ mod tests {
     use super::*;
     use crate::action::{ActionResult, ActionStatus};
     use crate::ipc::runtime::{create_node, isolated_config};
+    use crate::ipc::server_arbiter;
 
     #[test]
     fn action_request_round_trips_server_arbiter_node() {
         let dir = tempfile::tempdir().unwrap();
         let key = format!("act-{}", std::process::id());
         let config = isolated_config(&dir.path().join("iox")).unwrap();
-        let server_node = create_node(&config, "act-server").unwrap();
-        let server = ServerActions::create(&server_node, &key, 1).unwrap();
+        let (server_link, arb_link) = server_arbiter::open_pair();
         let arb_node = create_node(&config, "act-arb").unwrap();
-        let arb_server = ArbiterServerActions::open(&arb_node, &key, 1).unwrap();
         let arb_nodes = ArbiterNodeActions::create(&arb_node, &key, 1).unwrap();
         let node = create_node(&config, "act-node").unwrap();
         let node_actions = NodeActions::open(&node, &key, 1).unwrap();
@@ -300,8 +222,8 @@ mod tests {
             action_hash: crate::ipc::HashedId::new(5),
             ..ActionRequest::default()
         };
-        server.publish_request(&request).unwrap();
-        let forwarded = arb_server.try_request().unwrap().expect("s2a");
+        server_link.actions.publish_request(&request).unwrap();
+        let forwarded = arb_link.server_actions.try_request().unwrap().expect("s2a");
         assert_eq!(forwarded.request_id, 7);
         arb_nodes.publish_request(&forwarded).unwrap();
         let at_node = node_actions.try_request().unwrap().expect("a2n");
@@ -313,8 +235,8 @@ mod tests {
             }))
             .unwrap();
         let upstream = arb_nodes.try_upstream().unwrap().expect("n2a");
-        arb_server.publish_upstream(&upstream).unwrap();
-        match server.try_upstream().unwrap().expect("a2s") {
+        arb_link.server_actions.publish_upstream(&upstream).unwrap();
+        match server_link.actions.try_upstream().unwrap().expect("a2s") {
             ActionUpstream::Result(result) => {
                 assert_eq!(result.request_id, 7);
                 assert_eq!(result.status, ActionStatus::Applied as u8);
