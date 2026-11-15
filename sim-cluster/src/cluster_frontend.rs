@@ -30,7 +30,6 @@ struct SimRecord {
 }
 
 struct FrontendState {
-    used_mcast: Vec<(Ipv4Addr, u16)>,
     sims: HashMap<String, SimRecord>,
 }
 
@@ -76,7 +75,6 @@ impl ClusterFrontend {
             address_ranges,
             port_ranges,
             state: Mutex::new(FrontendState {
-                used_mcast: Vec::new(),
                 sims: HashMap::new(),
             }),
         })
@@ -95,6 +93,11 @@ impl ClusterFrontend {
             .collect()
     }
 
+    /// Multicast pairs reserved by live `SimRecord`s (no separate used_mcast cache).
+    fn used_multicast(state: &FrontendState) -> Vec<(Ipv4Addr, u16)> {
+        state.sims.values().filter_map(|rec| rec.mcast).collect()
+    }
+
     /// Free board slots per backend: `max_nodes` minus boards assigned in `sims`.
     fn free_capacity(&self, state: &FrontendState) -> HashMap<MachineId, u32> {
         let mut used: HashMap<MachineId, u32> = HashMap::new();
@@ -111,11 +114,13 @@ impl ClusterFrontend {
         free
     }
 
-    fn plan_create(
+    /// First-Fit placement + optional multicast allocation as a `SimRecord`.
+    /// Caller inserts it into `sims` to reserve board slots and multicast.
+    fn allocate_sim_record(
         &self,
         state: &FrontendState,
         topo: &LogicalTopology,
-    ) -> Result<PlannedCreate, ApiError> {
+    ) -> Result<SimRecord, ApiError> {
         let board_ids: Vec<String> = topo.boards.iter().map(|b| b.id.clone()).collect();
         let free = self.free_capacity(state);
         let placement = place_boards_first_fit(&board_ids, &free)
@@ -147,8 +152,9 @@ impl ClusterFrontend {
                     "multi-backend placement requires multicast address/port ranges",
                 ));
             }
+            let used = Self::used_multicast(state);
             let Some(pair) =
-                allocate_multicast(&self.address_ranges, &self.port_ranges, &state.used_mcast)
+                allocate_multicast(&self.address_ranges, &self.port_ranges, &used)
             else {
                 return Err(ApiError::bad_request(
                     "multicast_exhausted",
@@ -160,21 +166,15 @@ impl ClusterFrontend {
             None
         };
 
-        Ok(PlannedCreate { per_server, mcast })
+        Ok(SimRecord { per_server, mcast })
     }
 
-    fn release_mcast_reservation(state: &mut FrontendState, plan: &PlannedCreate) {
-        if let Some(pair) = plan.mcast {
-            state.used_mcast.retain(|p| *p != pair);
-        }
-    }
-
-    /// Drop this sim's board-slot reservation (`SimRecord` in `sims`) and its
-    /// multicast booking in `used_mcast` after compensation cleaned backends.
-    fn rollback_ledger(&self, id: &str, plan: &PlannedCreate) {
+    /// Drop this sim's `SimRecord` after compensation cleaned backends.
+    /// Board-slot and multicast reservations are derived from `sims`, so remove
+    /// alone frees both.
+    fn rollback_ledger(&self, id: &str) {
         if let Ok(mut state) = self.lock() {
             state.sims.remove(id);
-            Self::release_mcast_reservation(&mut state, plan);
         }
     }
 
@@ -192,18 +192,18 @@ impl ClusterFrontend {
     }
 
     /// Roll back the ledger when compensation succeeded, then return the create
-    /// error. When compensation failed, leave `sims` / `used_mcast` pinned so
-    /// another create cannot reuse them until `shutdown(id)` tears down remnants.
+    /// error. When compensation failed, leave the `SimRecord` pinned so another
+    /// create cannot reuse its board slots / multicast until `shutdown(id)`
+    /// tears down remnants.
     fn fail_after_compensate(
         &self,
         id: &str,
-        plan: &PlannedCreate,
         head: String,
         compensate_ok: bool,
         err: Option<ApiError>,
     ) -> Result<String, ApiError> {
         if compensate_ok {
-            self.rollback_ledger(id, plan);
+            self.rollback_ledger(id);
         }
         let msg = if compensate_ok {
             format!("{head}; compensated")
@@ -249,41 +249,27 @@ impl ClusterFrontend {
     }
 }
 
-struct PlannedCreate {
-    per_server: HashMap<MachineId, Vec<String>>,
-    mcast: Option<(Ipv4Addr, u16)>,
-}
-
 impl SimulationBackend for ClusterFrontend {
     fn create(&self, request: CreateSimulationRequest) -> Result<String, ApiError> {
         // Public / frontend path: ignore client-supplied id / multicast / assignment.
         let topo = request.topology;
         let id = new_cluster_key();
-        let plan = {
+        let record = {
             let mut state = self.lock()?;
-            let plan = self.plan_create(&state, &topo)?;
-            // Inserting SimRecord reserves capacity (derived from sims); multicast
-            // is reserved explicitly before fanout.
-            if let Some(pair) = plan.mcast {
-                state.used_mcast.push(pair);
-            }
-            state.sims.insert(
-                id.clone(),
-                SimRecord {
-                    per_server: plan.per_server.clone(),
-                    mcast: plan.mcast,
-                },
-            );
-            plan
+            let record = self.allocate_sim_record(&state, &topo)?;
+            // Inserting the record reserves board slots and multicast (derived from
+            // sims) before fanout.
+            state.sims.insert(id.clone(), record.clone());
+            record
         };
 
-        let mcast_wire = plan.mcast.map(|(addr, port)| CreateMulticast {
+        let mcast_wire = record.mcast.map(|(addr, port)| CreateMulticast {
             address: addr.to_string(),
             port,
         });
 
         let mut succeeded: Vec<MachineId> = Vec::new();
-        for (&machine_id, boards) in &plan.per_server {
+        for (&machine_id, boards) in &record.per_server {
             let (backend, endpoint) = {
                 let slot = self.slot(machine_id)?;
                 (slot.backend.clone(), slot.endpoint.clone())
@@ -303,7 +289,6 @@ impl SimulationBackend for ClusterFrontend {
                     let compensate_ok = cleanup_ok && self.compensate_previous(&succeeded, &id);
                     return self.fail_after_compensate(
                         &id,
-                        &plan,
                         format!("backend {endpoint} returned id {remote_id}, expected {id}"),
                         compensate_ok,
                         None,
@@ -313,7 +298,6 @@ impl SimulationBackend for ClusterFrontend {
                     let compensate_ok = self.compensate_previous(&succeeded, &id);
                     return self.fail_after_compensate(
                         &id,
-                        &plan,
                         format!("create failed on {endpoint}: {err}"),
                         compensate_ok,
                         Some(err),
@@ -399,11 +383,7 @@ impl SimulationBackend for ClusterFrontend {
             false
         };
         if emptied {
-            if let Some(done) = state.sims.remove(id) {
-                if let Some(pair) = done.mcast {
-                    state.used_mcast.retain(|p| *p != pair);
-                }
-            }
+            state.sims.remove(id);
         }
         let still_present = state.sims.contains_key(id);
 
@@ -864,7 +844,10 @@ mod tests {
         all.sort();
         assert_eq!(all, vec!["a".to_string(), "b".to_string()]);
         let state = fe.lock().unwrap();
-        assert_eq!(state.used_mcast, vec![(Ipv4Addr::new(239, 0, 0, 1), 30000)]);
+        assert_eq!(
+            ClusterFrontend::used_multicast(&state),
+            vec![(Ipv4Addr::new(239, 0, 0, 1), 30000)]
+        );
         assert_eq!(
             fe.free_capacity(&state),
             HashMap::from([(MachineId::from_u32(1), 0), (MachineId::from_u32(2), 0)])
@@ -900,7 +883,7 @@ mod tests {
             fe.free_capacity(&state),
             HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
         );
-        assert!(state.used_mcast.is_empty());
+        assert!(ClusterFrontend::used_multicast(&state).is_empty());
     }
 
     #[test]
@@ -927,7 +910,7 @@ mod tests {
         fe.shutdown(&id).unwrap();
         let state = fe.lock().unwrap();
         assert!(state.sims.is_empty());
-        assert!(state.used_mcast.is_empty());
+        assert!(ClusterFrontend::used_multicast(&state).is_empty());
         assert_eq!(
             fe.free_capacity(&state),
             HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
@@ -978,7 +961,7 @@ mod tests {
             "ledger leaked after concurrent partial shutdown: {:?}",
             state.sims.keys().collect::<Vec<_>>()
         );
-        assert!(state.used_mcast.is_empty());
+        assert!(ClusterFrontend::used_multicast(&state).is_empty());
         assert_eq!(
             fe.free_capacity(&state),
             HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])

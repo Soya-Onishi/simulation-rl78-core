@@ -21,7 +21,7 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 - One node = one topology `boards[]` entry (including plant kinds).
 - Payload to each participating backend: full topology JSON, assigned board ids, and (if multicast used) multicast address+port.
 - Backend spawns **only** assigned boards; keeps full topology for local edges.
-- Multicast addr/port chosen at **create** (not start); free on sim destroy. "Unused" = not already allocated by this frontend to another sim (assume ranges not used elsewhere; no OS-wide probe).
+- Multicast addr/port chosen at **create** (not start); free when the sim's `SimRecord` is removed. "Unused" = not present in any live `SimRecord.mcast` (no separate used_mcast cache; assume ranges not used elsewhere; no OS-wide probe).
 - Distinct create errors: capacity / multicast exhaustion / duplicate participant IPs / cross-host edge.
 - Partial create success → compensate (destroy successes) then fail overall; if compensate fails, surface that remnant may exist.
 - **Cross-host edges** (endpoints whose endpoint boards land on different backends): reject at create in phase 1. Mark code + design memo TODO: provisional until phase 2 endpoint multicast; then remove rejection.
