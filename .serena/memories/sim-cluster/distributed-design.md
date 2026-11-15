@@ -76,8 +76,8 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 | p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards (**merged #130**) |
 | p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate (**merged #131**) |
 | p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` (**merged #132**) |
-| p3a | `…-p3a-targeted` | Single-board route: inspect/step/invoke/probe_samples (**this branch**) |
-| p3b | `…-p3b-catalog-watch` | actions/probe_catalog merge; probe_watch fanout+merge |
+| p3a | `…-p3a-targeted` | Single-board route: inspect/step/invoke/probe_samples (**merged #133**) |
+| p3b | `…-p3b-catalog-watch` | actions/probe_catalog merge; probe_watch fanout+merge (**this branch**) |
 | p4 | `…-p4-csv` | CSV aggregate + time-sort |
 
 See also `docs/cluster-distributed-phases.md`.
@@ -86,9 +86,13 @@ See also `docs/cluster-distributed-phases.md`.
 - `inspect` / `step` / `invoke_action` / `probe_samples` resolve host via `SimRecord.per_server` + `board_id_hash`; unknown board → `unknown_board`.
 - Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p3a-targeted-design.md`.
 
+## Catalog / watch merge (p3b)
+- `actions` / `probe_catalog` fanout+merge; `probe_watch_*` partition/fanout.
+- Live: SSE VT cursor (`CoarseLive.cursor_vt`); fetch floor = cluster min VT − 100ms; host-local seq dedupe in `ClusterFrontend` (`ProbeWatchAggregate`); sim-shared (reconnect may briefly be empty).
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p3b-catalog-watch-design.md`.
+
 ## Out of scope until later phases / re-grill
 - Cross-host Digital edges / Digital board-edge IPC.
-- actions / probe_catalog merge and probe_watch_* fanout (p3b).
 - CSV merge/sort details (p4).
 
 

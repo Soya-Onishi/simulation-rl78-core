@@ -10,7 +10,7 @@ use crate::backend::SimulationBackend;
 use crate::cluster_mcast::{
     allocate_multicast, has_cross_host_digital_edge, place_boards_first_fit,
 };
-use crate::cluster_observe::LogAggregate;
+use crate::cluster_observe::{LogAggregate, ProbeWatchAggregate};
 use crate::config::MachineId;
 use crate::contract::{
     ActionList, ApiError, CreateMulticast, CreateSimulationRequest, InvokeActionRequest, LogEvent,
@@ -18,6 +18,9 @@ use crate::contract::{
 };
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::ipc::{HashedId, board_id_hash, new_cluster_key};
+use crate::probe_log::{
+    CoarseLive, ProbeCatalogItem, ProbeRef, ProbeWatchView, WATCH_VT_WINDOW_NS,
+};
 use crate::topology::LogicalTopology;
 
 /// Find which participant hosts `board` (`board_id_hash` of a topology board id).
@@ -52,6 +55,8 @@ struct FrontendState {
     sims: HashMap<String, SimRecord>,
     /// Per-simulation aggregate; `Mutex` serializes pull+ingest for that sim only.
     logs: HashMap<String, Arc<Mutex<LogAggregate>>>,
+    /// Per-simulation host-local coarse seq cursors for live watch (p3b).
+    probe_watch: HashMap<String, Arc<Mutex<ProbeWatchAggregate>>>,
 }
 
 /// Live ledger participants keyed by `MachineId`.
@@ -113,6 +118,7 @@ impl ClusterFrontend {
             state: Mutex::new(FrontendState {
                 sims: HashMap::new(),
                 logs: HashMap::new(),
+                probe_watch: HashMap::new(),
             }),
         })
     }
@@ -204,6 +210,7 @@ impl ClusterFrontend {
         if let Ok(mut state) = self.lock() {
             state.sims.remove(id);
             state.logs.remove(id);
+            state.probe_watch.remove(id);
         }
     }
 
@@ -521,6 +528,9 @@ impl SimulationBackend for ClusterFrontend {
             state
                 .logs
                 .insert(id.clone(), Arc::new(Mutex::new(LogAggregate::new())));
+            state
+                .probe_watch
+                .insert(id.clone(), Arc::new(Mutex::new(ProbeWatchAggregate::new())));
             record
         };
 
@@ -580,7 +590,16 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn reset(&self, id: &str) -> Result<(), ApiError> {
-        self.control_fanout(id, |backend| backend.reset(id))
+        self.control_fanout(id, |backend| backend.reset(id))?;
+        if let Ok(state) = self.lock()
+            && let Some(agg) = state.probe_watch.get(id).cloned()
+        {
+            drop(state);
+            if let Ok(mut agg) = agg.lock() {
+                agg.clear();
+            }
+        }
+        Ok(())
     }
 
     fn shutdown(&self, id: &str) -> Result<(), ApiError> {
@@ -642,6 +661,7 @@ impl SimulationBackend for ClusterFrontend {
         if emptied {
             state.sims.remove(id);
             state.logs.remove(id);
+            state.probe_watch.remove(id);
         }
         let still_present = state.sims.contains_key(id);
 
@@ -717,8 +737,37 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn actions(&self, id: &str) -> Result<ActionList, ApiError> {
-        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
-        self.primary_backend(id)?.actions(id)
+        let participants = self.participants(id)?;
+        let results = Self::parallel_map(&participants.backends, |_, backend| backend.actions(id));
+        let mut merged = Vec::new();
+        let mut seen = HashMap::new();
+        let mut any_ok = false;
+        let mut first_err: Option<ApiError> = None;
+        let order = participants.machine_order();
+        let by_machine: HashMap<_, _> = results.into_iter().collect();
+        for machine_id in order {
+            match by_machine.get(&machine_id) {
+                Some(Ok(list)) => {
+                    any_ok = true;
+                    for action in &list.actions {
+                        let key = (action.board_id, action.device, action.action);
+                        if seen.insert(key, ()).is_none() {
+                            merged.push(action.clone());
+                        }
+                    }
+                }
+                Some(Err(err)) => {
+                    if first_err.is_none() {
+                        first_err = Some(err.clone());
+                    }
+                }
+                None => {}
+            }
+        }
+        if !any_ok {
+            return Err(first_err.unwrap_or_else(|| ApiError::not_found("unknown simulation")));
+        }
+        Ok(ActionList { actions: merged })
     }
 
     fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError> {
@@ -726,37 +775,245 @@ impl SimulationBackend for ClusterFrontend {
             .invoke_action(id, request)
     }
 
-    fn probe_catalog(&self, id: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError> {
-        // TODO(cluster-distributed-p3b): route / merge from hosting backends.
-        self.primary_backend(id)?.probe_catalog(id)
+    fn probe_catalog(&self, id: &str) -> Result<Vec<ProbeCatalogItem>, ApiError> {
+        let participants = self.participants(id)?;
+        let results = Self::parallel_map(&participants.backends, |_, backend| {
+            backend.probe_catalog(id)
+        });
+        let mut merged = Vec::new();
+        let mut seen = HashMap::new();
+        let mut any_ok = false;
+        let mut first_err: Option<ApiError> = None;
+        let order = participants.machine_order();
+        let by_machine: HashMap<_, _> = results.into_iter().collect();
+        for machine_id in order {
+            match by_machine.get(&machine_id) {
+                Some(Ok(items)) => {
+                    any_ok = true;
+                    for item in items {
+                        let key = (item.board, item.probe);
+                        if seen.insert(key, ()).is_none() {
+                            merged.push(item.clone());
+                        }
+                    }
+                }
+                Some(Err(err)) => {
+                    if first_err.is_none() {
+                        first_err = Some(err.clone());
+                    }
+                }
+                None => {}
+            }
+        }
+        if !any_ok {
+            return Err(first_err.unwrap_or_else(|| ApiError::not_found("unknown simulation")));
+        }
+        Ok(merged)
     }
 
-    fn probe_watch_get(&self, id: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
-        self.primary_backend(id)?.probe_watch_get(id)
+    fn probe_watch_get(&self, id: &str) -> Result<ProbeWatchView, ApiError> {
+        let participants = self.participants(id)?;
+        let results = Self::parallel_map(&participants.backends, |_, backend| {
+            backend.probe_watch_get(id)
+        });
+        let mut merged = Vec::new();
+        let mut seen = HashMap::new();
+        let mut any_ok = false;
+        let mut first_err: Option<ApiError> = None;
+        let order = participants.machine_order();
+        let by_machine: HashMap<_, _> = results.into_iter().collect();
+        for machine_id in order {
+            match by_machine.get(&machine_id) {
+                Some(Ok(view)) => {
+                    any_ok = true;
+                    for probe in &view.probes {
+                        let key = (probe.board, probe.name);
+                        if seen.insert(key, ()).is_none() {
+                            merged.push(probe.clone());
+                        }
+                    }
+                }
+                Some(Err(err)) => {
+                    if first_err.is_none() {
+                        first_err = Some(err.clone());
+                    }
+                }
+                None => {}
+            }
+        }
+        if !any_ok {
+            return Err(first_err.unwrap_or_else(|| ApiError::not_found("unknown simulation")));
+        }
+        Ok(ProbeWatchView { probes: merged })
     }
 
-    fn probe_watch_put(
-        &self,
-        id: &str,
-        probes: Vec<crate::probe_log::ProbeRef>,
-    ) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
-        self.primary_backend(id)?.probe_watch_put(id, probes)
+    fn probe_watch_put(&self, id: &str, probes: Vec<ProbeRef>) -> Result<ProbeWatchView, ApiError> {
+        let participants = self.participants(id)?;
+        let mut by_machine: HashMap<MachineId, Vec<ProbeRef>> = HashMap::new();
+        for probe in probes {
+            let Some(machine_id) = machine_for_board(&participants.per_server, probe.board) else {
+                return Err(ApiError::bad_request(
+                    "unknown_board",
+                    "board is not assigned to any participant",
+                ));
+            };
+            by_machine.entry(machine_id).or_default().push(probe);
+        }
+        // Hosts with no probes in this put still need an empty watch set so stale
+        // remote watches do not linger — clear them via put of empty vec.
+        for &machine_id in participants.backends.keys() {
+            by_machine.entry(machine_id).or_default();
+        }
+        let put_backends: HashMap<_, _> = by_machine
+            .keys()
+            .filter_map(|machine_id| {
+                participants
+                    .backends
+                    .get(machine_id)
+                    .map(|backend| (*machine_id, Arc::clone(backend)))
+            })
+            .collect();
+        let subsets = by_machine;
+        let results = Self::parallel_map(&put_backends, |machine_id, backend| {
+            let subset = subsets.get(&machine_id).cloned().unwrap_or_default();
+            backend.probe_watch_put(id, subset)
+        });
+        let mut failures: Vec<(MachineId, ApiError)> = Vec::new();
+        let mut merged = Vec::new();
+        let mut seen = HashMap::new();
+        let mut by_result: HashMap<MachineId, ProbeWatchView> = HashMap::new();
+        for (machine_id, result) in results {
+            match result {
+                Ok(view) => {
+                    by_result.insert(machine_id, view);
+                }
+                Err(err) => failures.push((machine_id, err)),
+            }
+        }
+        if !failures.is_empty() {
+            failures.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+            return Err(failures.remove(0).1);
+        }
+        let mut order: Vec<_> = by_result.keys().copied().collect();
+        order.sort_by_key(|m| m.as_u32());
+        for machine_id in order {
+            if let Some(view) = by_result.remove(&machine_id) {
+                for probe in view.probes {
+                    let key = (probe.board, probe.name);
+                    if seen.insert(key, ()).is_none() {
+                        merged.push(probe);
+                    }
+                }
+            }
+        }
+        Ok(ProbeWatchView { probes: merged })
     }
 
     fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError> {
-        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
-        self.primary_backend(id)?.probe_watch_clear(id)
+        self.control_fanout(id, |backend| backend.probe_watch_clear(id))
     }
 
-    fn probe_watch_live(
-        &self,
-        id: &str,
-        after: u64,
-    ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
-        // TODO(cluster-distributed-p3b): route / merge from hosting backends.
-        self.primary_backend(id)?.probe_watch_live(id, after)
+    fn probe_watch_live(&self, id: &str, _cursor_vt: u64) -> Result<CoarseLive, ApiError> {
+        let (participants, agg) = {
+            let state = self.lock()?;
+            let Some(rec) = state.sims.get(id) else {
+                return Err(ApiError::not_found("unknown simulation"));
+            };
+            let Some(agg) = state.probe_watch.get(id).cloned() else {
+                return Err(ApiError::not_found("unknown simulation"));
+            };
+            let per_server = rec.per_server.clone();
+            let mut backends = HashMap::with_capacity(per_server.len());
+            for &machine_id in per_server.keys() {
+                let backend = self
+                    .servers
+                    .get(&machine_id)
+                    .ok_or_else(|| {
+                        ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+                    })?
+                    .backend
+                    .clone();
+                backends.insert(machine_id, backend);
+            }
+            (
+                Participants {
+                    per_server,
+                    backends,
+                },
+                agg,
+            )
+        };
+
+        let status_results =
+            Self::parallel_map(&participants.backends, |_, backend| backend.status(id));
+        let mut statuses = Vec::new();
+        let mut status_errs: Vec<(MachineId, ApiError)> = Vec::new();
+        for (machine_id, result) in status_results {
+            match result {
+                Ok(status) => statuses.push((machine_id, status)),
+                Err(err) => status_errs.push((machine_id, err)),
+            }
+        }
+        if statuses.is_empty() {
+            status_errs.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+            return Err(status_errs
+                .into_iter()
+                .next()
+                .map(|(_, err)| err)
+                .unwrap_or_else(|| ApiError::not_found("unknown simulation")));
+        }
+        let order = participants.machine_order();
+        let merged_status =
+            crate::cluster_observe::merge_status(id, &participants.per_server, &order, &statuses);
+        let current_min_vt = merged_status.virtual_time_ns;
+        let fetch_from = current_min_vt.saturating_sub(WATCH_VT_WINDOW_NS);
+
+        // Only hosts that answered status: a dead peer already failed the short
+        // observe timeout and must not be hit again with a long control RPC.
+        let live_backends: HashMap<_, _> = statuses
+            .iter()
+            .filter_map(|(machine_id, _)| {
+                participants
+                    .backends
+                    .get(machine_id)
+                    .map(|backend| (*machine_id, Arc::clone(backend)))
+            })
+            .collect();
+        let fetched = Self::parallel_map(&live_backends, |_, backend| {
+            backend.probe_watch_live(id, fetch_from)
+        });
+
+        let mut agg = agg
+            .lock()
+            .map_err(|_| ApiError::internal("ProbeWatchAggregate mutex poisoned"))?;
+        let mut batches = Vec::new();
+        let mut live_errs: Vec<(MachineId, ApiError)> = Vec::new();
+        let mut by_machine: HashMap<MachineId, CoarseLive> = HashMap::new();
+        for (machine_id, result) in fetched {
+            match result {
+                Ok(live) => {
+                    by_machine.insert(machine_id, live);
+                }
+                Err(err) => live_errs.push((machine_id, err)),
+            }
+        }
+        if by_machine.is_empty() {
+            live_errs.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+            return Err(live_errs
+                .into_iter()
+                .next()
+                .map(|(_, err)| err)
+                .unwrap_or_else(|| ApiError::not_found("unknown simulation")));
+        }
+        for machine_id in &order {
+            if let Some(live) = by_machine.remove(machine_id) {
+                batches.extend(agg.take_new(*machine_id, live.batches));
+            }
+        }
+        Ok(CoarseLive {
+            cursor_vt: current_min_vt,
+            batches,
+        })
     }
 
     fn csv_start(

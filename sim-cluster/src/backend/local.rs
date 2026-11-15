@@ -223,12 +223,12 @@ impl SimulationBackend for LocalBackend {
         &self,
         id: &str,
         after: u64,
-    ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
+    ) -> Result<crate::probe_log::CoarseLive, ApiError> {
         match self.rpc(JobKind::ProbeWatchLive {
             id: id.to_string(),
             after,
         })? {
-            JobReply::ProbeCoarse(batches) => Ok(batches),
+            JobReply::ProbeCoarse(live) => Ok(live),
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
                 "unexpected worker reply for watch live: {other:?}"

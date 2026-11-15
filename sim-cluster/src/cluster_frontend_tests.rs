@@ -1,8 +1,10 @@
 //! Unit tests for [`crate::cluster_frontend`].
 
 use super::*;
+use crate::contract::AdvertisedAction;
 use crate::host::SessionNode;
 use crate::ipc::{HashedId, board_id_hash};
+use crate::probe_log::{CoarseBatch, ProbeCatalogItem, ProbeRef, ProbeWatchView};
 use crate::topology::{BoardSpec, DirectedEdge, PayloadKind, PortRef};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
@@ -35,6 +37,11 @@ struct MockBackend {
     extra_nodes: Mutex<Vec<SessionNode>>,
     logs: Mutex<HashMap<String, Vec<LogEvent>>>,
     next_log_seq: Mutex<HashMap<String, u64>>,
+    actions: Mutex<Vec<AdvertisedAction>>,
+    catalog: Mutex<Vec<ProbeCatalogItem>>,
+    watch: Mutex<Vec<ProbeRef>>,
+    /// Coarse batches returned by `probe_watch_live` (filtered by fetch floor).
+    coarse: Mutex<Vec<CoarseBatch>>,
 }
 
 impl MockBackend {
@@ -64,6 +71,10 @@ impl MockBackend {
             extra_nodes: Mutex::new(Vec::new()),
             logs: Mutex::new(HashMap::new()),
             next_log_seq: Mutex::new(HashMap::new()),
+            actions: Mutex::new(Vec::new()),
+            catalog: Mutex::new(Vec::new()),
+            watch: Mutex::new(Vec::new()),
+            coarse: Mutex::new(Vec::new()),
         })
     }
 
@@ -218,34 +229,47 @@ impl SimulationBackend for MockBackend {
         Ok(seqs.get(id).map(|s| s.saturating_sub(1)).unwrap_or(0))
     }
     fn actions(&self, _: &str) -> Result<ActionList, ApiError> {
-        Err(ApiError::internal("unused"))
+        Ok(ActionList {
+            actions: self.actions.lock().unwrap().clone(),
+        })
     }
     fn invoke_action(&self, _: &str, _: InvokeActionRequest) -> Result<(), ApiError> {
         self.invokes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    fn probe_catalog(&self, _: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError> {
-        Ok(vec![])
+    fn probe_catalog(&self, _: &str) -> Result<Vec<ProbeCatalogItem>, ApiError> {
+        Ok(self.catalog.lock().unwrap().clone())
     }
-    fn probe_watch_get(&self, _: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-        Err(ApiError::internal("unused"))
+    fn probe_watch_get(&self, _: &str) -> Result<ProbeWatchView, ApiError> {
+        Ok(ProbeWatchView {
+            probes: self.watch.lock().unwrap().clone(),
+        })
     }
-    fn probe_watch_put(
-        &self,
-        _: &str,
-        _: Vec<crate::probe_log::ProbeRef>,
-    ) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-        Err(ApiError::internal("unused"))
+    fn probe_watch_put(&self, _: &str, probes: Vec<ProbeRef>) -> Result<ProbeWatchView, ApiError> {
+        *self.watch.lock().unwrap() = probes.clone();
+        Ok(ProbeWatchView { probes })
     }
     fn probe_watch_clear(&self, _: &str) -> Result<(), ApiError> {
+        self.watch.lock().unwrap().clear();
         Ok(())
     }
     fn probe_watch_live(
         &self,
         _: &str,
-        _: u64,
-    ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
-        Ok(vec![])
+        fetch_from: u64,
+    ) -> Result<crate::probe_log::CoarseLive, ApiError> {
+        let batches = self
+            .coarse
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|batch| batch.min_virtual_time_ns >= fetch_from)
+            .cloned()
+            .collect();
+        Ok(crate::probe_log::CoarseLive {
+            cursor_vt: self.virtual_time_ns.load(Ordering::SeqCst),
+            batches,
+        })
     }
     fn csv_start(
         &self,
@@ -1089,4 +1113,143 @@ fn single_board_apis_unknown_simulation() {
         .inspect("no-such-sim", board_id_hash("a"), InspectRequest::ReadRegs)
         .unwrap_err();
     assert_eq!(err.code, "not_found");
+}
+
+#[test]
+fn catalog_and_actions_merge_across_hosts() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    let fe = two_server_frontend(b0.clone(), b1.clone());
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    let boards0 = b0.live.lock().unwrap().get(&id).cloned().unwrap();
+    let boards1 = b1.live.lock().unwrap().get(&id).cloned().unwrap();
+    let board0 = boards0[0].clone();
+    let board1 = boards1[0].clone();
+    let h0 = board_id_hash(&board0);
+    let h1 = board_id_hash(&board1);
+
+    *b0.catalog.lock().unwrap() = vec![ProbeCatalogItem {
+        board: h0,
+        board_label: board0.clone(),
+        probe: HashedId::new(1),
+        probe_label: "p0".into(),
+        kind: "digital".into(),
+    }];
+    *b1.catalog.lock().unwrap() = vec![ProbeCatalogItem {
+        board: h1,
+        board_label: board1.clone(),
+        probe: HashedId::new(2),
+        probe_label: "p1".into(),
+        kind: "analog".into(),
+    }];
+    *b0.actions.lock().unwrap() = vec![AdvertisedAction {
+        board_id: h0,
+        board_label: board0,
+        device: HashedId::new(10),
+        device_label: "d0".into(),
+        action: HashedId::new(11),
+        action_label: "a0".into(),
+        description: String::new(),
+        params: vec![],
+    }];
+    *b1.actions.lock().unwrap() = vec![AdvertisedAction {
+        board_id: h1,
+        board_label: board1,
+        device: HashedId::new(20),
+        device_label: "d1".into(),
+        action: HashedId::new(21),
+        action_label: "a1".into(),
+        description: String::new(),
+        params: vec![],
+    }];
+
+    let catalog = fe.probe_catalog(&id).unwrap();
+    assert_eq!(catalog.len(), 2);
+    let actions = fe.actions(&id).unwrap();
+    assert_eq!(actions.actions.len(), 2);
+}
+
+#[test]
+fn probe_watch_put_partitions_by_board_host() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    let fe = two_server_frontend(b0.clone(), b1.clone());
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    let boards0 = b0.live.lock().unwrap().get(&id).cloned().unwrap();
+    let boards1 = b1.live.lock().unwrap().get(&id).cloned().unwrap();
+    let h0 = board_id_hash(&boards0[0]);
+    let h1 = board_id_hash(&boards1[0]);
+
+    let view = fe
+        .probe_watch_put(
+            &id,
+            vec![
+                ProbeRef {
+                    board: h0,
+                    name: HashedId::new(1),
+                },
+                ProbeRef {
+                    board: h1,
+                    name: HashedId::new(2),
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(view.probes.len(), 2);
+    assert_eq!(b0.watch.lock().unwrap().len(), 1);
+    assert_eq!(b0.watch.lock().unwrap()[0].board, h0);
+    assert_eq!(b1.watch.lock().unwrap().len(), 1);
+    assert_eq!(b1.watch.lock().unwrap()[0].board, h1);
+}
+
+#[test]
+fn probe_watch_live_dedupes_host_seq_and_sets_cursor_vt() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    b0.virtual_time_ns.store(500_000_000, Ordering::SeqCst);
+    b1.virtual_time_ns.store(400_000_000, Ordering::SeqCst);
+    let fe = two_server_frontend(b0.clone(), b1.clone());
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+
+    let mk = |seq: u64| CoarseBatch {
+        seq,
+        min_virtual_time_ns: 350_000_000,
+        samples: vec![],
+    };
+    *b0.coarse.lock().unwrap() = vec![mk(1)];
+    *b1.coarse.lock().unwrap() = vec![mk(1)];
+
+    let first = fe.probe_watch_live(&id, 0).unwrap();
+    assert_eq!(first.cursor_vt, 400_000_000);
+    assert_eq!(first.batches.len(), 2);
+
+    let second = fe.probe_watch_live(&id, first.cursor_vt).unwrap();
+    assert_eq!(second.cursor_vt, 400_000_000);
+    assert!(second.batches.is_empty());
+
+    *b0.coarse.lock().unwrap() = vec![mk(1), mk(2)];
+    let third = fe.probe_watch_live(&id, second.cursor_vt).unwrap();
+    assert_eq!(third.batches.len(), 1);
+    assert_eq!(third.batches[0].seq, 2);
 }

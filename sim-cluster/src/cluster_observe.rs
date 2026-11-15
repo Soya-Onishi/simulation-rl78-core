@@ -1,10 +1,11 @@
-//! Status merge and frontend log aggregate for multi-backend simulations (p1d).
+//! Status merge and frontend log / probe-watch aggregate for multi-backend sims.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::config::MachineId;
 use crate::contract::{LogEvent, StatusEvent};
 use crate::host::SessionNode;
+use crate::probe_log::CoarseBatch;
 
 /// Same capacity as `server::LOG_CAP` — frontend remapped log ring.
 pub(crate) const LOG_CAP: usize = 100;
@@ -99,6 +100,46 @@ impl LogAggregate {
             .filter(|event| event.seq > after)
             .cloned()
             .collect()
+    }
+}
+
+/// Per-simulation host-local coarse-batch seq cursors for live watch merge (p3b).
+pub(crate) struct ProbeWatchAggregate {
+    /// Last emitted local `CoarseBatch.seq` per backend (`0` = none yet).
+    per_backend_seq: HashMap<MachineId, u64>,
+}
+
+impl ProbeWatchAggregate {
+    pub(crate) fn new() -> Self {
+        Self {
+            per_backend_seq: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.per_backend_seq.clear();
+    }
+
+    /// Keep batches with `seq >` last emitted for `machine_id`; advance cursor.
+    pub(crate) fn take_new(
+        &mut self,
+        machine_id: MachineId,
+        batches: Vec<CoarseBatch>,
+    ) -> Vec<CoarseBatch> {
+        let after = self.per_backend_seq.get(&machine_id).copied().unwrap_or(0);
+        let mut out = Vec::new();
+        let mut max_seen = after;
+        for batch in batches {
+            if batch.seq <= after {
+                continue;
+            }
+            max_seen = max_seen.max(batch.seq);
+            out.push(batch);
+        }
+        if max_seen > after {
+            self.per_backend_seq.insert(machine_id, max_seen);
+        }
+        out
     }
 }
 
