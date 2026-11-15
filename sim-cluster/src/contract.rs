@@ -18,12 +18,23 @@ pub struct CreateMulticast {
 }
 
 /// Body for `POST /api/simulation` and `POST /internal/simulations`.
+///
+/// Public create (`/api/simulation`) accepts `topology` only; the frontend
+/// fills `id` / `multicast` / `assigned_boards` when calling backends.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSimulationRequest {
     pub topology: LogicalTopology,
+    /// Shared simulation id across participating backends. When omitted, the
+    /// backend generates one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// When set, the arbiter joins this group for VT / ClusterStop sharing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multicast: Option<CreateMulticast>,
+    /// Board ids this backend should spawn. When omitted, spawn every board
+    /// in `topology` (single-backend / tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_boards: Option<Vec<String>>,
 }
 
 /// Topology accepted by create. Local paths and `file://` are rejected.

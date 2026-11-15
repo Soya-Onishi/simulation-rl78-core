@@ -14,7 +14,6 @@ use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{
     CoarseBatch, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
 };
-use crate::topology::LogicalTopology;
 
 use super::SimulationBackend;
 use super::wire::{CsvStartBody, ExistsBody, HealthBody, HighWaterBody, ViewerTokenBody};
@@ -379,6 +378,7 @@ mod tests {
     use crate::contract::ActionList;
     use crate::host::SessionNode;
     use crate::probe_log::{ProbeKind, ProbePointName, ProbeRecord};
+    use crate::topology::LogicalTopology;
 
     use super::*;
 
@@ -399,10 +399,7 @@ mod tests {
     }
 
     impl SimulationBackend for MockBackend {
-        fn create(
-            &self,
-            _request: CreateSimulationRequest,
-        ) -> Result<String, ApiError> {
+        fn create(&self, _request: CreateSimulationRequest) -> Result<String, ApiError> {
             self.set("create");
             Ok("sim-1".into())
         }
@@ -592,8 +589,10 @@ mod tests {
 
         let id = backend
             .create(CreateSimulationRequest {
-                topology: one_board(),
+                id: None,
                 multicast: None,
+                assigned_boards: None,
+                topology: one_board(),
             })
             .unwrap();
         assert_eq!(id, "sim-1");

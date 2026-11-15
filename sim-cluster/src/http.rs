@@ -131,9 +131,12 @@ async fn create_simulation(
     Json(body): Json<CreateSimulationRequest>,
 ) -> Result<(StatusCode, Json<CreateSimulationResponse>), ApiError> {
     let topology = prepare_create_topology(body.topology)?;
+    // Client must not choose multicast / assignment / id — frontend allocates.
     let request = CreateSimulationRequest {
         topology,
-        multicast: body.multicast,
+        id: None,
+        multicast: None,
+        assigned_boards: None,
     };
     let backend = state.backend.clone();
     let id = tokio::task::spawn_blocking(move || backend.create(request))

@@ -2,9 +2,11 @@
 
 use std::env;
 use std::process;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sim_cluster::backend::{TcpipBackend, check_health};
+use sim_cluster::cluster_frontend::ClusterFrontend;
 use sim_cluster::config::{ConfigCli, FrontendConfig, advertise_host_from_ip};
 use sim_cluster::http;
 
@@ -31,25 +33,60 @@ fn main() {
         }
     };
 
-    // TODO: Remove after supporting multiple server
-    if cfg.servers.len() > 1 {
-        eprintln!(
-            "simulation-frontend: servers has {} entries; using the first only. \
-             Dispatch to multiple backends is not implemented (TODO).",
-            cfg.servers.len()
-        );
+    for (index, server) in cfg.servers.iter().enumerate() {
+        if let Err(err) = check_health(&server.ip, server.port, Duration::from_secs(2)) {
+            eprintln!(
+                "simulation-frontend: servers[{index}] {}:{} health check failed: {err}",
+                server.ip, server.port
+            );
+            process::exit(1);
+        }
     }
 
-    let first = &cfg.servers[0];
-    if let Err(err) = check_health(&first.ip, first.port, Duration::from_secs(2)) {
-        eprintln!(
-            "simulation-frontend: servers[0] {}:{} health check failed: {err}",
-            first.ip, first.port
-        );
-        process::exit(1);
-    }
+    let backends: Vec<(
+        Arc<dyn sim_cluster::SimulationBackend>,
+        String,
+        u32,
+        sim_cluster::MachineId,
+    )> = cfg
+        .servers
+        .iter()
+        .map(|server| {
+            let ip: std::net::Ipv4Addr = server
+                .ip
+                .parse()
+                .expect("FrontendConfig validates servers[].ip as IPv4");
+            let machine_id = sim_cluster::machine_id_from_ipv4(ip);
+            let backend: Arc<dyn sim_cluster::SimulationBackend> =
+                TcpipBackend::new(format!("http://{}:{}", server.ip, server.port));
+            (
+                backend,
+                format!("{}:{}", server.ip, server.port),
+                server.max_nodes,
+                machine_id,
+            )
+        })
+        .collect();
 
-    let backend = TcpipBackend::new(format!("http://{}:{}", first.ip, first.port));
+    let (addr_ranges, port_ranges) = match cfg.multicast.as_ref() {
+        Some(m) => match (m.ipv4_ranges(), m.port_u16_ranges()) {
+            (Ok(a), Ok(p)) => (a, p),
+            (Err(err), _) | (_, Err(err)) => {
+                eprintln!("simulation-frontend: {err}");
+                process::exit(1);
+            }
+        },
+        None => (Vec::new(), Vec::new()),
+    };
+
+    let frontend = match ClusterFrontend::new(backends, addr_ranges, port_ranges) {
+        Ok(fe) => Arc::new(fe),
+        Err(err) => {
+            eprintln!("simulation-frontend: {err}");
+            process::exit(1);
+        }
+    };
+
     let listen = cfg.listen.socket_addr();
     let advertise = advertise_host_from_ip(&cfg.listen.ip);
 
@@ -66,7 +103,7 @@ fn main() {
     if let Err(err) = rt.block_on(http::serve(
         &listen,
         advertise,
-        backend,
+        frontend,
         cfg.web_root.clone(),
     )) {
         eprintln!("simulation-frontend: {err}");

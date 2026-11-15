@@ -43,8 +43,8 @@ impl BackendConfig {
         Ok(ip)
     }
 
-    /// `machine_id` = IPv4 octets as big-endian `u32`.
-    pub fn machine_id(&self) -> Result<u32, ConfigError> {
+    /// `machine_id` = IPv4 octets as big-endian [`MachineId`].
+    pub fn machine_id(&self) -> Result<super::MachineId, ConfigError> {
         Ok(super::machine_id_from_ipv4(self.ipv4()?))
     }
 

@@ -7,7 +7,7 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 ## Deployment
 - One `simulation-frontend` for the cluster.
 - One `cluster-backend` per physical machine (arbiter thread + local board processes).
-- One backend per machine. `machine_id` = IPv4 used for identity, as u32 (network octet order). Frontend does **not** assign/notify `machine_id`; each backend derives it.
+- One backend per machine. `MachineId` = IPv4 used for identity, as a newtype over u32 (network octet order). Frontend does **not** assign/notify `MachineId`; each backend derives it.
 - `frontend.yaml` `servers[].ip` must match that backend identity IPv4.
 
 ## Config
@@ -17,11 +17,11 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 - Phase 1: IPv6 unsupported (error).
 
 ## Create
-- Frontend First-Fit: walk `boards[]` order, fill `servers[]` in order up to remaining `max_nodes` (capacity is concurrent board processes across all sims on that backend).
+- Frontend First-Fit: walk `boards[]` order; for each board, assign to the first backend with free capacity while iterating a derived `MachineId → free slots` map (`HashMap::iter` order — not YAML `servers[]` order). Free slots = `max_nodes` minus boards assigned in all `SimRecord.per_server` (no separate remaining cache). Capacity is concurrent board processes across all sims on that backend. `ClusterFrontend` keys backends / `per_server` by `MachineId`.
 - One node = one topology `boards[]` entry (including plant kinds).
 - Payload to each participating backend: full topology JSON, assigned board ids, and (if multicast used) multicast address+port.
 - Backend spawns **only** assigned boards; keeps full topology for local edges.
-- Multicast addr/port chosen at **create** (not start); free on sim destroy. "Unused" = not already allocated by this frontend to another sim (assume ranges not used elsewhere; no OS-wide probe).
+- Multicast addr/port chosen at **create** (not start); free when the sim's `SimRecord` is removed. "Unused" = not present in any live `SimRecord.mcast` (no separate used_mcast cache; assume ranges not used elsewhere; no OS-wide probe).
 - Distinct create errors: capacity / multicast exhaustion / duplicate participant IPs / cross-host edge.
 - Partial create success → compensate (destroy successes) then fail overall; if compensate fails, surface that remnant may exist.
 - **Cross-host edges** (endpoints whose endpoint boards land on different backends): reject at create in phase 1. Mark code + design memo TODO: provisional until phase 2 endpoint multicast; then remove rejection.
@@ -61,8 +61,8 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 | Phase | Branch | Scope |
 |-------|--------|-------|
 | p1a | `feature/cluster-distributed-p1` | Config; VtClock slot0=remote min; Start{until}; `cluster_mcast` helpers (**merged #128**) |
-| p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 |
-| p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards |
+| p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 (**merged #129**) |
+| p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards (**this branch**) |
 | p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate |
 | p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` |
 | p3 | `…-p3-targeted` | probe/action/inspect to hosting backend only |

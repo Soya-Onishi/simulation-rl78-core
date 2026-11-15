@@ -44,8 +44,17 @@ pub fn collect_board_catalogs_with_timeout(
     topo: &LogicalTopology,
     timeout: Duration,
 ) -> Result<Vec<CollectedBoardCatalog>, ArbiterError> {
-    let mut collected = Vec::with_capacity(topo.boards.len());
-    for board in &topo.boards {
+    let assigned = opts.assigned_boards.as_ref();
+    let boards: Vec<_> = match assigned {
+        None => topo.boards.iter().collect(),
+        Some(ids) => topo
+            .boards
+            .iter()
+            .filter(|b| ids.iter().any(|id| id == &b.id))
+            .collect(),
+    };
+    let mut collected = Vec::with_capacity(boards.len());
+    for board in boards {
         let bin = crate::arbiter::binary_for_kind(opts, &board.kind)?;
         let mut child = Command::new(bin)
             .arg("--list-catalog")
@@ -356,6 +365,7 @@ mod tests {
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
             multicast: None,
+            assigned_boards: None,
         }
     }
 

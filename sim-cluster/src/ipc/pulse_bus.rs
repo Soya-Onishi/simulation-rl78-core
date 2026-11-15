@@ -49,7 +49,8 @@ impl NodePulsePorts {
             );
             let svc_name = names::pulse_edge(cluster_key, id);
             if edge.from.path == board_name {
-                let puber = open_or_create_pulse_publisher(node, &svc_name, DEFAULT_PULSE_RING_LEN)?;
+                let puber =
+                    open_or_create_pulse_publisher(node, &svc_name, DEFAULT_PULSE_RING_LEN)?;
                 producers.insert(id, puber);
             } else if edge.to.path == board_name {
                 let sub = open_or_create_pulse_subscriber(node, &svc_name, DEFAULT_PULSE_RING_LEN)?;

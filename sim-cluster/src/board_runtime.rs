@@ -44,8 +44,10 @@ pub struct BoardOptions {
     /// `min(local board slots, remote_min slot0) + margin_ns`
     /// (host `until_ns` is applied separately on the node).
     pub margin_ns: u64,
-    /// This board's slot in the shared-memory [`VtClock`] (`1..=N`, topology order).
+    /// This board's slot in the shared-memory [`VtClock`] (`1..=N`, local order).
     pub vt_slot: usize,
+    /// Number of boards this host's arbiter spawned (VtClock / iceoryx sizing).
+    pub local_board_count: usize,
 }
 
 /// Failures from the board framework.
@@ -93,6 +95,7 @@ pub fn parse_board_args(
     let mut topology: Option<PathBuf> = None;
     let mut margin_ns: Option<u64> = None;
     let mut vt_slot: Option<usize> = None;
+    let mut local_board_count: Option<usize> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -134,6 +137,14 @@ pub fn parse_board_args(
                     BoardCliError::Message(format!("{prog}: --vt-slot must be usize"))
                 })?);
             }
+            "--local-board-count" => {
+                let raw = iter.next().ok_or_else(|| {
+                    BoardCliError::Message(format!("{prog}: --local-board-count requires a value"))
+                })?;
+                local_board_count = Some(raw.parse().map_err(|_| {
+                    BoardCliError::Message(format!("{prog}: --local-board-count must be usize"))
+                })?);
+            }
             other => {
                 return Err(BoardCliError::Message(format!(
                     "{prog}: unknown argument {other}"
@@ -150,6 +161,7 @@ pub fn parse_board_args(
             topology_path: topology.unwrap_or_default(),
             margin_ns: margin_ns.unwrap_or(0),
             vt_slot: vt_slot.unwrap_or(0),
+            local_board_count: local_board_count.unwrap_or(0),
         });
     }
     let (
@@ -159,6 +171,7 @@ pub fn parse_board_args(
         Some(topology_path),
         Some(margin_ns),
         Some(vt_slot),
+        Some(local_board_count),
     ) = (
         board_name,
         cluster_key,
@@ -166,13 +179,19 @@ pub fn parse_board_args(
         topology,
         margin_ns,
         vt_slot,
+        local_board_count,
     )
     else {
         return Err(BoardCliError::Message(format!(
-            "{prog}: --board-name, --cluster-key, --iox-root, --topology, --margin-ns, and \
-             --vt-slot are required"
+            "{prog}: --board-name, --cluster-key, --iox-root, --topology, --margin-ns, \
+             --vt-slot, and --local-board-count are required"
         )));
     };
+    if local_board_count == 0 {
+        return Err(BoardCliError::Message(format!(
+            "{prog}: --local-board-count must be >= 1"
+        )));
+    }
     Ok(BoardOptions {
         list_catalog: false,
         board_name,
@@ -181,6 +200,7 @@ pub fn parse_board_args(
         topology_path,
         margin_ns,
         vt_slot,
+        local_board_count,
     })
 }
 
@@ -190,7 +210,7 @@ pub fn board_usage(prog: &str) -> String {
     format!(
         "Usage:\n\
          {prog} --board-name <name> --cluster-key <key> --iox-root <path> --topology <json> \
---margin-ns <ns> --vt-slot <1..=N>\n\
+--margin-ns <ns> --vt-slot <1..=N> --local-board-count <N>\n\
          {prog} --list-catalog\n\
          \n\
          Cluster mode is spawned by the in-process arbiter thread. After init the control loop is\n\
@@ -376,26 +396,23 @@ pub fn run_node<E: Entity>(
     let board_hash = board_id_hash(board_name);
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
-    let hashes = crate::topology::build_topology_hashes(&topo)
-        .map_err(|err| BoardError::Message(err.to_string()))?;
     let board = find_board(&topo, board_name)?;
-    let boards = hashes.boards;
 
     // Shared-memory virtual-time clock created by the arbiter.
-    let vt = VtClock::open(&opts.iox_root, topo.boards.len())?;
-    if !(1..=topo.boards.len()).contains(&opts.vt_slot) {
+    let local_n = opts.local_board_count;
+    let vt = VtClock::open(&opts.iox_root, local_n)?;
+    if !(1..=local_n).contains(&opts.vt_slot) {
         return Err(BoardError::Message(format!(
-            "--vt-slot {} out of range 1..={}",
-            opts.vt_slot,
-            topo.boards.len()
+            "--vt-slot {} out of range 1..={local_n}",
+            opts.vt_slot
         )));
     }
 
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_name}-{}", opts.cluster_key))?;
-    let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
-    let actions = NodeActions::open(&iox_node, &opts.cluster_key, topo.boards.len())?;
-    let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
+    let control = NodeControl::open(&iox_node, &opts.cluster_key, local_n)?;
+    let actions = NodeActions::open(&iox_node, &opts.cluster_key, local_n)?;
+    let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, local_n)?;
     let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_name, board, &topo)?;
 
     let (entity, ports, probe_points) = build();
@@ -404,7 +421,7 @@ pub fn run_node<E: Entity>(
         &opts.cluster_key,
         board_hash,
         board_name,
-        topo.boards.len(),
+        local_n,
         probe_points,
     )?;
     let mut sim = Simulator::new(entity, SimConfig::default());
@@ -709,9 +726,7 @@ fn can_skip_allowed_refresh(
     margin_ns: u64,
     until_ns: u64,
 ) -> bool {
-    !next_quantum_reaches
-        && remote_min_ns.saturating_add(margin_ns) >= last
-        && until_ns >= last
+    !next_quantum_reaches && remote_min_ns.saturating_add(margin_ns) >= last && until_ns >= last
 }
 
 fn perform_local_step<E: Entity>(
@@ -774,7 +789,11 @@ mod tests {
             u64::MAX
         ));
         assert!(!can_skip_allowed_refresh(
-            10_000, true, u64::MAX, 100, u64::MAX
+            10_000,
+            true,
+            u64::MAX,
+            100,
+            u64::MAX
         ));
     }
 
@@ -796,9 +815,7 @@ mod tests {
             u64::MAX
         ));
         // remote+margin still covers last
-        assert!(can_skip_allowed_refresh(
-            5_100, false, 5_000, 100, u64::MAX
-        ));
+        assert!(can_skip_allowed_refresh(5_100, false, 5_000, 100, u64::MAX));
     }
 
     #[test]
@@ -869,6 +886,8 @@ mod tests {
                 "1000".into(),
                 "--vt-slot".into(),
                 "2".into(),
+                "--local-board-count".into(),
+                "2".into(),
             ],
         )
         .unwrap();
@@ -877,6 +896,7 @@ mod tests {
         assert_eq!(opts.cluster_key, "k");
         assert_eq!(opts.margin_ns, 1000);
         assert_eq!(opts.vt_slot, 2);
+        assert_eq!(opts.local_board_count, 2);
     }
 
     #[test]
@@ -957,6 +977,8 @@ mod tests {
                 "nope".into(),
                 "--vt-slot".into(),
                 "1".into(),
+                "--local-board-count".into(),
+                "1".into(),
             ],
         )
         .unwrap_err();
@@ -980,6 +1002,8 @@ mod tests {
                 "1000".into(),
                 "--vt-slot".into(),
                 "nope".into(),
+                "--local-board-count".into(),
+                "1".into(),
             ],
         )
         .unwrap_err();

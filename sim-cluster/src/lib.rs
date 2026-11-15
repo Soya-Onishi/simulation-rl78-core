@@ -13,6 +13,7 @@ mod arbiter_catalog;
 pub mod backend;
 pub mod board_kind;
 pub mod board_runtime;
+pub mod cluster_frontend;
 pub mod cluster_mcast;
 pub mod cluster_stop;
 pub mod config;
@@ -45,6 +46,7 @@ pub use board_runtime::{
     cluster_host_stop_reason, list_catalog, parse_board_args, run_node,
 };
 pub use cluster_stop::is_cluster_relevant_reason;
+pub use config::{MachineId, machine_id_from_ipv4};
 pub use contract::{
     ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, AttachGdbRequest,
     CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, GdbSshCommand,

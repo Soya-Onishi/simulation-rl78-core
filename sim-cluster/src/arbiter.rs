@@ -12,9 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::cluster_mcast::{
-    ClusterMulticast, MulticastMessage, RemoteVtTable, VtPublishThrottle,
-};
+use crate::cluster_mcast::{ClusterMulticast, MulticastMessage, RemoteVtTable, VtPublishThrottle};
 
 /// Ensures board/plant children are killed on early return or panic.
 struct ChildGuard {
@@ -72,7 +70,7 @@ pub enum ArbiterError {
 #[derive(Clone, Debug)]
 pub struct ArbiterMcastOpts {
     pub group: SocketAddrV4,
-    pub machine_id: u32,
+    pub machine_id: crate::config::MachineId,
     pub interface: Ipv4Addr,
 }
 
@@ -96,6 +94,33 @@ pub struct ArbiterOptions {
     pub iox_root: PathBuf,
     /// When set, share VT mins and ClusterStop with other backends.
     pub multicast: Option<ArbiterMcastOpts>,
+    /// Board ids to spawn on this host. `None` means every board in the topology.
+    pub assigned_boards: Option<Vec<String>>,
+}
+
+fn assigned_board_list(
+    opts: &ArbiterOptions,
+    topo: &LogicalTopology,
+) -> Result<Vec<String>, ArbiterError> {
+    match opts.assigned_boards.as_deref() {
+        None => Ok(topo.boards.iter().map(|b| b.id.clone()).collect()),
+        Some(ids) => {
+            let known: HashSet<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
+            for id in ids {
+                if !known.contains(id.as_str()) {
+                    return Err(ArbiterError::Message(format!(
+                        "assigned_boards: unknown board id {id:?}"
+                    )));
+                }
+            }
+            Ok(topo
+                .boards
+                .iter()
+                .filter(|b| ids.iter().any(|id| id == &b.id))
+                .map(|b| b.id.clone())
+                .collect())
+        }
+    }
 }
 
 /// Spawn nodes and stay up until the server publishes `shutdown`.
@@ -118,10 +143,9 @@ fn booting_barrier_and_start(
     topo: &LogicalTopology,
     control: &ArbiterControl,
 ) -> Result<(), ArbiterError> {
-    let mut peers = await_booting(topo, control)?;
-    control.publish(&ControlToNode::Start {
-        until_ns: u64::MAX,
-    })?;
+    let board_ids: Vec<String> = topo.boards.iter().map(|b| b.id.clone()).collect();
+    let mut peers = await_booting(topo, &board_ids, control)?;
+    control.publish(&ControlToNode::Start { until_ns: u64::MAX })?;
     for state in peers.values_mut() {
         *state = state.on_start_broadcast();
     }
@@ -135,14 +159,14 @@ const GET_STATE_REPUBLISH: Duration = Duration::from_millis(50);
 
 fn await_booting(
     topo: &LogicalTopology,
+    board_ids: &[String],
     control: &ArbiterControl,
 ) -> Result<HashMap<String, PeerState>, ArbiterError> {
     let timeout = Duration::from_millis(topo.booting_timeout_ms);
     let deadline = Instant::now() + timeout;
-    let mut peers: HashMap<String, PeerState> = topo
-        .boards
+    let mut peers: HashMap<String, PeerState> = board_ids
         .iter()
-        .map(|b| (b.id.clone(), PeerState::Booting))
+        .map(|id| (id.clone(), PeerState::Booting))
         .collect();
 
     control.publish(&ControlToNode::GetState)?;
@@ -324,32 +348,34 @@ fn run_host_session(
     topo: &LogicalTopology,
     link: ArbiterLink,
 ) -> Result<(), ArbiterError> {
-    let board_ids: Vec<&str> = topo.boards.iter().map(|b| b.id.as_str()).collect();
+    let local_boards = assigned_board_list(opts, topo)?;
+    let board_ids: Vec<&str> = local_boards.iter().map(|id| id.as_str()).collect();
+    let local_count = local_boards.len();
     let boards = board_hash_table(board_ids).map_err(ArbiterError::Message)?;
 
     let config = isolated_config(&opts.iox_root)?;
     let node = create_node(&config, &format!("arbiter-{}", opts.cluster_key))?;
     let host = link.host;
-    let control =
-        ArbiterControl::create(&node, &opts.cluster_key, topo.boards.len(), boards.clone())?;
-    let node_actions = ArbiterNodeActions::create(&node, &opts.cluster_key, topo.boards.len())?;
+    let control = ArbiterControl::create(&node, &opts.cluster_key, local_count, boards.clone())?;
+    let node_actions = ArbiterNodeActions::create(&node, &opts.cluster_key, local_count)?;
     let server_actions = link.server_actions;
     let probe_ctrl = ArbiterProbeCtrl::open(
         &node,
         &opts.cluster_key,
-        topo.boards.len(),
+        local_count,
         link.probe_ctrl_server,
     )?;
     let probe_tx = link.probe_forward;
     let mut logs = ArbiterLogBus::create(
         &opts.iox_root,
         &opts.cluster_key,
-        topo.boards.len(),
+        local_count,
         boards,
         link.log_tx,
     )?;
     log::info!(
-        "loaded topology ({} boards, {} edges, margin_ns={}, cluster_key={})",
+        "loaded topology ({} local / {} total boards, {} edges, margin_ns={}, cluster_key={})",
+        local_count,
         topo.boards.len(),
         topo.edges.len(),
         topo.margin_ns,
@@ -374,7 +400,7 @@ fn run_host_session(
         probe_hub.catalog().len()
     );
 
-    let vt = match VtClock::create(&opts.iox_root, topo.boards.len()) {
+    let vt = match VtClock::create(&opts.iox_root, local_count) {
         Ok(vt) => vt,
         Err(err) => {
             logs.shutdown();
@@ -390,14 +416,14 @@ fn run_host_session(
             return Err(err);
         }
     };
-    let children = match spawn_nodes(opts, topo) {
+    let children = match spawn_nodes(opts, topo, &local_boards) {
         Ok(children) => ChildGuard::new(children),
         Err(err) => {
             logs.shutdown();
             return Err(err);
         }
     };
-    let mut peers = match await_booting(topo, &control) {
+    let mut peers = match await_booting(topo, &local_boards, &control) {
         Ok(peers) => peers,
         Err(err) => {
             logs.shutdown();
@@ -476,7 +502,8 @@ fn run_host_session(
                     gdb_step = None;
                     until_cap = None;
                     // Local ClusterStop only: wait until every local board reports Stopped,
-                    // then Reset + Start. Cross-host Reset is frontend fanout (p1d);
+                    // then Reset + Start.
+                    // TODO(cluster-distributed-p1d): Cross-host Reset is frontend fanout;
                     // do not multicast here or remotes stop without Reset/Start.
                     // Slot 0 is remote-host min VT (not until); do not use it as a freeze ceiling.
                     broadcast_cluster_stop(
@@ -531,7 +558,7 @@ fn run_host_session(
             &control,
             &mut peers,
             &vt,
-            topo,
+            &local_boards,
             &mut until_cap,
             &mut running,
             &mut gdb_step,
@@ -548,9 +575,7 @@ fn run_host_session(
         }
 
         if let Some(plane) = mcast_plane.as_mut() {
-            if let Some(reason) =
-                poll_mcast_plane(plane, &vt, &control, &mut peers, running)?
-            {
+            if let Some(reason) = poll_mcast_plane(plane, &vt, &control, &mut peers, running)? {
                 running = false;
                 until_cap = None;
                 gdb_step = None;
@@ -634,23 +659,23 @@ fn forward_probes(hub: &ArbiterProbeHub, tx: &ArbiterProbeForward) -> Result<(),
 
 /// Virtual time of `source` for GDB catch-up (`until` / ceiling).
 fn gdb_catchup_target(
-    topo: &LogicalTopology,
+    local_boards: &[String],
     vt: &VtClock,
     source: &str,
 ) -> Result<u64, ArbiterError> {
-    let slot = board_slot(topo, source).ok_or_else(|| {
+    let slot = board_slot(local_boards, source).ok_or_else(|| {
         ArbiterError::Message(format!(
-            "gdb catch-up: board '{source}' not found in topology"
+            "gdb catch-up: board '{source}' not found among local boards"
         ))
     })?;
     Ok(vt.board_vt(slot))
 }
 
-/// Slot index in [`VtClock`] for `board_id` (topology order, 1-based).
-fn board_slot(topo: &LogicalTopology, board_id: &str) -> Option<usize> {
-    topo.boards
+/// Slot index in [`VtClock`] for `board_id` (local assigned order, 1-based).
+fn board_slot(local_boards: &[String], board_id: &str) -> Option<usize> {
+    local_boards
         .iter()
-        .position(|b| b.id == board_id)
+        .position(|id| id == board_id)
         .map(board_slot_index)
 }
 
@@ -682,14 +707,7 @@ fn apply_start(
     if should_stay_stopped(until_ns, now) {
         if *running {
             log::info!("start until_ns={until_ns:?} <= now={now}; Host Stop");
-            broadcast_cluster_stop(
-                control,
-                peers,
-                "server",
-                HostStopReason::Until,
-                mcast,
-                true,
-            )?;
+            broadcast_cluster_stop(control, peers, "server", HostStopReason::Until, mcast, true)?;
             *running = false;
         } else {
             log::info!("start until_ns={until_ns:?} <= now={now}; stay stopped");
@@ -764,7 +782,7 @@ fn step_time_sync(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
     vt: &VtClock,
-    topo: &LogicalTopology,
+    local_boards: &[String],
     until_ns: &mut Option<u64>,
     running: &mut bool,
     gdb_step: &mut Option<GdbStepPhase>,
@@ -800,7 +818,7 @@ fn step_time_sync(
         return Ok(SyncStep::Stopped(reason));
     }
     if let Some((source, reason)) = gdb_insn {
-        let target = gdb_catchup_target(topo, vt, &source)?;
+        let target = gdb_catchup_target(local_boards, vt, &source)?;
         log::info!("gdb Step from '{source}' ({reason}) vt={target}; catch-up");
         *until_ns = Some(target);
         broadcast_start(control, peers, Some(target))?;
@@ -859,8 +877,14 @@ fn missing_bin_hint(kind: &str) -> &'static str {
 }
 
 fn ensure_node_bins(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(), ArbiterError> {
+    let local = assigned_board_list(opts, topo)?;
     let mut checked = HashSet::new();
-    for board in &topo.boards {
+    for board_id in &local {
+        let board = topo
+            .boards
+            .iter()
+            .find(|b| &b.id == board_id)
+            .expect("assigned_board_list validates ids");
         if !checked.insert(board.kind.as_str()) {
             continue;
         }
@@ -877,10 +901,21 @@ fn ensure_node_bins(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<(),
     Ok(())
 }
 
-fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Child>, ArbiterError> {
+fn spawn_nodes(
+    opts: &ArbiterOptions,
+    topo: &LogicalTopology,
+    local_boards: &[String],
+) -> Result<Vec<Child>, ArbiterError> {
     // Guard so a mid-loop spawn failure still kills already-started boards.
     let mut children = ChildGuard::new(Vec::new());
-    for (index, board) in topo.boards.iter().enumerate() {
+    for (index, board_id) in local_boards.iter().enumerate() {
+        let board = topo
+            .boards
+            .iter()
+            .find(|b| &b.id == board_id)
+            .ok_or_else(|| {
+                ArbiterError::Message(format!("assigned board missing from topology: {board_id}"))
+            })?;
         let bin = binary_for_kind(opts, &board.kind)?;
         let child = Command::new(bin)
             .arg("--board-name")
@@ -895,6 +930,8 @@ fn spawn_nodes(opts: &ArbiterOptions, topo: &LogicalTopology) -> Result<Vec<Chil
             .arg(topo.margin_ns.to_string())
             .arg("--vt-slot")
             .arg(board_slot_index(index).to_string())
+            .arg("--local-board-count")
+            .arg(local_boards.len().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -996,7 +1033,7 @@ fn open_mcast_plane(
     };
     let sock = ClusterMulticast::join(m.group, m.machine_id, m.interface)?;
     log::info!(
-        "joined cluster multicast {} interface={} machine_id={:#010x}",
+        "joined cluster multicast {} interface={} machine_id={}",
         m.group,
         m.interface,
         m.machine_id
@@ -1031,17 +1068,12 @@ fn poll_mcast_plane(
                 let agg = plane.remotes.upsert(machine_id, min_vt_ns);
                 vt.set_remote_min_ns(agg);
             }
-            MulticastMessage::ClusterStop {
-                machine_id,
-                reason,
-            } => {
+            MulticastMessage::ClusterStop { machine_id, reason } => {
                 if machine_id == plane.sock.machine_id() {
                     continue;
                 }
                 if running {
-                    log::info!(
-                        "multicast ClusterStop from machine_id={machine_id:#010x} ({reason})"
-                    );
+                    log::info!("multicast ClusterStop from machine_id={machine_id} ({reason})");
                     broadcast_cluster_stop(
                         control,
                         peers,
@@ -1076,8 +1108,8 @@ fn poll_mcast_plane(
 #[cfg(test)]
 fn apply_remote_vt_sample(
     table: &mut RemoteVtTable,
-    self_id: u32,
-    machine_id: u32,
+    self_id: crate::config::MachineId,
+    machine_id: crate::config::MachineId,
     min_vt_ns: u64,
 ) -> Option<u64> {
     if machine_id == self_id {
@@ -1154,6 +1186,7 @@ mod tests {
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
             multicast: None,
+            assigned_boards: None,
         };
         assert_eq!(
             binary_for_kind(&opts, crate::KIND_RL78).unwrap(),
@@ -1193,6 +1226,7 @@ mod tests {
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
             multicast: None,
+            assigned_boards: None,
         };
         let topo = LogicalTopology {
             boards: vec![BoardSpec {
@@ -1212,10 +1246,10 @@ mod tests {
 
     #[test]
     fn board_slot_follows_topology_order() {
-        let topo = two_board_topo(1_000);
-        assert_eq!(board_slot(&topo, "a"), Some(1));
-        assert_eq!(board_slot(&topo, "b"), Some(2));
-        assert_eq!(board_slot(&topo, "c"), None);
+        let local = vec!["a".into(), "b".into()];
+        assert_eq!(board_slot(&local, "a"), Some(1));
+        assert_eq!(board_slot(&local, "b"), Some(2));
+        assert_eq!(board_slot(&local, "c"), None);
     }
 
     #[test]
@@ -1225,18 +1259,30 @@ mod tests {
         let vt = VtClock::create(dir.path(), topo.boards.len()).unwrap();
         vt.write_board_vt(1, 111);
         vt.write_board_vt(2, 222);
-        assert_eq!(gdb_catchup_target(&topo, &vt, "a").unwrap(), 111);
-        assert_eq!(gdb_catchup_target(&topo, &vt, "b").unwrap(), 222);
-        assert!(gdb_catchup_target(&topo, &vt, "missing").is_err());
+        let local = vec!["a".into(), "b".into()];
+        assert_eq!(gdb_catchup_target(&local, &vt, "a").unwrap(), 111);
+        assert_eq!(gdb_catchup_target(&local, &vt, "b").unwrap(), 222);
+        assert!(gdb_catchup_target(&local, &vt, "missing").is_err());
     }
 
     #[test]
     fn apply_remote_vt_sample_excludes_self_and_aggregates() {
+        use crate::config::MachineId;
         let mut table = RemoteVtTable::new();
-        assert!(apply_remote_vt_sample(&mut table, 1, 1, 10).is_none());
-        assert_eq!(apply_remote_vt_sample(&mut table, 1, 2, 100), Some(100));
-        assert_eq!(apply_remote_vt_sample(&mut table, 1, 3, 40), Some(40));
-        assert_eq!(apply_remote_vt_sample(&mut table, 1, 2, 80), Some(40));
+        let self_id = MachineId::from_u32(1);
+        assert!(apply_remote_vt_sample(&mut table, self_id, self_id, 10).is_none());
+        assert_eq!(
+            apply_remote_vt_sample(&mut table, self_id, MachineId::from_u32(2), 100),
+            Some(100)
+        );
+        assert_eq!(
+            apply_remote_vt_sample(&mut table, self_id, MachineId::from_u32(3), 40),
+            Some(40)
+        );
+        assert_eq!(
+            apply_remote_vt_sample(&mut table, self_id, MachineId::from_u32(2), 80),
+            Some(40)
+        );
     }
 
     #[test]
@@ -1354,10 +1400,9 @@ mod tests {
         saw_cluster_stop: Option<Arc<Mutex<bool>>>,
     ) {
         let topo = two_board_topo(2_000);
-        let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, &format!("fake-{board_id}-{cluster_key}")).unwrap();
-        let control = NodeControl::open(&node, &cluster_key, boards).unwrap();
+        let control = NodeControl::open(&node, &cluster_key, topo.boards.len()).unwrap();
         // UART attach is covered by dedicated tests; skip here to isolate control timing.
 
         let my_hash = board_id_hash(&board_id);

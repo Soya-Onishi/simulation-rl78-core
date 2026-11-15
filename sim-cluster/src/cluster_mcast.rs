@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
+use crate::config::MachineId;
 use crate::control::HostStopReason;
 
 /// Magic bytes for sim-cluster multicast datagrams.
@@ -42,11 +43,11 @@ impl MulticastMsgKind {
 pub enum MulticastMessage {
     /// Sender's local `min_board_vt`.
     VtMin {
-        machine_id: u32,
+        machine_id: MachineId,
         min_vt_ns: u64,
     },
     ClusterStop {
-        machine_id: u32,
+        machine_id: MachineId,
         reason: HostStopReason,
     },
 }
@@ -70,10 +71,7 @@ impl MulticastMessage {
                 out.extend_from_slice(&machine_id.to_be_bytes());
                 out.extend_from_slice(&min_vt_ns.to_le_bytes());
             }
-            Self::ClusterStop {
-                machine_id,
-                reason,
-            } => {
+            Self::ClusterStop { machine_id, reason } => {
                 out.push(MulticastMsgKind::ClusterStop as u8);
                 out.extend_from_slice(&machine_id.to_be_bytes());
                 out.push(reason.to_wire());
@@ -97,7 +95,7 @@ impl MulticastMessage {
                 if rest.len() < 12 {
                     return None;
                 }
-                let machine_id = u32::from_be_bytes(rest[0..4].try_into().ok()?);
+                let machine_id = MachineId::from_be_bytes(rest[0..4].try_into().ok()?);
                 let min_vt_ns = u64::from_le_bytes(rest[4..12].try_into().ok()?);
                 Some(Self::VtMin {
                     machine_id,
@@ -108,12 +106,9 @@ impl MulticastMessage {
                 if rest.len() < 5 {
                     return None;
                 }
-                let machine_id = u32::from_be_bytes(rest[0..4].try_into().ok()?);
+                let machine_id = MachineId::from_be_bytes(rest[0..4].try_into().ok()?);
                 let reason = HostStopReason::from_wire(rest[4])?;
-                Some(Self::ClusterStop {
-                    machine_id,
-                    reason,
-                })
+                Some(Self::ClusterStop { machine_id, reason })
             }
         }
     }
@@ -123,7 +118,7 @@ impl MulticastMessage {
 pub struct ClusterMulticast {
     socket: UdpSocket,
     group: SocketAddrV4,
-    machine_id: u32,
+    machine_id: MachineId,
 }
 
 impl ClusterMulticast {
@@ -138,7 +133,7 @@ impl ClusterMulticast {
     /// Linux defaults `IP_MULTICAST_LOOP` to on, so this is set explicitly.
     pub fn join(
         group: SocketAddrV4,
-        machine_id: u32,
+        machine_id: MachineId,
         interface: Ipv4Addr,
     ) -> io::Result<Self> {
         // Bind the multicast group address+port so datagrams destined to the
@@ -162,7 +157,7 @@ impl ClusterMulticast {
     }
 
     #[must_use]
-    pub fn machine_id(&self) -> u32 {
+    pub fn machine_id(&self) -> MachineId {
         self.machine_id
     }
 
@@ -213,7 +208,7 @@ impl ClusterMulticast {
 #[derive(Clone, Debug, Default)]
 pub struct RemoteVtTable {
     /// `machine_id` → latest reported min VT (excludes local machine).
-    peers: HashMap<u32, u64>,
+    peers: HashMap<MachineId, u64>,
 }
 
 impl RemoteVtTable {
@@ -223,7 +218,7 @@ impl RemoteVtTable {
     }
 
     /// Update one remote; returns the new aggregate min for slot 0 (`u64::MAX` if empty).
-    pub fn upsert(&mut self, machine_id: u32, min_vt_ns: u64) -> u64 {
+    pub fn upsert(&mut self, machine_id: MachineId, min_vt_ns: u64) -> u64 {
         self.peers.insert(machine_id, min_vt_ns);
         self.aggregate_min()
     }
@@ -307,7 +302,9 @@ pub fn allocate_multicast(
             let addr = Ipv4Addr::from(raw);
             for &(p0, p1) in port_ranges {
                 for port in p0..=p1 {
-                    if !used.iter().any(|&(u_addr, u_port)| u_addr == addr && u_port == port)
+                    if !used
+                        .iter()
+                        .any(|&(u_addr, u_port)| u_addr == addr && u_port == port)
                     {
                         return Some((addr, port));
                     }
@@ -318,19 +315,19 @@ pub fn allocate_multicast(
     None
 }
 
-/// First-Fit board placement onto servers (topology board order × servers order).
+/// First-Fit board placement onto backends keyed by [`MachineId`].
+///
+/// Boards are taken in `board_ids` order. For each board, backends are tried in
+/// [`HashMap::iter`] order over `remaining` (not YAML `servers[]` order).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoardPlacement {
-    /// `board_id` → index into the frontend `servers` list.
-    pub board_to_server: Vec<(String, usize)>,
+    /// `board_id` → backend [`MachineId`].
+    pub board_to_server: Vec<(String, MachineId)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlacementError {
-    InsufficientCapacity {
-        boards: usize,
-        free_slots: u32,
-    },
+    InsufficientCapacity { boards: usize, free_slots: u64 },
 }
 
 impl std::fmt::Display for PlacementError {
@@ -346,32 +343,39 @@ impl std::fmt::Display for PlacementError {
 
 impl std::error::Error for PlacementError {}
 
-/// Place `board_ids` with First-Fit using remaining capacity per server.
+/// Place `board_ids` with First-Fit over `remaining` ([`MachineId`] → free slots).
+/// Does not mutate `remaining`; tracks taken slots in a local map.
 pub fn place_boards_first_fit(
     board_ids: &[String],
-    remaining: &mut [u32],
+    remaining: &HashMap<MachineId, u32>,
 ) -> Result<BoardPlacement, PlacementError> {
-    let free_slots: u32 = remaining.iter().copied().sum();
-    if (board_ids.len() as u32) > free_slots {
+    let free_slots: u64 = remaining.values().map(|slots| u64::from(*slots)).sum();
+    let need = board_ids.len() as u64;
+    if need > free_slots {
         return Err(PlacementError::InsufficientCapacity {
             boards: board_ids.len(),
             free_slots,
         });
     }
+    let mut taken: HashMap<MachineId, u32> = HashMap::new();
     let mut board_to_server = Vec::with_capacity(board_ids.len());
-    let mut server = 0usize;
     for board_id in board_ids {
-        while server < remaining.len() && remaining[server] == 0 {
-            server += 1;
-        }
-        debug_assert!(server < remaining.len());
-        remaining[server] -= 1;
-        board_to_server.push((board_id.clone(), server));
+        let Some(machine_id) = remaining.iter().find_map(|(id, &slots)| {
+            let used = taken.get(id).copied().unwrap_or(0);
+            (used < slots).then_some(*id)
+        }) else {
+            return Err(PlacementError::InsufficientCapacity {
+                boards: board_ids.len(),
+                free_slots: 0,
+            });
+        };
+        *taken.entry(machine_id).or_insert(0) += 1;
+        board_to_server.push((board_id.clone(), machine_id));
     }
     Ok(BoardPlacement { board_to_server })
 }
 
-/// True when any topology edge connects boards on different servers.
+/// True when any topology edge connects boards on different backends ([`MachineId`]).
 ///
 /// Missing board ids in `board_server` also return true (fail closed) so create
 /// cannot silently accept incomplete placement maps.
@@ -382,14 +386,14 @@ pub fn place_boards_first_fit(
 #[must_use]
 pub fn has_cross_host_edge(
     edges: &[(String, String)],
-    board_server: &HashMap<String, usize>,
+    board_server: &HashMap<String, MachineId>,
 ) -> bool {
-    edges.iter().any(|(a, b)| {
-        match (board_server.get(a), board_server.get(b)) {
+    edges
+        .iter()
+        .any(|(a, b)| match (board_server.get(a), board_server.get(b)) {
             (Some(&sa), Some(&sb)) => sa != sb,
             _ => true,
-        }
-    })
+        })
 }
 
 #[cfg(test)]
@@ -410,7 +414,7 @@ mod tests {
     #[test]
     fn vt_min_round_trip() {
         let msg = MulticastMessage::VtMin {
-            machine_id: 0x0a00_0001,
+            machine_id: MachineId::from_u32(0x0a00_0001),
             min_vt_ns: 12345,
         };
         let bytes = msg.encode();
@@ -420,7 +424,7 @@ mod tests {
     #[test]
     fn cluster_stop_round_trip() {
         let msg = MulticastMessage::ClusterStop {
-            machine_id: 1,
+            machine_id: MachineId::from_u32(1),
             reason: HostStopReason::Until,
         };
         assert_eq!(MulticastMessage::decode(&msg.encode()), Some(msg));
@@ -430,9 +434,9 @@ mod tests {
     fn remote_table_excludes_empty_as_max() {
         let mut t = RemoteVtTable::new();
         assert_eq!(t.aggregate_min(), u64::MAX);
-        assert_eq!(t.upsert(1, 100), 100);
-        assert_eq!(t.upsert(2, 50), 50);
-        assert_eq!(t.upsert(1, 80), 50);
+        assert_eq!(t.upsert(MachineId::from_u32(1), 100), 100);
+        assert_eq!(t.upsert(MachineId::from_u32(2), 50), 50);
+        assert_eq!(t.upsert(MachineId::from_u32(1), 80), 50);
     }
 
     #[test]
@@ -460,24 +464,37 @@ mod tests {
     #[test]
     fn first_fit_placement() {
         let boards = vec!["a".into(), "b".into(), "c".into()];
-        let mut rem = [2, 2];
-        let place = place_boards_first_fit(&boards, &mut rem).unwrap();
-        assert_eq!(
-            place.board_to_server,
-            vec![("a".into(), 0), ("b".into(), 0), ("c".into(), 1)]
-        );
-        assert_eq!(rem, [0, 1]);
+        let mid10 = MachineId::from_u32(10);
+        let mid20 = MachineId::from_u32(20);
+        let rem = HashMap::from([(mid10, 2u32), (mid20, 2u32)]);
+        let place = place_boards_first_fit(&boards, &rem).unwrap();
+        assert_eq!(place.board_to_server.len(), 3);
+        // Input capacity map is unchanged.
+        assert_eq!(rem, HashMap::from([(mid10, 2u32), (mid20, 2u32)]));
+        for (board, mid) in &place.board_to_server {
+            assert!(*mid == mid10 || *mid == mid20, "{board} -> {mid}");
+        }
+        // First-Fit packs into the first HashMap::iter entry until full.
+        let first_mid = place.board_to_server[0].1;
+        assert_eq!(place.board_to_server[0].1, first_mid);
+        assert_eq!(place.board_to_server[1].1, first_mid);
+        assert_ne!(place.board_to_server[2].1, first_mid);
+        let packed_into_first = place
+            .board_to_server
+            .iter()
+            .filter(|(_, mid)| *mid == first_mid)
+            .count();
+        assert_eq!(packed_into_first, 2);
     }
 
     #[test]
     fn cross_host_edge_detect() {
         let mut map = HashMap::new();
-        map.insert("a".into(), 0);
-        map.insert("b".into(), 1);
+        map.insert("a".into(), MachineId::from_u32(10));
+        map.insert("b".into(), MachineId::from_u32(20));
         assert!(has_cross_host_edge(&[("a".into(), "b".into())], &map));
         assert!(!has_cross_host_edge(&[("a".into(), "a".into())], &map));
         // Incomplete placement map must not be treated as same-host.
         assert!(has_cross_host_edge(&[("a".into(), "missing".into())], &map));
     }
-
 }

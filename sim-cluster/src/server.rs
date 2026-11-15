@@ -49,7 +49,7 @@ pub struct ServerOptions {
     /// Backend bind / multicast interface IPv4 (`BackendConfig::addr`).
     pub interface: std::net::Ipv4Addr,
     /// `machine_id` derived from [`Self::interface`].
-    pub machine_id: u32,
+    pub machine_id: crate::config::MachineId,
 }
 
 impl Default for ServerOptions {
@@ -123,7 +123,9 @@ pub struct Job {
 pub enum JobKind {
     Create {
         topology: LogicalTopology,
+        id: Option<String>,
         multicast: Option<crate::contract::CreateMulticast>,
+        assigned_boards: Option<Vec<String>>,
     },
     Command {
         id: String,
@@ -345,26 +347,22 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
     let reply = match job.kind {
         JobKind::Create {
             topology,
+            id,
             multicast,
+            assigned_boards,
         } => match prepare_create_topology(topology) {
             Err(err) => JobReply::Err(err),
             Ok(topo) => {
-                let mcast = match multicast {
-                    None => Ok(None),
-                    Some(m) => resolve_arbiter_mcast(m, opts).map(Some).map_err(|err| {
-                        ApiError::bad_request("invalid_multicast", err.to_string())
-                    }),
-                };
-                match mcast {
-                    Err(err) => JobReply::Err(err),
-                    Ok(mcast) => match create_simulation(topo, mcast, opts) {
-                        Ok(sim) => {
-                            let id = sim.id.clone();
-                            world.sims.insert(id.clone(), sim);
-                            JobReply::Created { id }
-                        }
-                        Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
-                    },
+                if let Some(ref want) = id {
+                    if world.sims.contains_key(want) {
+                        JobReply::Err(ApiError::conflict(format!(
+                            "simulation id already exists: {want}"
+                        )))
+                    } else {
+                        finish_create(world, opts, topo, multicast, assigned_boards, id)
+                    }
+                } else {
+                    finish_create(world, opts, topo, multicast, assigned_boards, id)
                 }
             }
         },
@@ -579,12 +577,85 @@ fn resolve_arbiter_mcast(
     })
 }
 
+fn resolve_assigned_boards(
+    topo: &LogicalTopology,
+    assigned: Option<&[String]>,
+) -> Result<Vec<String>, ServerError> {
+    let known: std::collections::HashSet<&str> =
+        topo.boards.iter().map(|b| b.id.as_str()).collect();
+    match assigned {
+        None => Ok(topo.boards.iter().map(|b| b.id.clone()).collect()),
+        Some(ids) => {
+            if ids.is_empty() {
+                return Err(ServerError::Message(
+                    "assigned_boards: must not be empty".into(),
+                ));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for id in ids {
+                if !known.contains(id.as_str()) {
+                    return Err(ServerError::Message(format!(
+                        "assigned_boards: unknown board id {id:?}"
+                    )));
+                }
+                if !seen.insert(id.as_str()) {
+                    return Err(ServerError::Message(format!(
+                        "assigned_boards: duplicate board id {id:?}"
+                    )));
+                }
+            }
+            // Preserve topology board order.
+            Ok(topo
+                .boards
+                .iter()
+                .filter(|b| ids.iter().any(|id| id == &b.id))
+                .map(|b| b.id.clone())
+                .collect())
+        }
+    }
+}
+
+fn finish_create(
+    world: &mut World,
+    opts: &ServerOptions,
+    topo: LogicalTopology,
+    multicast: Option<crate::contract::CreateMulticast>,
+    assigned_boards: Option<Vec<String>>,
+    id: Option<String>,
+) -> JobReply {
+    let mcast = match multicast {
+        None => Ok(None),
+        Some(m) => resolve_arbiter_mcast(m, opts)
+            .map(Some)
+            .map_err(|err| ApiError::bad_request("invalid_multicast", err.to_string())),
+    };
+    match mcast {
+        Err(err) => JobReply::Err(err),
+        Ok(mcast) => match create_simulation(topo, mcast, assigned_boards, id, opts) {
+            Ok(sim) => {
+                let id = sim.id.clone();
+                world.sims.insert(id.clone(), sim);
+                JobReply::Created { id }
+            }
+            Err(err) => JobReply::Err(match &err {
+                ServerError::Message(msg) if msg.contains("assigned_boards") => {
+                    ApiError::bad_request("invalid_assigned_boards", msg.clone())
+                }
+                other => ApiError::internal(other.to_string()),
+            }),
+        },
+    }
+}
+
 fn create_simulation(
     topo: LogicalTopology,
     multicast: Option<ArbiterMcastOpts>,
+    assigned_boards: Option<Vec<String>>,
+    id: Option<String>,
     _opts: &ServerOptions,
 ) -> Result<Simulation, ServerError> {
-    let id = new_cluster_key();
+    let local_boards = resolve_assigned_boards(&topo, assigned_boards.as_deref())?;
+    let id = id.unwrap_or_else(new_cluster_key);
     let iox_root = root_path_for_cluster(&id);
     let (server_link, arbiter_link) = open_pair();
     let hashes =
@@ -606,10 +677,11 @@ fn create_simulation(
         cluster_key: id.clone(),
         iox_root: iox_root.clone(),
         multicast,
+        assigned_boards: Some(local_boards.clone()),
     };
-    let nodes: Vec<SessionNode> = topo
-        .boards
+    let nodes: Vec<SessionNode> = local_boards
         .iter()
+        .filter_map(|board_id| topo.boards.iter().find(|b| b.id == *board_id))
         .map(|board| SessionNode {
             id: board_id_hash(&board.id),
             kind: board.kind.clone(),
@@ -1260,11 +1332,7 @@ fn poll_simulation(sim: &mut Simulation) {
     poll_actions(sim);
     poll_probes(sim);
     ingest_csv_replies(sim);
-    if sim
-        .arbiter
-        .as_ref()
-        .is_some_and(JoinHandle::is_finished)
-    {
+    if sim.arbiter.as_ref().is_some_and(JoinHandle::is_finished) {
         let handle = sim.arbiter.take().expect("finished arbiter handle");
         match handle.join() {
             Ok(true) => {
