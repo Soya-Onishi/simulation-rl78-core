@@ -312,15 +312,19 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError> {
-        // p1d will fan out; until then hit the primary participant only.
+        // TODO(cluster-distributed-p1d): fan out Start to all participating backends
+        // in parallel (no barrier). Until then, primary participant only.
+        // Arbiter `broadcast_start` stays local iceoryx; cross-host is frontend fanout.
         self.primary_backend(id)?.start(id, until_ns)
     }
 
     fn stop(&self, id: &str) -> Result<(), ApiError> {
+        // TODO(cluster-distributed-p1d): fan out Stop to all participating backends.
         self.primary_backend(id)?.stop(id)
     }
 
     fn reset(&self, id: &str) -> Result<(), ApiError> {
+        // TODO(cluster-distributed-p1d): fan out Reset to all participating backends.
         self.primary_backend(id)?.reset(id)
     }
 
