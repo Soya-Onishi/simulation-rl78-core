@@ -13,12 +13,149 @@ use serde::de::DeserializeOwned;
 pub use backend::BackendConfig;
 pub use frontend::{FrontendConfig, ServerAddr};
 
-/// `listen.ip` / `listen.port` shared by both YAML files.
+/// `listen.ip` / `listen.port` for `frontend.yaml` (backend uses top-level `addr` / `port`).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenAddr {
     pub ip: String,
     pub port: u16,
+}
+
+/// Multicast address and port pools in `frontend.yaml`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MulticastConfig {
+    /// Inclusive IPv4 ranges, e.g. `"239.0.0.1-239.0.0.10"`.
+    pub address_ranges: Vec<String>,
+    /// Inclusive port ranges, e.g. `"30000-30100"`.
+    pub port_ranges: Vec<String>,
+}
+
+impl MulticastConfig {
+    pub fn validate(&self, field: &str) -> Result<(), ConfigError> {
+        if self.address_ranges.is_empty() {
+            return Err(ConfigError::Message(format!(
+                "{field}.address_ranges: at least one range is required"
+            )));
+        }
+        if self.port_ranges.is_empty() {
+            return Err(ConfigError::Message(format!(
+                "{field}.port_ranges: at least one range is required"
+            )));
+        }
+        for (i, range) in self.address_ranges.iter().enumerate() {
+            parse_ipv4_range(range).map_err(|msg| {
+                ConfigError::Message(format!("{field}.address_ranges[{i}]: {msg}"))
+            })?;
+        }
+        for (i, range) in self.port_ranges.iter().enumerate() {
+            parse_port_range(range).map_err(|msg| {
+                ConfigError::Message(format!("{field}.port_ranges[{i}]: {msg}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Parsed inclusive IPv4 ranges.
+    pub fn ipv4_ranges(&self) -> Result<Vec<(Ipv4Addr, Ipv4Addr)>, ConfigError> {
+        self.address_ranges
+            .iter()
+            .enumerate()
+            .map(|(i, range)| {
+                parse_ipv4_range(range).map_err(|msg| {
+                    ConfigError::Message(format!("multicast.address_ranges[{i}]: {msg}"))
+                })
+            })
+            .collect()
+    }
+
+    /// Parsed inclusive port ranges.
+    pub fn port_u16_ranges(&self) -> Result<Vec<(u16, u16)>, ConfigError> {
+        self.port_ranges
+            .iter()
+            .enumerate()
+            .map(|(i, range)| {
+                parse_port_range(range).map_err(|msg| {
+                    ConfigError::Message(format!("multicast.port_ranges[{i}]: {msg}"))
+                })
+            })
+            .collect()
+    }
+}
+
+/// `machine_id` from an IPv4 address (network byte order / big-endian octets).
+#[must_use]
+pub fn machine_id_from_ipv4(ip: Ipv4Addr) -> u32 {
+    u32::from_be_bytes(ip.octets())
+}
+
+/// Parse a single IPv4 address (reject hostnames).
+pub fn parse_ipv4_strict(value: &str, field: &str) -> Result<Ipv4Addr, ConfigError> {
+    value.parse::<Ipv4Addr>().map_err(|_| {
+        ConfigError::Message(format!("{field}: expected IPv4 address, got {value:?}"))
+    })
+}
+
+/// Parse `"a.b.c.d-e.f.g.h"` (inclusive). Single address allowed (`"a.b.c.d"`).
+pub fn parse_ipv4_range(text: &str) -> Result<(Ipv4Addr, Ipv4Addr), String> {
+    let text = text.trim();
+    if let Some((start, end)) = text.split_once('-') {
+        let start: Ipv4Addr = start.trim().parse().map_err(|_| {
+            format!("invalid IPv4 range start in {text:?}")
+        })?;
+        let end: Ipv4Addr = end.trim().parse().map_err(|_| {
+            format!("invalid IPv4 range end in {text:?}")
+        })?;
+        if u32::from(start) > u32::from(end) {
+            return Err(format!("IPv4 range start > end in {text:?}"));
+        }
+        if !start.is_multicast() || !end.is_multicast() {
+            return Err(format!(
+                "IPv4 range must be multicast addresses (224.0.0.0/4), got {text:?}"
+            ));
+        }
+        Ok((start, end))
+    } else {
+        let addr: Ipv4Addr = text
+            .parse()
+            .map_err(|_| format!("invalid IPv4 address {text:?}"))?;
+        if !addr.is_multicast() {
+            return Err(format!(
+                "IPv4 must be a multicast address (224.0.0.0/4), got {text:?}"
+            ));
+        }
+        Ok((addr, addr))
+    }
+}
+
+/// Parse `"lo-hi"` (inclusive). Single port allowed (`"30000"`).
+pub fn parse_port_range(text: &str) -> Result<(u16, u16), String> {
+    let text = text.trim();
+    if let Some((start, end)) = text.split_once('-') {
+        let start: u16 = start
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid port range start in {text:?}"))?;
+        let end: u16 = end
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid port range end in {text:?}"))?;
+        if start == 0 || end == 0 {
+            return Err(format!("port must be 1..=65535 in {text:?}"));
+        }
+        if start > end {
+            return Err(format!("port range start > end in {text:?}"));
+        }
+        Ok((start, end))
+    } else {
+        let port: u16 = text
+            .parse()
+            .map_err(|_| format!("invalid port {text:?}"))?;
+        if port == 0 {
+            return Err(format!("port must be 1..=65535, got {text:?}"));
+        }
+        Ok((port, port))
+    }
 }
 
 impl ListenAddr {
@@ -215,7 +352,7 @@ mod tests {
         let yaml = dir.path().join("frontend.yaml");
         std::fs::write(
             &yaml,
-            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers:\n  - ip: 127.0.0.1\n    port: 8091\nweb_root: web\n",
+            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers:\n  - ip: 127.0.0.1\n    port: 8091\n    max_nodes: 4\nweb_root: web\n",
         )
         .unwrap();
         let cfg = FrontendConfig::load(&yaml).unwrap();
@@ -223,22 +360,96 @@ mod tests {
         assert_eq!(cfg.listen.port, 8090);
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].port, 8091);
+        assert_eq!(cfg.servers[0].max_nodes, 4);
+        assert!(cfg.multicast.is_none());
         assert_eq!(cfg.web_root, web);
     }
 
     #[test]
+    fn frontend_requires_multicast_for_two_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+        let yaml = dir.path().join("frontend.yaml");
+        std::fs::write(
+            &yaml,
+            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers:\n  - ip: 10.0.0.1\n    port: 8091\n    max_nodes: 2\n  - ip: 10.0.0.2\n    port: 8092\n    max_nodes: 2\nweb_root: web\n",
+        )
+        .unwrap();
+        let err = FrontendConfig::load(&yaml).unwrap_err();
+        assert!(err.to_string().contains("multicast"), "{err}");
+    }
+
+    #[test]
+    fn frontend_two_servers_with_multicast_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+        let yaml = dir.path().join("frontend.yaml");
+        std::fs::write(
+            &yaml,
+            "listen:\n  ip: 127.0.0.1\n  port: 8090\nservers:\n  - ip: 10.0.0.1\n    port: 8091\n    max_nodes: 2\n  - ip: 10.0.0.2\n    port: 8092\n    max_nodes: 2\nmulticast:\n  address_ranges:\n    - \"239.0.0.1-239.0.0.3\"\n  port_ranges:\n    - \"30000-30002\"\nweb_root: web\n",
+        )
+        .unwrap();
+        let cfg = FrontendConfig::load(&yaml).unwrap();
+        assert_eq!(cfg.servers.len(), 2);
+        assert!(cfg.multicast.is_some());
+    }
+
+    #[test]
     fn backend_yaml_round_trip() {
-        let file = write_temp("backend", "listen:\n  ip: 127.0.0.1\n  port: 8091\n");
+        let file = write_temp("backend", "addr: 127.0.0.1\nport: 8091\n");
         let cfg = BackendConfig::load(file.path()).unwrap();
-        assert_eq!(cfg.listen.port, 8091);
+        assert_eq!(cfg.port, 8091);
+        assert_eq!(cfg.ipv4().unwrap(), Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(cfg.machine_id().unwrap(), machine_id_from_ipv4(Ipv4Addr::LOCALHOST));
+        assert_eq!(cfg.socket_addr(), "127.0.0.1:8091");
+    }
+
+    #[test]
+    fn backend_rejects_unspecified_addr() {
+        let file = write_temp("backend0", "addr: 0.0.0.0\nport: 8091\n");
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("addr"), "{err}");
+    }
+
+    #[test]
+    fn backend_addr_specific_ipv4() {
+        let file = write_temp("backend-addr", "addr: 10.0.0.5\nport: 8091\n");
+        let cfg = BackendConfig::load(file.path()).unwrap();
+        assert_eq!(cfg.ipv4().unwrap(), Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(
+            cfg.machine_id().unwrap(),
+            machine_id_from_ipv4(Ipv4Addr::new(10, 0, 0, 5))
+        );
+    }
+
+    #[test]
+    fn machine_id_uses_be_octets() {
+        assert_eq!(
+            machine_id_from_ipv4(Ipv4Addr::new(10, 1, 2, 3)),
+            u32::from_be_bytes([10, 1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn parse_ranges() {
+        assert_eq!(
+            parse_ipv4_range("239.0.0.1-239.0.0.3").unwrap(),
+            (
+                Ipv4Addr::new(239, 0, 0, 1),
+                Ipv4Addr::new(239, 0, 0, 3)
+            )
+        );
+        assert_eq!(parse_port_range("30000-30002").unwrap(), (30000, 30002));
+        assert!(parse_ipv4_range("10.0.0.1").unwrap_err().contains("multicast"));
     }
 
     #[test]
     fn unknown_key_is_rejected() {
-        let file = write_temp(
-            "unknown",
-            "listen:\n  ip: 127.0.0.1\n  port: 8091\nextra: 1\n",
-        );
+        let file = write_temp("unknown", "addr: 127.0.0.1\nport: 8091\nextra: 1\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
         assert!(err.to_string().contains("invalid YAML"), "{err}");
     }
@@ -261,23 +472,23 @@ mod tests {
 
     #[test]
     fn port_zero_rejected() {
-        let file = write_temp("port0", "listen:\n  ip: 127.0.0.1\n  port: 0\n");
+        let file = write_temp("port0", "addr: 127.0.0.1\nport: 0\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
         assert!(err.to_string().contains("port"), "{err}");
     }
 
     #[test]
-    fn empty_ip_rejected() {
-        let file = write_temp("empty-ip", "listen:\n  ip: \"\"\n  port: 8091\n");
+    fn empty_addr_rejected() {
+        let file = write_temp("empty-addr", "addr: \"\"\nport: 8091\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
-        assert!(err.to_string().contains("ip"), "{err}");
+        assert!(err.to_string().contains("addr"), "{err}");
     }
 
     #[test]
-    fn hostname_is_accepted() {
-        let file = write_temp("host", "listen:\n  ip: localhost\n  port: 8091\n");
-        let cfg = BackendConfig::load(file.path()).unwrap();
-        assert_eq!(cfg.listen.ip, "localhost");
+    fn hostname_addr_rejected() {
+        let file = write_temp("host", "addr: localhost\nport: 8091\n");
+        let err = BackendConfig::load(file.path()).unwrap_err();
+        assert!(err.to_string().contains("addr") || err.to_string().contains("IPv4"), "{err}");
     }
 
     #[test]

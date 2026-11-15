@@ -10,14 +10,14 @@ use crate::ipc::HashedId;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostCommand {
     /// Leave Stopped and broadcast [`crate::control::ControlToNode::Start`]
-    /// (the Start sample carries the run ceiling).
+    /// (the Start sample carries `until_ns`).
     ///
     /// `until_ns` caps virtual time for this start. `None` means unlimited.
     Start { until_ns: Option<u64> },
     /// Broadcast cluster stop and stay in Stopped (process keeps running).
     Stop,
-    /// Stop, [`sim_kernel::Resettable`] reset, raise the ceiling to
-    /// `now + margin`, then start.
+    /// Stop, [`sim_kernel::Resettable`] reset, then start unlimited
+    /// (`until_ns = u64::MAX` on the Start sample).
     Reset,
     /// Leave the session and end the arbiter thread.
     Shutdown,

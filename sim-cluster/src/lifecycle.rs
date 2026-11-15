@@ -64,6 +64,8 @@ pub enum NodeEffect {
     GdbStep {
         board_hash: crate::ipc::HashedId<u64>,
     },
+    /// Apply host `until_ns` from [`ControlToNode::Start`] (`u64::MAX` = none).
+    SetUntil { until_ns: u64 },
     /// Log-only; state is unchanged aside from the warning.
     Warn(String),
 }
@@ -77,8 +79,8 @@ impl NodeState {
     pub fn on_message(self, msg: ControlToNode) -> (Self, Option<NodeEffect>) {
         match (self, msg) {
             (state, ControlToNode::GetState) => (state, Some(NodeEffect::ReportState)),
-            (NodeState::Stopped | NodeState::Running, ControlToNode::Start) => {
-                (NodeState::Running, None)
+            (NodeState::Stopped | NodeState::Running, ControlToNode::Start { until_ns }) => {
+                (NodeState::Running, Some(NodeEffect::SetUntil { until_ns }))
             }
             (NodeState::Stopped, ControlToNode::Reset) => {
                 (NodeState::Stopped, Some(NodeEffect::Reset))
@@ -192,9 +194,11 @@ mod tests {
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::ReportState));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start);
+        let (n, eff) = s.on_message(ControlToNode::Start {
+            until_ns: u64::MAX,
+        });
         assert_eq!(n, NodeState::Running);
-        assert!(eff.is_none());
+        assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: u64::MAX }));
     }
 
     #[test]
@@ -219,9 +223,11 @@ mod tests {
 
     #[test]
     fn node_start_while_running() {
-        let (n, eff) = NodeState::Running.on_message(ControlToNode::Start);
+        let (n, eff) = NodeState::Running.on_message(ControlToNode::Start {
+            until_ns: 42,
+        });
         assert_eq!(n, NodeState::Running);
-        assert!(eff.is_none());
+        assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: 42 }));
     }
 
     #[test]
@@ -232,9 +238,11 @@ mod tests {
         });
         assert_eq!(n, NodeState::Stopped);
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start);
+        let (n, eff) = s.on_message(ControlToNode::Start {
+            until_ns: u64::MAX,
+        });
         assert_eq!(n, NodeState::Running);
-        assert!(eff.is_none());
+        assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: u64::MAX }));
     }
 
     #[test]
@@ -244,9 +252,11 @@ mod tests {
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::Reset));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start);
+        let (n, eff) = s.on_message(ControlToNode::Start {
+            until_ns: u64::MAX,
+        });
         assert_eq!(n, NodeState::Running);
-        assert!(eff.is_none());
+        assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: u64::MAX }));
     }
 
     #[test]

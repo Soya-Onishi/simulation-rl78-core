@@ -4,7 +4,10 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{ConfigError, ListenAddr, validate_ip_or_hostname, validate_port};
+use super::{
+    ConfigError, ListenAddr, MulticastConfig, parse_ipv4_strict, validate_ip_or_hostname,
+    validate_port,
+};
 
 /// One backend in `servers`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -12,14 +15,19 @@ use super::{ConfigError, ListenAddr, validate_ip_or_hostname, validate_port};
 pub struct ServerAddr {
     pub ip: String,
     pub port: u16,
+    /// Max concurrent board processes this backend may host (across all sims).
+    pub max_nodes: u32,
 }
 
-/// `simulation-frontend` process configuration. Every field is required.
+/// `simulation-frontend` process configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontendConfig {
     pub listen: ListenAddr,
     pub servers: Vec<ServerAddr>,
+    /// Multicast address/port pools. Required when `servers.len() >= 2`.
+    #[serde(default)]
+    pub multicast: Option<MulticastConfig>,
     /// Directory of the Vite build (`index.html` + `assets/`).
     ///
     /// Relative paths are resolved from the directory that contains the YAML.
@@ -46,8 +54,46 @@ impl FrontendConfig {
             ));
         }
         for (index, server) in self.servers.iter().enumerate() {
-            validate_ip_or_hostname(&server.ip, &format!("servers[{index}].ip"))?;
+            // `machine_id` is derived from IPv4; hostnames are not allowed here.
+            parse_ipv4_strict(&server.ip, &format!("servers[{index}].ip"))?;
             validate_port(server.port, &format!("servers[{index}].port"))?;
+            if server.max_nodes == 0 {
+                return Err(ConfigError::Message(format!(
+                    "servers[{index}].max_nodes: must be >= 1"
+                )));
+            }
+            if let Some(first) = self.servers[..index]
+                .iter()
+                .position(|prev| prev.ip == server.ip && prev.port == server.port)
+            {
+                return Err(ConfigError::Message(format!(
+                    "servers[{index}]: duplicate endpoint {}:{} (same as servers[{first}])",
+                    server.ip, server.port
+                )));
+            }
+        }
+        if self.servers.len() >= 2 {
+            let Some(multicast) = self.multicast.as_ref() else {
+                return Err(ConfigError::Message(
+                    "multicast: required when servers has 2 or more entries".into(),
+                ));
+            };
+            multicast.validate("multicast")?;
+            // Participating backends must have unique IPs (one backend per machine).
+            for (index, server) in self.servers.iter().enumerate() {
+                if let Some(first) = self.servers[..index]
+                    .iter()
+                    .position(|prev| prev.ip == server.ip)
+                {
+                    return Err(ConfigError::Message(format!(
+                        "servers[{index}].ip: duplicate IPv4 {} (same as servers[{first}]); \
+                         one cluster-backend per machine",
+                        server.ip
+                    )));
+                }
+            }
+        } else if let Some(multicast) = self.multicast.as_ref() {
+            multicast.validate("multicast")?;
         }
         if !self.web_root.is_dir() {
             return Err(ConfigError::Message(format!(

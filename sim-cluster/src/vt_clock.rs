@@ -1,8 +1,8 @@
 //! Shared-memory virtual-time slots between arbiter and nodes.
 //!
 //! Layout (each slot is an [`AtomicU64`], nanoseconds):
-//! - index 0: arbiter hard ceiling (`u64::MAX` = unlimited)
-//! - indices 1..=N: each board's current virtual time
+//! - index 0: minimum virtual time reported by **other** machines (`u64::MAX` = none)
+//! - indices 1..=N: each local board's current virtual time
 
 use std::fs::OpenOptions;
 use std::io;
@@ -88,7 +88,7 @@ impl VtClock {
         file.set_len(bytes as u64)?;
         // SAFETY: exclusive create_new of a fresh file of known length.
         let mut mmap = unsafe { MmapOptions::new().len(bytes).map_mut(&file)? };
-        // New file is zero-filled by the OS after set_len; set ceiling only.
+        // New file is zero-filled by the OS after set_len; set remote-min only.
         // SAFETY: mapping is page-aligned and holds `slot_count` u64s.
         let slots = unsafe { Self::as_atomics_mut(&mut mmap, slot_count) };
         slots[0].store(u64::MAX, Ordering::Relaxed);
@@ -124,15 +124,15 @@ impl VtClock {
         self.slot_count - 1
     }
 
-    /// Hard ceiling in slot 0.
+    /// Slot 0: minimum VT among other machines (`u64::MAX` = no remote report).
     #[must_use]
-    pub fn ceiling(&self) -> u64 {
+    pub fn remote_min_ns(&self) -> u64 {
         self.slot(0).load(Ordering::Acquire)
     }
 
-    /// Write the arbiter hard ceiling (`u64::MAX` = unlimited).
-    pub fn set_ceiling(&self, ceiling_ns: u64) {
-        self.slot(0).store(ceiling_ns, Ordering::Release);
+    /// Write the remote-hosts minimum into slot 0 (`u64::MAX` = none).
+    pub fn set_remote_min_ns(&self, remote_min_ns: u64) {
+        self.slot(0).store(remote_min_ns, Ordering::Release);
     }
 
     /// Read one board slot (`1..=N`).
@@ -157,12 +157,14 @@ impl VtClock {
             .unwrap_or(0)
     }
 
-    /// `min(min(board slots) + margin_ns, ceiling)`.
+    /// `min(min(local board slots), remote_min) + margin_ns`.
+    ///
+    /// Host `until_ns` is applied separately by the node (not stored in slot 0).
     #[must_use]
     pub fn allowed_ns(&self, margin_ns: u64) -> u64 {
         self.min_board_vt()
+            .min(self.remote_min_ns())
             .saturating_add(margin_ns)
-            .min(self.ceiling())
     }
 
     fn slot(&self, index: usize) -> &AtomicU64 {
@@ -189,19 +191,22 @@ mod tests {
     fn create_open_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let created = VtClock::create(dir.path(), 2).unwrap();
-        assert_eq!(created.ceiling(), u64::MAX);
+        assert_eq!(created.remote_min_ns(), u64::MAX);
         assert_eq!(created.board_vt(1), 0);
         assert_eq!(created.board_vt(2), 0);
         created.write_board_vt(1, 100);
         created.write_board_vt(2, 40);
-        created.set_ceiling(500);
+        // remote_min MAX → allowed = min(40, MAX) + 10 = 50
         assert_eq!(created.allowed_ns(10), 50);
+        created.set_remote_min_ns(30);
+        // min(40, 30) + 10 = 40
+        assert_eq!(created.allowed_ns(10), 40);
 
         let opened = VtClock::open(dir.path(), 2).unwrap();
         assert_eq!(opened.board_vt(1), 100);
         assert_eq!(opened.board_vt(2), 40);
-        assert_eq!(opened.ceiling(), 500);
-        assert_eq!(opened.allowed_ns(10), 50);
+        assert_eq!(opened.remote_min_ns(), 30);
+        assert_eq!(opened.allowed_ns(10), 40);
         assert_eq!(opened.board_count(), 2);
     }
 
@@ -214,7 +219,7 @@ mod tests {
         let second = VtClock::create(dir.path(), 2).unwrap();
         assert_eq!(second.board_count(), 2);
         assert_eq!(second.board_vt(1), 0);
-        assert_eq!(second.ceiling(), u64::MAX);
+        assert_eq!(second.remote_min_ns(), u64::MAX);
     }
 
     #[test]
