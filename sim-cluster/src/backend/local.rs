@@ -62,7 +62,9 @@ impl SimulationBackend for LocalBackend {
     fn create(&self, request: CreateSimulationRequest) -> Result<String, ApiError> {
         match self.rpc(JobKind::Create {
             topology: request.topology,
+            id: request.id,
             multicast: request.multicast,
+            assigned_boards: request.assigned_boards,
         })? {
             JobReply::Created { id } => Ok(id),
             JobReply::Err(err) => Err(err),

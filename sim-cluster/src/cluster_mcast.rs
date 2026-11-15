@@ -41,10 +41,7 @@ impl MulticastMsgKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MulticastMessage {
     /// Sender's local `min_board_vt`.
-    VtMin {
-        machine_id: u32,
-        min_vt_ns: u64,
-    },
+    VtMin { machine_id: u32, min_vt_ns: u64 },
     ClusterStop {
         machine_id: u32,
         reason: HostStopReason,
@@ -70,10 +67,7 @@ impl MulticastMessage {
                 out.extend_from_slice(&machine_id.to_be_bytes());
                 out.extend_from_slice(&min_vt_ns.to_le_bytes());
             }
-            Self::ClusterStop {
-                machine_id,
-                reason,
-            } => {
+            Self::ClusterStop { machine_id, reason } => {
                 out.push(MulticastMsgKind::ClusterStop as u8);
                 out.extend_from_slice(&machine_id.to_be_bytes());
                 out.push(reason.to_wire());
@@ -110,10 +104,7 @@ impl MulticastMessage {
                 }
                 let machine_id = u32::from_be_bytes(rest[0..4].try_into().ok()?);
                 let reason = HostStopReason::from_wire(rest[4])?;
-                Some(Self::ClusterStop {
-                    machine_id,
-                    reason,
-                })
+                Some(Self::ClusterStop { machine_id, reason })
             }
         }
     }
@@ -136,11 +127,7 @@ impl ClusterMulticast {
     /// Multicast loopback is disabled so this host does not re-receive its own
     /// datagrams (one `cluster-backend` per machine; avoids extra decode work).
     /// Linux defaults `IP_MULTICAST_LOOP` to on, so this is set explicitly.
-    pub fn join(
-        group: SocketAddrV4,
-        machine_id: u32,
-        interface: Ipv4Addr,
-    ) -> io::Result<Self> {
+    pub fn join(group: SocketAddrV4, machine_id: u32, interface: Ipv4Addr) -> io::Result<Self> {
         // Bind the multicast group address+port so datagrams destined to the
         // group are delivered here. `interface` (BackendConfig::addr) selects
         // the NIC for IP_MULTICAST_IF (send) and IP_ADD_MEMBERSHIP (join).
@@ -307,7 +294,9 @@ pub fn allocate_multicast(
             let addr = Ipv4Addr::from(raw);
             for &(p0, p1) in port_ranges {
                 for port in p0..=p1 {
-                    if !used.iter().any(|&(u_addr, u_port)| u_addr == addr && u_port == port)
+                    if !used
+                        .iter()
+                        .any(|&(u_addr, u_port)| u_addr == addr && u_port == port)
                     {
                         return Some((addr, port));
                     }
@@ -327,10 +316,7 @@ pub struct BoardPlacement {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlacementError {
-    InsufficientCapacity {
-        boards: usize,
-        free_slots: u32,
-    },
+    InsufficientCapacity { boards: usize, free_slots: u32 },
 }
 
 impl std::fmt::Display for PlacementError {
@@ -384,12 +370,12 @@ pub fn has_cross_host_edge(
     edges: &[(String, String)],
     board_server: &HashMap<String, usize>,
 ) -> bool {
-    edges.iter().any(|(a, b)| {
-        match (board_server.get(a), board_server.get(b)) {
+    edges
+        .iter()
+        .any(|(a, b)| match (board_server.get(a), board_server.get(b)) {
             (Some(&sa), Some(&sb)) => sa != sb,
             _ => true,
-        }
-    })
+        })
 }
 
 #[cfg(test)]
@@ -479,5 +465,4 @@ mod tests {
         // Incomplete placement map must not be treated as same-host.
         assert!(has_cross_host_edge(&[("a".into(), "missing".into())], &map));
     }
-
 }

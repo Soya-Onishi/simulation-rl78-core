@@ -194,9 +194,7 @@ mod tests {
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::ReportState));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start {
-            until_ns: u64::MAX,
-        });
+        let (n, eff) = s.on_message(ControlToNode::Start { until_ns: u64::MAX });
         assert_eq!(n, NodeState::Running);
         assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: u64::MAX }));
     }
@@ -223,9 +221,7 @@ mod tests {
 
     #[test]
     fn node_start_while_running() {
-        let (n, eff) = NodeState::Running.on_message(ControlToNode::Start {
-            until_ns: 42,
-        });
+        let (n, eff) = NodeState::Running.on_message(ControlToNode::Start { until_ns: 42 });
         assert_eq!(n, NodeState::Running);
         assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: 42 }));
     }
@@ -238,9 +234,7 @@ mod tests {
         });
         assert_eq!(n, NodeState::Stopped);
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start {
-            until_ns: u64::MAX,
-        });
+        let (n, eff) = s.on_message(ControlToNode::Start { until_ns: u64::MAX });
         assert_eq!(n, NodeState::Running);
         assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: u64::MAX }));
     }
@@ -252,9 +246,7 @@ mod tests {
         assert_eq!(n, NodeState::Stopped);
         assert_eq!(eff, Some(NodeEffect::Reset));
         s = n;
-        let (n, eff) = s.on_message(ControlToNode::Start {
-            until_ns: u64::MAX,
-        });
+        let (n, eff) = s.on_message(ControlToNode::Start { until_ns: u64::MAX });
         assert_eq!(n, NodeState::Running);
         assert_eq!(eff, Some(NodeEffect::SetUntil { until_ns: u64::MAX }));
     }

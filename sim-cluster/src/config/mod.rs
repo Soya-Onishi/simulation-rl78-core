@@ -49,9 +49,8 @@ impl MulticastConfig {
             })?;
         }
         for (i, range) in self.port_ranges.iter().enumerate() {
-            parse_port_range(range).map_err(|msg| {
-                ConfigError::Message(format!("{field}.port_ranges[{i}]: {msg}"))
-            })?;
+            parse_port_range(range)
+                .map_err(|msg| ConfigError::Message(format!("{field}.port_ranges[{i}]: {msg}")))?;
         }
         Ok(())
     }
@@ -91,21 +90,23 @@ pub fn machine_id_from_ipv4(ip: Ipv4Addr) -> u32 {
 
 /// Parse a single IPv4 address (reject hostnames).
 pub fn parse_ipv4_strict(value: &str, field: &str) -> Result<Ipv4Addr, ConfigError> {
-    value.parse::<Ipv4Addr>().map_err(|_| {
-        ConfigError::Message(format!("{field}: expected IPv4 address, got {value:?}"))
-    })
+    value
+        .parse::<Ipv4Addr>()
+        .map_err(|_| ConfigError::Message(format!("{field}: expected IPv4 address, got {value:?}")))
 }
 
 /// Parse `"a.b.c.d-e.f.g.h"` (inclusive). Single address allowed (`"a.b.c.d"`).
 pub fn parse_ipv4_range(text: &str) -> Result<(Ipv4Addr, Ipv4Addr), String> {
     let text = text.trim();
     if let Some((start, end)) = text.split_once('-') {
-        let start: Ipv4Addr = start.trim().parse().map_err(|_| {
-            format!("invalid IPv4 range start in {text:?}")
-        })?;
-        let end: Ipv4Addr = end.trim().parse().map_err(|_| {
-            format!("invalid IPv4 range end in {text:?}")
-        })?;
+        let start: Ipv4Addr = start
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid IPv4 range start in {text:?}"))?;
+        let end: Ipv4Addr = end
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid IPv4 range end in {text:?}"))?;
         if u32::from(start) > u32::from(end) {
             return Err(format!("IPv4 range start > end in {text:?}"));
         }
@@ -148,9 +149,7 @@ pub fn parse_port_range(text: &str) -> Result<(u16, u16), String> {
         }
         Ok((start, end))
     } else {
-        let port: u16 = text
-            .parse()
-            .map_err(|_| format!("invalid port {text:?}"))?;
+        let port: u16 = text.parse().map_err(|_| format!("invalid port {text:?}"))?;
         if port == 0 {
             return Err(format!("port must be 1..=65535, got {text:?}"));
         }
@@ -404,7 +403,10 @@ mod tests {
         let cfg = BackendConfig::load(file.path()).unwrap();
         assert_eq!(cfg.port, 8091);
         assert_eq!(cfg.ipv4().unwrap(), Ipv4Addr::new(127, 0, 0, 1));
-        assert_eq!(cfg.machine_id().unwrap(), machine_id_from_ipv4(Ipv4Addr::LOCALHOST));
+        assert_eq!(
+            cfg.machine_id().unwrap(),
+            machine_id_from_ipv4(Ipv4Addr::LOCALHOST)
+        );
         assert_eq!(cfg.socket_addr(), "127.0.0.1:8091");
     }
 
@@ -438,13 +440,14 @@ mod tests {
     fn parse_ranges() {
         assert_eq!(
             parse_ipv4_range("239.0.0.1-239.0.0.3").unwrap(),
-            (
-                Ipv4Addr::new(239, 0, 0, 1),
-                Ipv4Addr::new(239, 0, 0, 3)
-            )
+            (Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 3))
         );
         assert_eq!(parse_port_range("30000-30002").unwrap(), (30000, 30002));
-        assert!(parse_ipv4_range("10.0.0.1").unwrap_err().contains("multicast"));
+        assert!(
+            parse_ipv4_range("10.0.0.1")
+                .unwrap_err()
+                .contains("multicast")
+        );
     }
 
     #[test]
@@ -488,7 +491,10 @@ mod tests {
     fn hostname_addr_rejected() {
         let file = write_temp("host", "addr: localhost\nport: 8091\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
-        assert!(err.to_string().contains("addr") || err.to_string().contains("IPv4"), "{err}");
+        assert!(
+            err.to_string().contains("addr") || err.to_string().contains("IPv4"),
+            "{err}"
+        );
     }
 
     #[test]

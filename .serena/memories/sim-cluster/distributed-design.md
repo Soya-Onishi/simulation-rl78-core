@@ -61,8 +61,8 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 | Phase | Branch | Scope |
 |-------|--------|-------|
 | p1a | `feature/cluster-distributed-p1` | Config; VtClock slot0=remote min; Start{until}; `cluster_mcast` helpers (**merged #128**) |
-| p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 |
-| p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards |
+| p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 (**merged #129**) |
+| p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards (**this branch**) |
 | p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate |
 | p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` |
 | p3 | `…-p3-targeted` | probe/action/inspect to hosting backend only |

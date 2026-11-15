@@ -13,6 +13,7 @@ mod arbiter_catalog;
 pub mod backend;
 pub mod board_kind;
 pub mod board_runtime;
+pub mod cluster_frontend;
 pub mod cluster_mcast;
 pub mod cluster_stop;
 pub mod config;
