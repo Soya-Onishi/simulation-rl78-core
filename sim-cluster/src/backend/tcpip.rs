@@ -12,7 +12,7 @@ use crate::contract::{
 };
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{
-    CoarseBatch, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
+    CoarseLive, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
 };
 
 use super::SimulationBackend;
@@ -298,7 +298,7 @@ impl SimulationBackend for TcpipBackend {
         drop_body(self.delete(&format!("/internal/simulations/{id}/probes/watch"))?)
     }
 
-    fn probe_watch_live(&self, id: &str, after: u64) -> Result<Vec<CoarseBatch>, ApiError> {
+    fn probe_watch_live(&self, id: &str, after: u64) -> Result<CoarseLive, ApiError> {
         self.get_json(&format!(
             "/internal/simulations/{id}/probes/live?after={after}"
         ))
@@ -492,8 +492,11 @@ mod tests {
         fn probe_watch_clear(&self, _id: &str) -> Result<(), ApiError> {
             Ok(())
         }
-        fn probe_watch_live(&self, _id: &str, _after: u64) -> Result<Vec<CoarseBatch>, ApiError> {
-            Ok(vec![])
+        fn probe_watch_live(&self, _id: &str, _after: u64) -> Result<CoarseLive, ApiError> {
+            Ok(CoarseLive {
+                cursor_vt: 0,
+                batches: vec![],
+            })
         }
         fn csv_start(
             &self,

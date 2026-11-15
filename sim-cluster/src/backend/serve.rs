@@ -14,7 +14,7 @@ use crate::contract::{
 };
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{
-    CoarseBatch, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
+    CoarseLive, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
 };
 
 use super::SimulationBackend;
@@ -283,7 +283,7 @@ async fn probe_watch_live(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<AfterQuery>,
-) -> Result<Json<Vec<CoarseBatch>>, ApiError> {
+) -> Result<Json<CoarseLive>, ApiError> {
     let backend = state.backend.clone();
     Ok(Json(
         blocking(move || backend.probe_watch_live(&id, query.after)).await?,

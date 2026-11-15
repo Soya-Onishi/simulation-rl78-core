@@ -44,11 +44,14 @@ pub trait SimulationBackend: Send + Sync {
         probes: Vec<crate::probe_log::ProbeRef>,
     ) -> Result<crate::probe_log::ProbeWatchView, ApiError>;
     fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError>;
+    /// `after` is a virtual-time fetch floor (ns) for leaf backends, or the
+    /// previous SSE `cursor_vt` for [`crate::cluster_frontend::ClusterFrontend`]
+    /// (which recomputes the floor from current min VT − window).
     fn probe_watch_live(
         &self,
         id: &str,
         after: u64,
-    ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError>;
+    ) -> Result<crate::probe_log::CoarseLive, ApiError>;
     fn csv_start(
         &self,
         id: &str,

@@ -86,10 +86,42 @@ pub struct ProbeView {
     pub value: String,
 }
 
+/// Virtual-time width of the live fetch floor (`current_min_vt - window`).
+pub const WATCH_VT_WINDOW_NS: u64 = 100_000_000;
+
+/// Virtual-time retention for coarse pending batches on each backend.
+pub const WATCH_VT_RETAIN_NS: u64 = 1_000_000_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoarseBatch {
     pub seq: u64,
+    /// Min `virtual_time_ns` among [`Self::samples`] (`0` if empty).
+    pub min_virtual_time_ns: u64,
     pub samples: Vec<ProbeView>,
+}
+
+impl CoarseBatch {
+    #[must_use]
+    pub fn new(seq: u64, samples: Vec<ProbeView>) -> Self {
+        let min_virtual_time_ns = samples
+            .iter()
+            .map(|sample| sample.virtual_time_ns)
+            .min()
+            .unwrap_or(0);
+        Self {
+            seq,
+            min_virtual_time_ns,
+            samples,
+        }
+    }
+}
+
+/// Live probe poll result: VT cursor for SSE plus coarse batches.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoarseLive {
+    /// Cluster (or local) min VT used as the progressed cursor after this poll.
+    pub cursor_vt: u64,
+    pub batches: Vec<CoarseBatch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

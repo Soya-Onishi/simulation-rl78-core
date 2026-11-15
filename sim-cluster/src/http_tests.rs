@@ -9,7 +9,7 @@ use crate::contract::{
 use crate::host::SessionNode;
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::probe_log::{
-    CoarseBatch, CsvPoll, ProbeCatalogItem, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
+    CoarseLive, CsvPoll, ProbeCatalogItem, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
     ProbeWatchView,
 };
 use crate::topology::LogicalTopology;
@@ -100,8 +100,11 @@ impl SimulationBackend for TopoMock {
     fn probe_watch_clear(&self, _id: &str) -> Result<(), ApiError> {
         Ok(())
     }
-    fn probe_watch_live(&self, _id: &str, _after: u64) -> Result<Vec<CoarseBatch>, ApiError> {
-        Ok(vec![])
+    fn probe_watch_live(&self, _id: &str, _after: u64) -> Result<CoarseLive, ApiError> {
+        Ok(CoarseLive {
+            cursor_vt: 0,
+            batches: vec![],
+        })
     }
     fn csv_start(
         &self,

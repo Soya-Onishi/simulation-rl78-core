@@ -28,8 +28,8 @@ use crate::ipc::{
 };
 use crate::log_msg::{ClusterLog, LogOrigin};
 use crate::probe_log::{
-    CoarseBatch, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange, ProbeRecord, ProbeRef,
-    ProbeView, ProbeWatchView, json_view, record_view,
+    CoarseBatch, CoarseLive, ProbeCatalogItem, ProbeKind, ProbePointName, ProbeRange, ProbeRecord,
+    ProbeRef, ProbeView, ProbeWatchView, WATCH_VT_RETAIN_NS, json_view, record_view,
 };
 use crate::topology::{LogicalTopology, TopologyError, build_topology_hashes};
 
@@ -37,7 +37,7 @@ use crate::topology::{LogicalTopology, TopologyError, build_topology_hashes};
 /// that arrive between polls.
 const LOG_CAP: usize = 100;
 
-/// Live batches kept while `/probes/stream` is between reconnects.
+/// Secondary count cap for coarse pending (VT retention is primary).
 const WATCH_PENDING_KEEP: usize = 64;
 
 /// Max wait after Shutdown before dropping the arbiter [`JoinHandle`].
@@ -230,7 +230,7 @@ pub enum JobReply {
     Actions(ActionList),
     ProbeCatalog(Vec<ProbeCatalogItem>),
     ProbeWatch(ProbeWatchView),
-    ProbeCoarse(Vec<CoarseBatch>),
+    ProbeCoarse(CoarseLive),
     ProbeCsvStart {
         request_id: u64,
         catalog: Vec<ProbePointName>,
@@ -302,6 +302,19 @@ impl ProbeWatch {
 
     fn push_batch(&mut self, batch: CoarseBatch) {
         self.pending.push_back(batch);
+        while self.pending.len() > WATCH_PENDING_KEEP {
+            self.pending.pop_front();
+        }
+    }
+
+    fn trim_by_vt(&mut self, virtual_time_ns: u64) {
+        while let Some(front) = self.pending.front() {
+            if front.min_virtual_time_ns.saturating_add(WATCH_VT_RETAIN_NS) < virtual_time_ns {
+                self.pending.pop_front();
+            } else {
+                break;
+            }
+        }
         while self.pending.len() > WATCH_PENDING_KEEP {
             self.pending.pop_front();
         }
@@ -747,7 +760,14 @@ fn command_simulation(sim: &mut Simulation, cmd: HostCommand) -> Result<(), ApiE
     if arbiter_unavailable(sim) {
         return Err(ApiError::conflict("arbiter has exited"));
     }
-    send_cmd(sim, cmd).map_err(ApiError::internal)
+    let clear_watch_pending = matches!(cmd, HostCommand::Reset);
+    send_cmd(sim, cmd).map_err(ApiError::internal)?;
+    // Drop coarse batches from before the rewind so a VT-window live poll cannot
+    // re-emit pre-reset samples (pending is not drained by seq anymore).
+    if clear_watch_pending {
+        sim.watch.pending.clear();
+    }
+    Ok(())
 }
 
 fn send_cmd(sim: &mut Simulation, cmd: HostCommand) -> Result<(), String> {
@@ -1010,9 +1030,19 @@ fn clear_watch(sim: &mut Simulation) -> Result<(), ApiError> {
     refresh_watch(sim)
 }
 
-fn live_watch(sim: &mut Simulation, after: u64) -> Vec<CoarseBatch> {
-    sim.watch.pending.retain(|batch| batch.seq > after);
-    sim.watch.pending.drain(..).collect()
+fn live_watch(sim: &mut Simulation, fetch_from: u64) -> CoarseLive {
+    sim.watch.trim_by_vt(sim.virtual_time_ns);
+    let batches = sim
+        .watch
+        .pending
+        .iter()
+        .filter(|batch| batch.min_virtual_time_ns >= fetch_from)
+        .cloned()
+        .collect();
+    CoarseLive {
+        cursor_vt: sim.virtual_time_ns,
+        batches,
+    }
 }
 
 fn fanout_live(sim: &mut Simulation, records: &[ProbeRecord]) {
@@ -1026,7 +1056,8 @@ fn fanout_live(sim: &mut Simulation, records: &[ProbeRecord]) {
     }
     let seq = sim.watch.next_seq;
     sim.watch.next_seq = sim.watch.next_seq.saturating_add(1);
-    sim.watch.push_batch(CoarseBatch { seq, samples });
+    sim.watch.push_batch(CoarseBatch::new(seq, samples));
+    sim.watch.trim_by_vt(sim.virtual_time_ns);
 }
 
 fn snapshot_watch(sim: &mut Simulation) -> Result<CoarseBatch, ApiError> {
@@ -1036,17 +1067,23 @@ fn snapshot_watch(sim: &mut Simulation) -> Result<CoarseBatch, ApiError> {
     if probe_ids.is_empty() {
         return Ok(CoarseBatch {
             seq,
+            // Empty snapshot still sits at "now" so VT-window live can see it.
+            min_virtual_time_ns: sim.virtual_time_ns,
             samples: Vec::new(),
         });
     }
     let (records, _) = query_latest(sim, &probe_ids)?;
-    Ok(CoarseBatch {
+    let mut batch = CoarseBatch::new(
         seq,
-        samples: records
+        records
             .iter()
             .map(|rec| record_view(&sim.probe_catalog, rec))
             .collect(),
-    })
+    );
+    // Latest-change VT can be far behind wall sim VT (quiet probes). Raise the
+    // floor so put-watch snapshots stay inside the live fetch window.
+    batch.min_virtual_time_ns = batch.min_virtual_time_ns.max(sim.virtual_time_ns);
+    Ok(batch)
 }
 
 fn refresh_watch(sim: &mut Simulation) -> Result<(), ApiError> {
@@ -1536,10 +1573,7 @@ mod tests {
             pending: VecDeque::new(),
         };
         for seq in 0..(WATCH_PENDING_KEEP as u64 + 3) {
-            watch.push_batch(CoarseBatch {
-                seq,
-                samples: Vec::new(),
-            });
+            watch.push_batch(CoarseBatch::new(seq, Vec::new()));
         }
         assert_eq!(watch.pending.len(), WATCH_PENDING_KEEP);
         assert_eq!(watch.pending.front().map(|batch| batch.seq), Some(3));

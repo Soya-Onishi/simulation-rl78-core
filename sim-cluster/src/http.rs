@@ -618,8 +618,8 @@ async fn probe_watch_sse(
     let first = tokio::task::spawn_blocking(move || backend.probe_watch_live(&id_live, 0))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
-    let after = first.iter().map(|batch| batch.seq).max().unwrap_or(0);
-    let stream = probe_event_stream(state.backend.clone(), id, first, after);
+    let cursor_vt = first.cursor_vt;
+    let stream = probe_event_stream(state.backend.clone(), id, first.batches, cursor_vt);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -627,7 +627,7 @@ fn probe_event_stream(
     backend: Arc<dyn SimulationBackend>,
     id: String,
     first: Vec<crate::probe_log::CoarseBatch>,
-    after: u64,
+    cursor_vt: u64,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let mut pending = Vec::with_capacity(first.len());
     for batch in first.into_iter().rev() {
@@ -635,32 +635,33 @@ fn probe_event_stream(
         pending.push(Event::default().event("probe").data(data));
     }
     stream::unfold(
-        (backend, id, after, pending),
-        |(backend, id, mut after, mut pending)| async move {
+        (backend, id, cursor_vt, pending),
+        |(backend, id, mut cursor_vt, mut pending)| async move {
             loop {
                 if let Some(event) = pending.pop() {
-                    return Some((Ok(event), (backend, id, after, pending)));
+                    return Some((Ok(event), (backend, id, cursor_vt, pending)));
                 }
                 let backend_poll = backend.clone();
                 let id_poll = id.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    backend_poll.probe_watch_live(&id_poll, after)
+                    backend_poll.probe_watch_live(&id_poll, cursor_vt)
                 })
                 .await;
                 match result {
-                    Ok(Ok(batches)) if !batches.is_empty() => {
-                        let mut events = Vec::with_capacity(batches.len());
-                        for batch in batches {
-                            after = after.max(batch.seq);
+                    Ok(Ok(live)) => {
+                        cursor_vt = live.cursor_vt;
+                        if live.batches.is_empty() {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                        let mut events = Vec::with_capacity(live.batches.len());
+                        for batch in live.batches {
                             let data =
                                 serde_json::to_string(&batch).unwrap_or_else(|_| "{}".into());
                             events.push(Event::default().event("probe").data(data));
                         }
                         events.reverse();
                         pending = events;
-                    }
-                    Ok(Ok(_)) => {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Ok(Err(err)) if err.status == 404 => return None,
                     Ok(Err(_)) | Err(_) => {
