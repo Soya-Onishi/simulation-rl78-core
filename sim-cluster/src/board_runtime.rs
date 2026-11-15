@@ -396,10 +396,7 @@ pub fn run_node<E: Entity>(
     let board_hash = board_id_hash(board_name);
     let text = fs::read_to_string(&opts.topology_path)?;
     let topo = LogicalTopology::from_json_str(&text)?;
-    let hashes = crate::topology::build_topology_hashes(&topo)
-        .map_err(|err| BoardError::Message(err.to_string()))?;
     let board = find_board(&topo, board_name)?;
-    let boards = hashes.boards;
 
     // Shared-memory virtual-time clock created by the arbiter.
     let local_n = opts.local_board_count;
@@ -413,7 +410,7 @@ pub fn run_node<E: Entity>(
 
     let config = isolated_config(&opts.iox_root)?;
     let iox_node = create_node(&config, &format!("node-{board_name}-{}", opts.cluster_key))?;
-    let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
+    let control = NodeControl::open(&iox_node, &opts.cluster_key, local_n)?;
     let actions = NodeActions::open(&iox_node, &opts.cluster_key, local_n)?;
     let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, local_n)?;
     let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_name, board, &topo)?;

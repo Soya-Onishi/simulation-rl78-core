@@ -1390,10 +1390,9 @@ mod tests {
         saw_cluster_stop: Option<Arc<Mutex<bool>>>,
     ) {
         let topo = two_board_topo(2_000);
-        let boards = board_hash_table(topo.boards.iter().map(|b| b.id.as_str())).unwrap();
         let config = isolated_config(&iox_root).unwrap();
         let node = create_node(&config, &format!("fake-{board_id}-{cluster_key}")).unwrap();
-        let control = NodeControl::open(&node, &cluster_key, boards).unwrap();
+        let control = NodeControl::open(&node, &cluster_key, topo.boards.len()).unwrap();
         // UART attach is covered by dedicated tests; skip here to isolate control timing.
 
         let my_hash = board_id_hash(&board_id);

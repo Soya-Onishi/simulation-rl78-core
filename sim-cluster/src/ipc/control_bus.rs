@@ -132,12 +132,16 @@ pub struct NodeControl {
 }
 
 impl NodeControl {
+    /// Open control ports with the same QoS as [`ArbiterControl::create`].
+    ///
+    /// `board_count` must match the arbiter's local board count (`max_subscribers` /
+    /// `max_publishers`), not the full topology size when boards are split across hosts.
     pub fn open(
         node: &Node<ipc::Service>,
         cluster_key: &str,
-        boards: HashMap<crate::ipc::HashedId<u64>, String>,
+        board_count: usize,
     ) -> Result<Self, IpcError> {
-        let max_nodes = boards.len().max(1);
+        let max_nodes = board_count.max(1);
         let a2n_name = names::ctrl_a2n(cluster_key);
         let n2a_name = names::ctrl_n2a(cluster_key);
 
@@ -251,7 +255,7 @@ mod tests {
         let arb = ArbiterControl::create(&arb_node, &key, 2, boards.clone()).unwrap();
 
         let node = create_node(&config, "rt-node-a").unwrap();
-        let nctl = NodeControl::open(&node, &key, boards).unwrap();
+        let nctl = NodeControl::open(&node, &key, 2).unwrap();
 
         let hash_a = board_id_hash("a");
         arb.publish(&ControlToNode::GetState).unwrap();
