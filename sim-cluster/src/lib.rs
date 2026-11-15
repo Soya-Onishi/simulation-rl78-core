@@ -46,6 +46,7 @@ pub use board_runtime::{
     cluster_host_stop_reason, list_catalog, parse_board_args, run_node,
 };
 pub use cluster_stop::is_cluster_relevant_reason;
+pub use config::{MachineId, machine_id_from_ipv4};
 pub use contract::{
     ActionList, AdvertisedAction, AdvertisedActionParam, ApiError, AttachGdbRequest,
     CreateSimulationRequest, CreateSimulationResponse, GdbSessionInfo, GdbSshCommand,

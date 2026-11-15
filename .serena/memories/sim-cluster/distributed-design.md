@@ -7,7 +7,7 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 ## Deployment
 - One `simulation-frontend` for the cluster.
 - One `cluster-backend` per physical machine (arbiter thread + local board processes).
-- One backend per machine. `machine_id` = IPv4 used for identity, as u32 (network octet order). Frontend does **not** assign/notify `machine_id`; each backend derives it.
+- One backend per machine. `MachineId` = IPv4 used for identity, as a newtype over u32 (network octet order). Frontend does **not** assign/notify `MachineId`; each backend derives it.
 - `frontend.yaml` `servers[].ip` must match that backend identity IPv4.
 
 ## Config
@@ -17,7 +17,7 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 - Phase 1: IPv6 unsupported (error).
 
 ## Create
-- Frontend First-Fit: walk `boards[]` order; for each board, assign to the first backend with remaining capacity while iterating a `machine_id → remaining` HashMap (`HashMap::iter` order — not YAML `servers[]` order). Capacity is concurrent board processes across all sims on that backend. `ClusterFrontend` keys backends by `machine_id`.
+- Frontend First-Fit: walk `boards[]` order; for each board, assign to the first backend with remaining capacity while iterating a `MachineId → remaining` HashMap (`HashMap::iter` order — not YAML `servers[]` order). Capacity is concurrent board processes across all sims on that backend. `ClusterFrontend` keys backends / `per_server` by `MachineId`.
 - One node = one topology `boards[]` entry (including plant kinds).
 - Payload to each participating backend: full topology JSON, assigned board ids, and (if multicast used) multicast address+port.
 - Backend spawns **only** assigned boards; keeps full topology for local edges.

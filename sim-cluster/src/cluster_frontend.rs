@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::backend::SimulationBackend;
 use crate::cluster_mcast::{allocate_multicast, has_cross_host_edge, place_boards_first_fit};
+use crate::config::MachineId;
 use crate::contract::{
     ActionList, ApiError, CreateMulticast, CreateSimulationRequest, InvokeActionRequest, LogEvent,
     StatusEvent, TopologyView,
@@ -15,7 +16,7 @@ use crate::ipc::new_cluster_key;
 use crate::topology::LogicalTopology;
 
 struct BackendSlot {
-    machine_id: u32,
+    machine_id: MachineId,
     backend: Arc<dyn SimulationBackend>,
     endpoint: String,
     max_nodes: u32,
@@ -23,21 +24,21 @@ struct BackendSlot {
 
 #[derive(Clone)]
 struct SimRecord {
-    /// `(machine_id, assigned board ids)` for each participating backend.
-    per_server: Vec<(u32, Vec<String>)>,
+    /// Participating backends and the board ids assigned to each.
+    per_server: HashMap<MachineId, Vec<String>>,
     mcast: Option<(Ipv4Addr, u16)>,
 }
 
 struct FrontendState {
-    /// `machine_id` → free board slots.
-    remaining: HashMap<u32, u32>,
+    /// [`MachineId`] → free board slots.
+    remaining: HashMap<MachineId, u32>,
     used_mcast: Vec<(Ipv4Addr, u16)>,
     sims: HashMap<String, SimRecord>,
 }
 
 /// Multi-backend create planner that implements [`SimulationBackend`].
 pub struct ClusterFrontend {
-    servers: HashMap<u32, BackendSlot>,
+    servers: HashMap<MachineId, BackendSlot>,
     address_ranges: Vec<(Ipv4Addr, Ipv4Addr)>,
     port_ranges: Vec<(u16, u16)>,
     state: Mutex<FrontendState>,
@@ -48,7 +49,7 @@ impl ClusterFrontend {
     ///
     /// Each entry is `(backend, endpoint, max_nodes, machine_id)`.
     pub fn new(
-        servers: Vec<(Arc<dyn SimulationBackend>, String, u32, u32)>,
+        servers: Vec<(Arc<dyn SimulationBackend>, String, u32, MachineId)>,
         address_ranges: Vec<(Ipv4Addr, Ipv4Addr)>,
         port_ranges: Vec<(u16, u16)>,
     ) -> Result<Self, ApiError> {
@@ -60,7 +61,7 @@ impl ClusterFrontend {
         for (backend, endpoint, max_nodes, machine_id) in servers {
             if slots.contains_key(&machine_id) {
                 return Err(ApiError::internal(format!(
-                    "ClusterFrontend: duplicate machine_id {machine_id:#010x}"
+                    "ClusterFrontend: duplicate machine_id {machine_id}"
                 )));
             }
             remaining.insert(machine_id, max_nodes);
@@ -109,7 +110,7 @@ impl ClusterFrontend {
         let placement = place_boards_first_fit(&board_ids, &mut remaining)
             .map_err(|err| ApiError::bad_request("insufficient_capacity", err.to_string()))?;
 
-        let board_server: HashMap<String, u32> =
+        let board_server: HashMap<String, MachineId> =
             placement.board_to_server.iter().cloned().collect();
         let edges = Self::edge_pairs(topo);
         // TODO(cluster-distributed-p2): remove once cross-host endpoint multicast exists.
@@ -120,15 +121,13 @@ impl ClusterFrontend {
             ));
         }
 
-        let mut by_server: HashMap<u32, Vec<String>> = HashMap::new();
+        let mut per_server: HashMap<MachineId, Vec<String>> = HashMap::new();
         for (board_id, machine_id) in &placement.board_to_server {
-            by_server
+            per_server
                 .entry(*machine_id)
                 .or_default()
                 .push(board_id.clone());
         }
-        let mut per_server: Vec<(u32, Vec<String>)> = by_server.into_iter().collect();
-        per_server.sort_by_key(|(machine_id, _)| *machine_id);
 
         let mcast = if per_server.len() >= 2 {
             if self.address_ranges.is_empty() || self.port_ranges.is_empty() {
@@ -187,16 +186,18 @@ impl ClusterFrontend {
             }
             return Err(ApiError::not_found("unknown simulation"));
         };
-        let (machine_id, _) = rec.per_server[0];
+        let machine_id = *rec.per_server.keys().next().ok_or_else(|| {
+            ApiError::internal("simulation has no participating backends")
+        })?;
         self.servers
             .get(&machine_id)
             .map(|slot| slot.backend.clone())
-            .ok_or_else(|| ApiError::internal(format!("missing backend for machine_id {machine_id:#010x}")))
+            .ok_or_else(|| ApiError::internal(format!("missing backend for machine_id {machine_id}")))
     }
 
-    fn slot(&self, machine_id: u32) -> Result<&BackendSlot, ApiError> {
+    fn slot(&self, machine_id: MachineId) -> Result<&BackendSlot, ApiError> {
         let slot = self.servers.get(&machine_id).ok_or_else(|| {
-            ApiError::internal(format!("missing backend for machine_id {machine_id:#010x}"))
+            ApiError::internal(format!("missing backend for machine_id {machine_id}"))
         })?;
         debug_assert_eq!(slot.machine_id, machine_id);
         Ok(slot)
@@ -204,8 +205,8 @@ impl ClusterFrontend {
 }
 
 struct PlannedCreate {
-    remaining: HashMap<u32, u32>,
-    per_server: Vec<(u32, Vec<String>)>,
+    remaining: HashMap<MachineId, u32>,
+    per_server: HashMap<MachineId, Vec<String>>,
     mcast: Option<(Ipv4Addr, u16)>,
 }
 
@@ -249,8 +250,8 @@ impl SimulationBackend for ClusterFrontend {
             }
         };
 
-        let mut succeeded: Vec<u32> = Vec::new();
-        for &(machine_id, ref boards) in &plan.per_server {
+        let mut succeeded: Vec<MachineId> = Vec::new();
+        for (&machine_id, boards) in &plan.per_server {
             let (backend, endpoint) = {
                 let slot = self.slot(machine_id)?;
                 (slot.backend.clone(), slot.endpoint.clone())
@@ -354,15 +355,15 @@ impl SimulationBackend for ClusterFrontend {
         };
 
         let mut first_err: Option<ApiError> = None;
-        let mut still_held: Vec<(u32, Vec<String>)> = Vec::new();
+        let mut still_held: HashMap<MachineId, Vec<String>> = HashMap::new();
         for (machine_id, boards) in rec.per_server {
             let Some(slot) = self.servers.get(&machine_id) else {
                 if first_err.is_none() {
                     first_err = Some(ApiError::internal(format!(
-                        "missing backend for machine_id {machine_id:#010x}"
+                        "missing backend for machine_id {machine_id}"
                     )));
                 }
-                still_held.push((machine_id, boards));
+                still_held.insert(machine_id, boards);
                 continue;
             };
             match slot.backend.shutdown(id) {
@@ -383,7 +384,7 @@ impl SimulationBackend for ClusterFrontend {
                     if first_err.is_none() {
                         first_err = Some(err);
                     }
-                    still_held.push((machine_id, boards));
+                    still_held.insert(machine_id, boards);
                 }
             }
         }
@@ -736,7 +737,7 @@ mod tests {
     fn single_server_create_no_multicast() {
         let b0 = MockBackend::new("s0");
         let fe =
-            ClusterFrontend::new(vec![(b0.clone(), "s0".into(), 4, 1)], vec![], vec![]).unwrap();
+            ClusterFrontend::new(vec![(b0.clone(), "s0".into(), 4, MachineId::from_u32(1))], vec![], vec![]).unwrap();
         let id = fe
             .create(CreateSimulationRequest {
                 topology: topo_two_connected(),
@@ -758,8 +759,8 @@ mod tests {
     fn cross_host_edge_rejected() {
         let fe = ClusterFrontend::new(
             vec![
-                (MockBackend::new("s0"), "s0".into(), 1, 1),
-                (MockBackend::new("s1"), "s1".into(), 1, 2),
+                (MockBackend::new("s0"), "s0".into(), 1, MachineId::from_u32(1)),
+                (MockBackend::new("s1"), "s1".into(), 1, MachineId::from_u32(2)),
             ],
             vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 3))],
             vec![(30000, 30002)],
@@ -782,8 +783,8 @@ mod tests {
         let b1 = MockBackend::new("s1");
         let fe = ClusterFrontend::new(
             vec![
-                (b0.clone(), "s0".into(), 1, 1),
-                (b1.clone(), "s1".into(), 1, 2),
+                (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
+                (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
             ],
             vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
             vec![(30000, 30000)],
@@ -809,7 +810,7 @@ mod tests {
         assert_eq!(all, vec!["a".to_string(), "b".to_string()]);
         let state = fe.lock().unwrap();
         assert_eq!(state.used_mcast, vec![(Ipv4Addr::new(239, 0, 0, 1), 30000)]);
-        assert_eq!(state.remaining, HashMap::from([(1, 0), (2, 0)]));
+        assert_eq!(state.remaining, HashMap::from([(MachineId::from_u32(1), 0), (MachineId::from_u32(2), 0)]));
     }
 
     #[test]
@@ -818,8 +819,8 @@ mod tests {
         let b1 = MockBackend::failing("s1");
         let fe = ClusterFrontend::new(
             vec![
-                (b0.clone(), "s0".into(), 1, 1),
-                (b1.clone(), "s1".into(), 1, 2),
+                (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
+                (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
             ],
             vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
             vec![(30000, 30000)],
@@ -837,7 +838,7 @@ mod tests {
         assert!(b0.live.lock().unwrap().is_empty());
         let state = fe.lock().unwrap();
         assert!(state.sims.is_empty());
-        assert_eq!(state.remaining, HashMap::from([(1, 1), (2, 1)]));
+        assert_eq!(state.remaining, HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)]));
         assert!(state.used_mcast.is_empty());
     }
 
@@ -847,8 +848,8 @@ mod tests {
         let b1 = MockBackend::new("s1");
         let fe = ClusterFrontend::new(
             vec![
-                (b0.clone(), "s0".into(), 1, 1),
-                (b1.clone(), "s1".into(), 1, 2),
+                (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
+                (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
             ],
             vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
             vec![(30000, 30000)],
@@ -866,6 +867,6 @@ mod tests {
         let state = fe.lock().unwrap();
         assert!(state.sims.is_empty());
         assert!(state.used_mcast.is_empty());
-        assert_eq!(state.remaining, HashMap::from([(1, 1), (2, 1)]));
+        assert_eq!(state.remaining, HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)]));
     }
 }

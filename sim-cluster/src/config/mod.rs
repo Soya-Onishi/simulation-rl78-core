@@ -82,10 +82,44 @@ impl MulticastConfig {
     }
 }
 
-/// `machine_id` from an IPv4 address (network byte order / big-endian octets).
+/// Backend / multicast host identity derived from an IPv4 address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MachineId(u32);
+
+impl MachineId {
+    /// Wrap a raw big-endian IPv4 `u32` (wire / config form).
+    #[must_use]
+    pub const fn from_u32(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Raw value used on the multicast wire and in hex logs.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn to_be_bytes(self) -> [u8; 4] {
+        self.0.to_be_bytes()
+    }
+
+    #[must_use]
+    pub fn from_be_bytes(bytes: [u8; 4]) -> Self {
+        Self(u32::from_be_bytes(bytes))
+    }
+}
+
+impl std::fmt::Display for MachineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#010x}", self.0)
+    }
+}
+
+/// `MachineId` from an IPv4 address (network byte order / big-endian octets).
 #[must_use]
-pub fn machine_id_from_ipv4(ip: Ipv4Addr) -> u32 {
-    u32::from_be_bytes(ip.octets())
+pub fn machine_id_from_ipv4(ip: Ipv4Addr) -> MachineId {
+    MachineId::from_be_bytes(ip.octets())
 }
 
 /// Parse a single IPv4 address (reject hostnames).
@@ -432,7 +466,7 @@ mod tests {
     fn machine_id_uses_be_octets() {
         assert_eq!(
             machine_id_from_ipv4(Ipv4Addr::new(10, 1, 2, 3)),
-            u32::from_be_bytes([10, 1, 2, 3])
+            MachineId::from_u32(u32::from_be_bytes([10, 1, 2, 3]))
         );
     }
 

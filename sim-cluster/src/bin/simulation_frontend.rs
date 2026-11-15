@@ -43,7 +43,12 @@ fn main() {
         }
     }
 
-    let backends: Vec<(Arc<dyn sim_cluster::SimulationBackend>, String, u32, u32)> = cfg
+    let backends: Vec<(
+        Arc<dyn sim_cluster::SimulationBackend>,
+        String,
+        u32,
+        sim_cluster::MachineId,
+    )> = cfg
         .servers
         .iter()
         .map(|server| {
@@ -51,7 +56,7 @@ fn main() {
                 .ip
                 .parse()
                 .expect("FrontendConfig validates servers[].ip as IPv4");
-            let machine_id = sim_cluster::config::machine_id_from_ipv4(ip);
+            let machine_id = sim_cluster::machine_id_from_ipv4(ip);
             let backend: Arc<dyn sim_cluster::SimulationBackend> =
                 TcpipBackend::new(format!("http://{}:{}", server.ip, server.port));
             (

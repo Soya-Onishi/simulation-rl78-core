@@ -49,7 +49,7 @@ pub struct ServerOptions {
     /// Backend bind / multicast interface IPv4 (`BackendConfig::addr`).
     pub interface: std::net::Ipv4Addr,
     /// `machine_id` derived from [`Self::interface`].
-    pub machine_id: u32,
+    pub machine_id: crate::config::MachineId,
 }
 
 impl Default for ServerOptions {

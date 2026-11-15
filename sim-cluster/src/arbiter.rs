@@ -70,7 +70,7 @@ pub enum ArbiterError {
 #[derive(Clone, Debug)]
 pub struct ArbiterMcastOpts {
     pub group: SocketAddrV4,
-    pub machine_id: u32,
+    pub machine_id: crate::config::MachineId,
     pub interface: Ipv4Addr,
 }
 
@@ -1032,7 +1032,7 @@ fn open_mcast_plane(
     };
     let sock = ClusterMulticast::join(m.group, m.machine_id, m.interface)?;
     log::info!(
-        "joined cluster multicast {} interface={} machine_id={:#010x}",
+        "joined cluster multicast {} interface={} machine_id={}",
         m.group,
         m.interface,
         m.machine_id
@@ -1072,9 +1072,7 @@ fn poll_mcast_plane(
                     continue;
                 }
                 if running {
-                    log::info!(
-                        "multicast ClusterStop from machine_id={machine_id:#010x} ({reason})"
-                    );
+                    log::info!("multicast ClusterStop from machine_id={machine_id} ({reason})");
                     broadcast_cluster_stop(
                         control,
                         peers,
@@ -1109,8 +1107,8 @@ fn poll_mcast_plane(
 #[cfg(test)]
 fn apply_remote_vt_sample(
     table: &mut RemoteVtTable,
-    self_id: u32,
-    machine_id: u32,
+    self_id: crate::config::MachineId,
+    machine_id: crate::config::MachineId,
     min_vt_ns: u64,
 ) -> Option<u64> {
     if machine_id == self_id {
@@ -1268,11 +1266,22 @@ mod tests {
 
     #[test]
     fn apply_remote_vt_sample_excludes_self_and_aggregates() {
+        use crate::config::MachineId;
         let mut table = RemoteVtTable::new();
-        assert!(apply_remote_vt_sample(&mut table, 1, 1, 10).is_none());
-        assert_eq!(apply_remote_vt_sample(&mut table, 1, 2, 100), Some(100));
-        assert_eq!(apply_remote_vt_sample(&mut table, 1, 3, 40), Some(40));
-        assert_eq!(apply_remote_vt_sample(&mut table, 1, 2, 80), Some(40));
+        let self_id = MachineId::from_u32(1);
+        assert!(apply_remote_vt_sample(&mut table, self_id, self_id, 10).is_none());
+        assert_eq!(
+            apply_remote_vt_sample(&mut table, self_id, MachineId::from_u32(2), 100),
+            Some(100)
+        );
+        assert_eq!(
+            apply_remote_vt_sample(&mut table, self_id, MachineId::from_u32(3), 40),
+            Some(40)
+        );
+        assert_eq!(
+            apply_remote_vt_sample(&mut table, self_id, MachineId::from_u32(2), 80),
+            Some(40)
+        );
     }
 
     #[test]
