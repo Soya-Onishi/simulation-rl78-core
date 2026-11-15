@@ -1,11 +1,14 @@
 //! Frontend placement: First-Fit, multicast allocate, create fanout + compensate.
+//! Control fanout and status/log aggregate across participating backends (p1d).
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use crate::backend::SimulationBackend;
 use crate::cluster_mcast::{allocate_multicast, has_cross_host_edge, place_boards_first_fit};
+use crate::cluster_observe::LogAggregate;
 use crate::config::MachineId;
 use crate::contract::{
     ActionList, ApiError, CreateMulticast, CreateSimulationRequest, InvokeActionRequest, LogEvent,
@@ -31,6 +34,23 @@ struct SimRecord {
 
 struct FrontendState {
     sims: HashMap<String, SimRecord>,
+    /// Per-simulation aggregate; `Mutex` serializes pull+ingest for that sim only.
+    logs: HashMap<String, Arc<Mutex<LogAggregate>>>,
+}
+
+/// Live ledger participants keyed by `MachineId`.
+struct Participants {
+    per_server: HashMap<MachineId, Vec<String>>,
+    backends: HashMap<MachineId, Arc<dyn SimulationBackend>>,
+}
+
+impl Participants {
+    /// Ascending `MachineId` order for stable status/log merge.
+    fn machine_order(&self) -> Vec<MachineId> {
+        let mut ids: Vec<_> = self.backends.keys().copied().collect();
+        ids.sort_by_key(|id| id.as_u32());
+        ids
+    }
 }
 
 /// Multi-backend create planner that implements [`SimulationBackend`].
@@ -76,6 +96,7 @@ impl ClusterFrontend {
             port_ranges,
             state: Mutex::new(FrontendState {
                 sims: HashMap::new(),
+                logs: HashMap::new(),
             }),
         })
     }
@@ -153,8 +174,7 @@ impl ClusterFrontend {
                 ));
             }
             let used = Self::used_multicast(state);
-            let Some(pair) =
-                allocate_multicast(&self.address_ranges, &self.port_ranges, &used)
+            let Some(pair) = allocate_multicast(&self.address_ranges, &self.port_ranges, &used)
             else {
                 return Err(ApiError::bad_request(
                     "multicast_exhausted",
@@ -171,11 +191,210 @@ impl ClusterFrontend {
 
     /// Drop this sim's `SimRecord` after compensation cleaned backends.
     /// Board-slot and multicast reservations are derived from `sims`, so remove
-    /// alone frees both.
+    /// alone frees both. Also drops the log aggregate.
     fn rollback_ledger(&self, id: &str) {
         if let Ok(mut state) = self.lock() {
             state.sims.remove(id);
+            state.logs.remove(id);
         }
+    }
+
+    /// Participating backends for a live ledger entry (I/O-ready clones).
+    ///
+    /// Requires a `SimRecord` in the frontend ledger (no exists-probe fallback).
+    fn participants(&self, id: &str) -> Result<Participants, ApiError> {
+        let state = self.lock()?;
+        let Some(rec) = state.sims.get(id) else {
+            return Err(ApiError::not_found("unknown simulation"));
+        };
+        let per_server = rec.per_server.clone();
+        let mut backends = HashMap::with_capacity(per_server.len());
+        for &machine_id in per_server.keys() {
+            let backend = self
+                .servers
+                .get(&machine_id)
+                .ok_or_else(|| {
+                    ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+                })?
+                .backend
+                .clone();
+            backends.insert(machine_id, backend);
+        }
+        Ok(Participants {
+            per_server,
+            backends,
+        })
+    }
+
+    /// Run `f` on every participant and wait for all (control plane).
+    /// Single-participant skips thread spawn.
+    fn parallel_map<T: Send>(
+        backends: &HashMap<MachineId, Arc<dyn SimulationBackend>>,
+        f: impl Fn(MachineId, &dyn SimulationBackend) -> Result<T, ApiError> + Sync + Send,
+    ) -> Vec<(MachineId, Result<T, ApiError>)> {
+        if backends.is_empty() {
+            return Vec::new();
+        }
+        if backends.len() == 1 {
+            let (machine_id, backend) = backends.iter().next().expect("len checked");
+            return vec![(*machine_id, f(*machine_id, backend.as_ref()))];
+        }
+        thread::scope(|scope| {
+            let f = &f;
+            let handles: Vec<_> = backends
+                .iter()
+                .map(|(machine_id, backend)| {
+                    let machine_id = *machine_id;
+                    let backend = Arc::clone(backend);
+                    (
+                        machine_id,
+                        scope.spawn(move || f(machine_id, backend.as_ref())),
+                    )
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|(machine_id, handle)| match handle.join() {
+                    Ok(result) => (machine_id, result),
+                    Err(_) => (
+                        machine_id,
+                        Err(ApiError::internal("participant worker panicked")),
+                    ),
+                })
+                .collect()
+        })
+    }
+
+    /// Parallel unit call to every participant. Returns the error from the
+    /// lowest `MachineId` among failures (after all calls finish).
+    fn control_fanout(
+        &self,
+        id: &str,
+        call: impl Fn(&dyn SimulationBackend) -> Result<(), ApiError> + Sync + Send,
+    ) -> Result<(), ApiError> {
+        let participants = self.participants(id)?;
+        let results = Self::parallel_map(&participants.backends, |_, backend| call(backend));
+        let mut failures: Vec<(MachineId, ApiError)> = results
+            .into_iter()
+            .filter_map(|(machine_id, result)| match result {
+                Ok(()) => None,
+                Err(err) => Some((machine_id, err)),
+            })
+            .collect();
+        if failures.is_empty() {
+            return Ok(());
+        }
+        failures.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+        Err(failures.remove(0).1)
+    }
+
+    /// Fetch new local logs, then ingest and read while holding that sim's
+    /// `LogAggregate` mutex so concurrent `log_high_water` / `logs_after` on
+    /// the same id cannot advance global seq under each other (SSE gap).
+    /// Other simulations are unaffected.
+    ///
+    /// When `skip_failed_backlog` is true (SSE subscribe via `log_high_water`),
+    /// backends that fail the pull have their local high-water applied as a
+    /// cursor skip so their backlog cannot later appear as post-subscribe lines.
+    ///
+    /// Lock order: take `FrontendState` only to clone participants + `Arc`,
+    /// release it, then lock the aggregate — never nest state under the agg.
+    ///
+    /// Observe RPCs use a short HTTP timeout (`TcpipBackend` observe path) so
+    /// `parallel_map` workers join promptly without detaching threads.
+    fn with_pulled_logs<R>(
+        &self,
+        id: &str,
+        skip_failed_backlog: bool,
+        read: impl FnOnce(&LogAggregate) -> R,
+    ) -> Result<R, ApiError> {
+        let (participants, agg) = {
+            let state = self.lock()?;
+            let Some(rec) = state.sims.get(id) else {
+                return Err(ApiError::not_found("unknown simulation"));
+            };
+            let Some(agg) = state.logs.get(id).cloned() else {
+                return Err(ApiError::not_found("unknown simulation"));
+            };
+            let per_server = rec.per_server.clone();
+            let mut backends = HashMap::with_capacity(per_server.len());
+            for &machine_id in per_server.keys() {
+                let backend = self
+                    .servers
+                    .get(&machine_id)
+                    .ok_or_else(|| {
+                        ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+                    })?
+                    .backend
+                    .clone();
+                backends.insert(machine_id, backend);
+            }
+            (
+                Participants {
+                    per_server,
+                    backends,
+                },
+                agg,
+            )
+        };
+        let mut agg = agg
+            .lock()
+            .map_err(|_| ApiError::internal("LogAggregate mutex poisoned"))?;
+        let cursors: HashMap<MachineId, u64> = participants
+            .backends
+            .keys()
+            .map(|machine_id| (*machine_id, agg.after_for(*machine_id)))
+            .collect();
+        let fetched = Self::parallel_map(&participants.backends, |machine_id, backend| {
+            let after = cursors.get(&machine_id).copied().unwrap_or(0);
+            backend.logs_after(id, after)
+        });
+        let mut by_machine: HashMap<MachineId, Vec<LogEvent>> = HashMap::new();
+        let mut failed: Vec<MachineId> = Vec::new();
+        for (machine_id, result) in fetched {
+            match result {
+                Ok(events) => {
+                    by_machine.insert(machine_id, events);
+                }
+                Err(_) => failed.push(machine_id),
+            }
+        }
+        if skip_failed_backlog && !failed.is_empty() {
+            let failed_backends: HashMap<_, _> = failed
+                .iter()
+                .filter_map(|machine_id| {
+                    participants
+                        .backends
+                        .get(machine_id)
+                        .map(|backend| (*machine_id, Arc::clone(backend)))
+                })
+                .collect();
+            let hw_results =
+                Self::parallel_map(&failed_backends, |_, backend| backend.log_high_water(id));
+            for (machine_id, result) in hw_results {
+                match result {
+                    Ok(local_hw) => agg.advance_backend_cursor(machine_id, local_hw),
+                    Err(_) => agg.mark_baseline_pending(machine_id),
+                }
+            }
+        }
+        let mut batches = Vec::new();
+        for machine_id in participants.machine_order() {
+            let Some(events) = by_machine.remove(&machine_id) else {
+                continue;
+            };
+            // First successful pull after a subscribe that could not baseline
+            // this backend: drop the recovered backlog without emitting it.
+            if agg.take_baseline_pending(machine_id) {
+                if let Some(max_seq) = events.iter().map(|event| event.seq).max() {
+                    agg.advance_backend_cursor(machine_id, max_seq);
+                }
+                continue;
+            }
+            batches.push((machine_id, events));
+        }
+        agg.ingest(batches);
+        Ok(read(&agg))
     }
 
     /// Shut down `id` on every backend in `succeeded`. Returns false if any
@@ -231,13 +450,17 @@ impl ClusterFrontend {
             }
             return Err(ApiError::not_found("unknown simulation"));
         };
-        let machine_id = *rec.per_server.keys().next().ok_or_else(|| {
-            ApiError::internal("simulation has no participating backends")
-        })?;
+        let machine_id = *rec
+            .per_server
+            .keys()
+            .next()
+            .ok_or_else(|| ApiError::internal("simulation has no participating backends"))?;
         self.servers
             .get(&machine_id)
             .map(|slot| slot.backend.clone())
-            .ok_or_else(|| ApiError::internal(format!("missing backend for machine_id {machine_id}")))
+            .ok_or_else(|| {
+                ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+            })
     }
 
     fn slot(&self, machine_id: MachineId) -> Result<&BackendSlot, ApiError> {
@@ -258,8 +481,11 @@ impl SimulationBackend for ClusterFrontend {
             let mut state = self.lock()?;
             let record = self.allocate_sim_record(&state, &topo)?;
             // Inserting the record reserves board slots and multicast (derived from
-            // sims) before fanout.
+            // sims) before fanout. Log aggregate is created with the ledger entry.
             state.sims.insert(id.clone(), record.clone());
+            state
+                .logs
+                .insert(id.clone(), Arc::new(Mutex::new(LogAggregate::new())));
             record
         };
 
@@ -310,20 +536,16 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError> {
-        // TODO(cluster-distributed-p1d): fan out Start to all participating backends
-        // in parallel (no barrier). Until then, primary participant only.
         // Arbiter `broadcast_start` stays local iceoryx; cross-host is frontend fanout.
-        self.primary_backend(id)?.start(id, until_ns)
+        self.control_fanout(id, |backend| backend.start(id, until_ns))
     }
 
     fn stop(&self, id: &str) -> Result<(), ApiError> {
-        // TODO(cluster-distributed-p1d): fan out Stop to all participating backends.
-        self.primary_backend(id)?.stop(id)
+        self.control_fanout(id, |backend| backend.stop(id))
     }
 
     fn reset(&self, id: &str) -> Result<(), ApiError> {
-        // TODO(cluster-distributed-p1d): fan out Reset to all participating backends.
-        self.primary_backend(id)?.reset(id)
+        self.control_fanout(id, |backend| backend.reset(id))
     }
 
     fn shutdown(&self, id: &str) -> Result<(), ApiError> {
@@ -384,6 +606,7 @@ impl SimulationBackend for ClusterFrontend {
         };
         if emptied {
             state.sims.remove(id);
+            state.logs.remove(id);
         }
         let still_present = state.sims.contains_key(id);
 
@@ -413,8 +636,32 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn status(&self, id: &str) -> Result<StatusEvent, ApiError> {
-        // TODO(cluster-distributed-p1d): aggregate status from participating backends.
-        self.primary_backend(id)?.status(id)
+        let participants = self.participants(id)?;
+        // Observe RPCs time out quickly on TcpipBackend; failed peers are omitted.
+        let results = Self::parallel_map(&participants.backends, |_, backend| backend.status(id));
+        let mut ok = Vec::new();
+        let mut errs = Vec::new();
+        for (machine_id, result) in results {
+            match result {
+                Ok(status) => ok.push((machine_id, status)),
+                Err(err) => errs.push((machine_id, err)),
+            }
+        }
+        if ok.is_empty() {
+            errs.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+            return Err(errs
+                .into_iter()
+                .next()
+                .map(|(_, err)| err)
+                .unwrap_or_else(|| ApiError::not_found("unknown simulation")));
+        }
+        let order = participants.machine_order();
+        Ok(crate::cluster_observe::merge_status(
+            id,
+            &participants.per_server,
+            &order,
+            &ok,
+        ))
     }
 
     fn topology(&self, id: &str) -> Result<TopologyView, ApiError> {
@@ -424,13 +671,14 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError> {
-        // TODO(cluster-distributed-p1d): aggregate logs from participating backends.
-        self.primary_backend(id)?.logs_after(id, after)
+        self.with_pulled_logs(id, false, |agg| agg.after(after))
     }
 
     fn log_high_water(&self, id: &str) -> Result<u64, ApiError> {
-        // TODO(cluster-distributed-p1d): aggregate log high-water across backends.
-        self.primary_backend(id)?.log_high_water(id)
+        // Pull+ingest first so SSE subscribe skips backlog already on backends
+        // (same "from connection onward" contract as a single LocalBackend).
+        // Failed pulls skip that backend's local high-water without ingesting.
+        self.with_pulled_logs(id, true, LogAggregate::high_water)
     }
 
     fn actions(&self, id: &str) -> Result<ActionList, ApiError> {
@@ -543,428 +791,5 @@ impl SimulationBackend for ClusterFrontend {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::topology::{BoardSpec, DirectedEdge, PayloadKind, PortRef};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::thread;
-
-    struct MockBackend {
-        name: String,
-        creates: AtomicUsize,
-        fail_create: bool,
-        /// Remaining times `shutdown` should return an error before removing.
-        shutdown_failures: AtomicUsize,
-        live: Mutex<HashMap<String, Vec<String>>>,
-    }
-
-    impl MockBackend {
-        fn new(name: &str) -> Arc<Self> {
-            Arc::new(Self {
-                name: name.into(),
-                creates: AtomicUsize::new(0),
-                fail_create: false,
-                shutdown_failures: AtomicUsize::new(0),
-                live: Mutex::new(HashMap::new()),
-            })
-        }
-
-        fn failing(name: &str) -> Arc<Self> {
-            Arc::new(Self {
-                name: name.into(),
-                creates: AtomicUsize::new(0),
-                fail_create: true,
-                shutdown_failures: AtomicUsize::new(0),
-                live: Mutex::new(HashMap::new()),
-            })
-        }
-
-        fn with_shutdown_failures(name: &str, n: usize) -> Arc<Self> {
-            Arc::new(Self {
-                name: name.into(),
-                creates: AtomicUsize::new(0),
-                fail_create: false,
-                shutdown_failures: AtomicUsize::new(n),
-                live: Mutex::new(HashMap::new()),
-            })
-        }
-    }
-
-    impl SimulationBackend for MockBackend {
-        fn create(&self, request: CreateSimulationRequest) -> Result<String, ApiError> {
-            self.creates.fetch_add(1, Ordering::SeqCst);
-            if self.fail_create {
-                return Err(ApiError::internal(format!("{} boom", self.name)));
-            }
-            let id = request.id.unwrap_or_else(|| "auto".into());
-            let boards = request.assigned_boards.unwrap_or_else(|| {
-                request
-                    .topology
-                    .boards
-                    .iter()
-                    .map(|b| b.id.clone())
-                    .collect()
-            });
-            self.live.lock().unwrap().insert(id.clone(), boards);
-            Ok(id)
-        }
-
-        fn shutdown(&self, id: &str) -> Result<(), ApiError> {
-            let prev = self.shutdown_failures.load(Ordering::SeqCst);
-            if prev > 0
-                && self
-                    .shutdown_failures
-                    .compare_exchange(prev, prev - 1, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-            {
-                return Err(ApiError::internal(format!("{} shutdown boom", self.name)));
-            }
-            self.live
-                .lock()
-                .unwrap()
-                .remove(id)
-                .map(|_| ())
-                .ok_or_else(|| ApiError::not_found("missing"))
-        }
-
-        fn exists(&self, id: &str) -> Result<bool, ApiError> {
-            Ok(self.live.lock().unwrap().contains_key(id))
-        }
-
-        fn start(&self, _: &str, _: Option<u64>) -> Result<(), ApiError> {
-            Ok(())
-        }
-        fn stop(&self, _: &str) -> Result<(), ApiError> {
-            Ok(())
-        }
-        fn reset(&self, _: &str) -> Result<(), ApiError> {
-            Ok(())
-        }
-        fn status(&self, _: &str) -> Result<StatusEvent, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn topology(&self, _: &str) -> Result<TopologyView, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn logs_after(&self, _: &str, _: u64) -> Result<Vec<LogEvent>, ApiError> {
-            Ok(vec![])
-        }
-        fn log_high_water(&self, _: &str) -> Result<u64, ApiError> {
-            Ok(0)
-        }
-        fn actions(&self, _: &str) -> Result<ActionList, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn invoke_action(&self, _: &str, _: InvokeActionRequest) -> Result<(), ApiError> {
-            Ok(())
-        }
-        fn probe_catalog(
-            &self,
-            _: &str,
-        ) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError> {
-            Ok(vec![])
-        }
-        fn probe_watch_get(&self, _: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn probe_watch_put(
-            &self,
-            _: &str,
-            _: Vec<crate::probe_log::ProbeRef>,
-        ) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn probe_watch_clear(&self, _: &str) -> Result<(), ApiError> {
-            Ok(())
-        }
-        fn probe_watch_live(
-            &self,
-            _: &str,
-            _: u64,
-        ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
-            Ok(vec![])
-        }
-        fn csv_start(
-            &self,
-            _: &str,
-            _: crate::probe_log::ProbeRange,
-        ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn csv_poll(&self, _: &str, _: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn csv_status(&self, _: &str, _: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn probe_samples(
-            &self,
-            _: &str,
-            _: crate::ipc::HashedId<u64>,
-            _: crate::ipc::HashedId<u64>,
-            _: Option<u64>,
-            _: Option<u64>,
-        ) -> Result<crate::contract::ProbeSamplesResponse, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn viewer_attach(&self, _: &str) -> Result<String, ApiError> {
-            Ok("t".into())
-        }
-        fn viewer_check(&self, _: &str, _: &str) -> Result<(), ApiError> {
-            Ok(())
-        }
-        fn viewer_detach(&self, _: &str, _: &str) -> Result<(), ApiError> {
-            Ok(())
-        }
-        fn inspect(
-            &self,
-            _: &str,
-            _: crate::ipc::HashedId<u64>,
-            _: InspectRequest,
-        ) -> Result<InspectReply, ApiError> {
-            Err(ApiError::internal("unused"))
-        }
-        fn step(&self, _: &str, _: crate::ipc::HashedId<u64>) -> Result<(), ApiError> {
-            Ok(())
-        }
-    }
-
-    fn board(id: &str) -> BoardSpec {
-        BoardSpec {
-            id: id.into(),
-            kind: "rl78".into(),
-            elf: Some("base64:QQ==".into()),
-            endpoints: vec![],
-        }
-    }
-
-    fn topo_two_connected() -> LogicalTopology {
-        LogicalTopology {
-            boards: vec![board("a"), board("b")],
-            edges: vec![DirectedEdge {
-                from: PortRef {
-                    path: "a".into(),
-                    port: "u".into(),
-                },
-                to: PortRef {
-                    path: "b".into(),
-                    port: "u".into(),
-                },
-                route: vec![],
-                payload: PayloadKind::Uart,
-                uart_ring_len: None,
-            }],
-            margin_ns: 1,
-            booting_timeout_ms: 1000,
-        }
-    }
-
-    fn topo_two_disconnected() -> LogicalTopology {
-        LogicalTopology {
-            boards: vec![board("a"), board("b")],
-            edges: vec![],
-            margin_ns: 1,
-            booting_timeout_ms: 1000,
-        }
-    }
-
-    #[test]
-    fn single_server_create_no_multicast() {
-        let b0 = MockBackend::new("s0");
-        let fe =
-            ClusterFrontend::new(vec![(b0.clone(), "s0".into(), 4, MachineId::from_u32(1))], vec![], vec![]).unwrap();
-        let id = fe
-            .create(CreateSimulationRequest {
-                topology: topo_two_connected(),
-                id: Some("client-id".into()),
-                multicast: Some(CreateMulticast {
-                    address: "239.1.1.1".into(),
-                    port: 30000,
-                }),
-                assigned_boards: Some(vec!["a".into()]),
-            })
-            .unwrap();
-        assert_ne!(id, "client-id");
-        assert_eq!(b0.creates.load(Ordering::SeqCst), 1);
-        let live = b0.live.lock().unwrap();
-        assert_eq!(live.get(&id).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn cross_host_edge_rejected() {
-        let fe = ClusterFrontend::new(
-            vec![
-                (MockBackend::new("s0"), "s0".into(), 1, MachineId::from_u32(1)),
-                (MockBackend::new("s1"), "s1".into(), 1, MachineId::from_u32(2)),
-            ],
-            vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 3))],
-            vec![(30000, 30002)],
-        )
-        .unwrap();
-        let err = fe
-            .create(CreateSimulationRequest {
-                topology: topo_two_connected(),
-                id: None,
-                multicast: None,
-                assigned_boards: None,
-            })
-            .unwrap_err();
-        assert_eq!(err.code, "cross_host_edge");
-    }
-
-    #[test]
-    fn multi_server_disconnected_allocates_mcast_and_fans_out() {
-        let b0 = MockBackend::new("s0");
-        let b1 = MockBackend::new("s1");
-        let fe = ClusterFrontend::new(
-            vec![
-                (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
-                (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
-            ],
-            vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
-            vec![(30000, 30000)],
-        )
-        .unwrap();
-        let id = fe
-            .create(CreateSimulationRequest {
-                topology: topo_two_disconnected(),
-                id: None,
-                multicast: None,
-                assigned_boards: None,
-            })
-            .unwrap();
-        assert_eq!(b0.creates.load(Ordering::SeqCst), 1);
-        assert_eq!(b1.creates.load(Ordering::SeqCst), 1);
-        let assigned0 = b0.live.lock().unwrap().get(&id).unwrap().clone();
-        let assigned1 = b1.live.lock().unwrap().get(&id).unwrap().clone();
-        assert_eq!(assigned0.len(), 1);
-        assert_eq!(assigned1.len(), 1);
-        let mut all = assigned0;
-        all.extend(assigned1);
-        all.sort();
-        assert_eq!(all, vec!["a".to_string(), "b".to_string()]);
-        let state = fe.lock().unwrap();
-        assert_eq!(
-            ClusterFrontend::used_multicast(&state),
-            vec![(Ipv4Addr::new(239, 0, 0, 1), 30000)]
-        );
-        assert_eq!(
-            fe.free_capacity(&state),
-            HashMap::from([(MachineId::from_u32(1), 0), (MachineId::from_u32(2), 0)])
-        );
-    }
-
-    #[test]
-    fn partial_create_compensates() {
-        let b0 = MockBackend::new("s0");
-        let b1 = MockBackend::failing("s1");
-        let fe = ClusterFrontend::new(
-            vec![
-                (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
-                (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
-            ],
-            vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
-            vec![(30000, 30000)],
-        )
-        .unwrap();
-        let err = fe
-            .create(CreateSimulationRequest {
-                topology: topo_two_disconnected(),
-                id: None,
-                multicast: None,
-                assigned_boards: None,
-            })
-            .unwrap_err();
-        assert!(err.message.contains("compensated"), "{err:?}");
-        assert!(b0.live.lock().unwrap().is_empty());
-        let state = fe.lock().unwrap();
-        assert!(state.sims.is_empty());
-        assert_eq!(
-            fe.free_capacity(&state),
-            HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
-        );
-        assert!(ClusterFrontend::used_multicast(&state).is_empty());
-    }
-
-    #[test]
-    fn shutdown_frees_capacity_and_mcast() {
-        let b0 = MockBackend::new("s0");
-        let b1 = MockBackend::new("s1");
-        let fe = ClusterFrontend::new(
-            vec![
-                (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
-                (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
-            ],
-            vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
-            vec![(30000, 30000)],
-        )
-        .unwrap();
-        let id = fe
-            .create(CreateSimulationRequest {
-                topology: topo_two_disconnected(),
-                id: None,
-                multicast: None,
-                assigned_boards: None,
-            })
-            .unwrap();
-        fe.shutdown(&id).unwrap();
-        let state = fe.lock().unwrap();
-        assert!(state.sims.is_empty());
-        assert!(ClusterFrontend::used_multicast(&state).is_empty());
-        assert_eq!(
-            fe.free_capacity(&state),
-            HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
-        );
-    }
-
-    #[test]
-    fn concurrent_partial_shutdown_merges_ledger() {
-        let b0 = MockBackend::with_shutdown_failures("s0", 1);
-        let b1 = MockBackend::with_shutdown_failures("s1", 1);
-        let fe = Arc::new(
-            ClusterFrontend::new(
-                vec![
-                    (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
-                    (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
-                ],
-                vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
-                vec![(30000, 30000)],
-            )
-            .unwrap(),
-        );
-        let id = fe
-            .create(CreateSimulationRequest {
-                topology: topo_two_disconnected(),
-                id: None,
-                multicast: None,
-                assigned_boards: None,
-            })
-            .unwrap();
-
-        let mut handles = Vec::new();
-        for _ in 0..2 {
-            let fe = Arc::clone(&fe);
-            let id = id.clone();
-            handles.push(thread::spawn(move || fe.shutdown(&id)));
-        }
-        for h in handles {
-            let _ = h.join().expect("shutdown thread");
-        }
-
-        // Must be clean immediately after concurrent joins — a retry loop would
-        // mask the old full-overwrite ledger race.
-        assert!(b0.live.lock().unwrap().is_empty());
-        assert!(b1.live.lock().unwrap().is_empty());
-        let state = fe.lock().unwrap();
-        assert!(
-            state.sims.is_empty(),
-            "ledger leaked after concurrent partial shutdown: {:?}",
-            state.sims.keys().collect::<Vec<_>>()
-        );
-        assert!(ClusterFrontend::used_multicast(&state).is_empty());
-        assert_eq!(
-            fe.free_capacity(&state),
-            HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
-        );
-    }
-}
+#[path = "cluster_frontend_tests.rs"]
+mod tests;

@@ -15,6 +15,7 @@ pub mod board_kind;
 pub mod board_runtime;
 pub mod cluster_frontend;
 pub mod cluster_mcast;
+mod cluster_observe;
 pub mod cluster_stop;
 pub mod config;
 pub mod contract;
