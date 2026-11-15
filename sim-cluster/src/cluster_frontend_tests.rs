@@ -5,6 +5,7 @@ use crate::host::SessionNode;
 use crate::topology::{BoardSpec, DirectedEdge, PayloadKind, PortRef};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 struct MockBackend {
     name: String,
@@ -18,6 +19,8 @@ struct MockBackend {
     fail_logs: AtomicBool,
     /// Remaining times `shutdown` should return an error before removing.
     shutdown_failures: AtomicUsize,
+    status_delay: Mutex<Duration>,
+    logs_delay: Mutex<Duration>,
     live: Mutex<HashMap<String, Vec<String>>>,
     session_state: Mutex<String>,
     virtual_time_ns: AtomicU64,
@@ -41,6 +44,8 @@ impl MockBackend {
             fail_status: AtomicBool::new(false),
             fail_logs: AtomicBool::new(false),
             shutdown_failures: AtomicUsize::new(shutdown_failures),
+            status_delay: Mutex::new(Duration::ZERO),
+            logs_delay: Mutex::new(Duration::ZERO),
             live: Mutex::new(HashMap::new()),
             session_state: Mutex::new("stopped".into()),
             virtual_time_ns: AtomicU64::new(0),
@@ -146,6 +151,10 @@ impl SimulationBackend for MockBackend {
         Ok(())
     }
     fn status(&self, id: &str) -> Result<StatusEvent, ApiError> {
+        let delay = *self.status_delay.lock().unwrap();
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
         if self.fail_status.load(Ordering::SeqCst) {
             return Err(ApiError::internal(format!("{} status boom", self.name)));
         }
@@ -177,6 +186,10 @@ impl SimulationBackend for MockBackend {
         Err(ApiError::internal("unused"))
     }
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError> {
+        let delay = *self.logs_delay.lock().unwrap();
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
         if self.fail_logs.load(Ordering::SeqCst) {
             return Err(ApiError::internal(format!("{} logs boom", self.name)));
         }
@@ -817,6 +830,74 @@ fn status_stop_reason_when_all_stopped() {
     let status = fe.status(&id).unwrap();
     assert_eq!(status.state, "stopped");
     assert_eq!(status.stop_reason.as_deref(), Some("breakpoint"));
+}
+
+#[test]
+fn status_omits_timed_out_backend_quickly() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    *b1.status_delay.lock().unwrap() = Duration::from_secs(30);
+    *b0.session_state.lock().unwrap() = "running".into();
+    b0.virtual_time_ns.store(9, Ordering::SeqCst);
+    let fe = two_server_frontend(b0.clone(), b1);
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    let started = Instant::now();
+    let status = fe.status(&id).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "status waited too long for hung backend"
+    );
+    assert_eq!(status.state, "running");
+    assert_eq!(status.virtual_time_ns, 9);
+    assert_eq!(status.nodes.len(), 1);
+}
+
+#[test]
+fn concurrent_log_high_water_does_not_skip_ingested_lines() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    // Slow pull so a second client can race without the log_fetch gate.
+    *b0.logs_delay.lock().unwrap() = Duration::from_millis(50);
+    let fe = Arc::new(two_server_frontend(b0.clone(), b1.clone()));
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+
+    let fe_hw = Arc::clone(&fe);
+    let id_hw = id.clone();
+    let hw_thread = thread::spawn(move || fe_hw.log_high_water(&id_hw));
+
+    thread::sleep(Duration::from_millis(10));
+    b0.push_log(&id, "during-subscribe");
+    let polled = fe.logs_after(&id, 0).unwrap();
+    let hw = hw_thread.join().unwrap().unwrap();
+
+    // Everything ingested before/during subscribe must be covered by hw, and
+    // a follower starting at hw must not be asked to skip unseen seq gaps.
+    if polled.is_empty() {
+        // high_water won the race and ingested the line itself.
+        assert!(hw >= 1, "hw={hw}");
+        assert!(fe.logs_after(&id, hw).unwrap().is_empty());
+    } else {
+        assert_eq!(polled[0].text, "during-subscribe");
+        let max_seen = polled.iter().map(|e| e.seq).max().unwrap();
+        assert!(
+            hw >= max_seen,
+            "high_water {hw} skipped seq already visible to peer ({max_seen})"
+        );
+    }
 }
 
 #[test]

@@ -97,6 +97,10 @@ Lifecycle:
 
 `log_high_water(id)` = pull+ingest from participants (same as a `logs_after` pull), then return `next_seq.saturating_sub(1)`. This matches single-backend SSE subscribe: connection starts “from now,” without replaying backlog already sitting on backends.
 
+Concurrent `log_high_water` / `logs_after` share a `log_fetch` mutex around the whole pull+ingest so one caller cannot advance global seq under another’s in-flight subscribe.
+
+Status and log fanout use a bounded wait (`OBSERVE_FANOUT_TIMEOUT`, 2s): timed-out participants are treated as `Err` and omitted. Control fanout still waits for every participant.
+
 **Assumptions (local backend):** local seq is strictly increasing per append; `logs_after` may resend seqs already seen — step 3’s `event.seq > per_backend_after[m]` dedupes. Gaps: advance only on ingested seqs (skip hole until it appears or is never filled).
 
 **Concurrency:** multiple SSE clients share one aggregate; mutex serializes ingest + read. Pulls that raced may both fetch the same backend batch; dedupe by local seq prevents double-append.

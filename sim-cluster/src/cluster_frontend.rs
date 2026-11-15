@@ -1,10 +1,12 @@
 //! Frontend placement: First-Fit, multicast allocate, create fanout + compensate.
 //! Control fanout and status/log aggregate across participating backends (p1d).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::backend::SimulationBackend;
 use crate::cluster_mcast::{allocate_multicast, has_cross_host_edge, place_boards_first_fit};
@@ -17,6 +19,10 @@ use crate::contract::{
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::ipc::new_cluster_key;
 use crate::topology::LogicalTopology;
+
+/// Bound for status/log fanout so one unreachable backend cannot freeze SSE
+/// for the full TCP RPC timeout (60s). Timed-out participants are omitted.
+const OBSERVE_FANOUT_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct BackendSlot {
     machine_id: MachineId,
@@ -58,6 +64,9 @@ pub struct ClusterFrontend {
     address_ranges: Vec<(Ipv4Addr, Ipv4Addr)>,
     port_ranges: Vec<(u16, u16)>,
     state: Mutex<FrontendState>,
+    /// Serializes log pull+ingest so concurrent `log_high_water` / `logs_after`
+    /// cannot advance global seq under another caller's feet (SSE gap).
+    log_fetch: Mutex<()>,
 }
 
 impl ClusterFrontend {
@@ -97,6 +106,7 @@ impl ClusterFrontend {
                 sims: HashMap::new(),
                 logs: HashMap::new(),
             }),
+            log_fetch: Mutex::new(()),
         })
     }
 
@@ -225,7 +235,8 @@ impl ClusterFrontend {
         })
     }
 
-    /// Run `f` on every participant. Single-participant skips thread spawn.
+    /// Run `f` on every participant and wait for all (control plane).
+    /// Single-participant skips thread spawn.
     fn parallel_map<T: Send>(
         backends: &HashMap<MachineId, Arc<dyn SimulationBackend>>,
         f: impl Fn(MachineId, &dyn SimulationBackend) -> Result<T, ApiError> + Sync + Send,
@@ -263,6 +274,58 @@ impl ClusterFrontend {
         })
     }
 
+    /// Observe fanout: return as soon as `timeout` elapses. Slow/unreachable
+    /// participants become `Err` and are omitted by status/log merge. Workers
+    /// are detached so a hung RPC cannot block the caller until TCP timeout.
+    fn parallel_map_timeout<T: Send + 'static>(
+        backends: &HashMap<MachineId, Arc<dyn SimulationBackend>>,
+        timeout: Duration,
+        f: impl Fn(MachineId, &dyn SimulationBackend) -> Result<T, ApiError> + Send + Sync + 'static,
+    ) -> Vec<(MachineId, Result<T, ApiError>)> {
+        if backends.is_empty() {
+            return Vec::new();
+        }
+        let f = Arc::new(f);
+        let (tx, rx) = mpsc::channel();
+        let mut pending = HashSet::with_capacity(backends.len());
+        for (&machine_id, backend) in backends {
+            pending.insert(machine_id);
+            let tx = tx.clone();
+            let backend = Arc::clone(backend);
+            let f = Arc::clone(&f);
+            thread::spawn(move || {
+                let result = f(machine_id, backend.as_ref());
+                let _ = tx.send((machine_id, result));
+            });
+        }
+        drop(tx);
+        let deadline = Instant::now() + timeout;
+        let mut results = Vec::with_capacity(backends.len());
+        while !pending.is_empty() {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+                Ok((machine_id, result)) => {
+                    pending.remove(&machine_id);
+                    results.push((machine_id, result));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout)
+                | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+        for machine_id in pending {
+            results.push((
+                machine_id,
+                Err(ApiError::internal("observe fanout timed out")),
+            ));
+        }
+        results
+    }
+
     /// Parallel unit call to every participant. Returns the error from the
     /// lowest `MachineId` among failures (after all calls finish).
     fn control_fanout(
@@ -288,11 +351,19 @@ impl ClusterFrontend {
 
     /// Fetch new local logs, then ingest and read under one mutex hold so a
     /// concurrent pull cannot trim events before this caller snapshots them.
+    ///
+    /// The whole pull+ingest is also gated by `log_fetch` so another client's
+    /// ingest cannot advance global seq while this call's `log_high_water` is
+    /// still in flight (would make a new SSE skip those lines forever).
     fn with_pulled_logs<R>(
         &self,
         id: &str,
         read: impl FnOnce(&LogAggregate) -> R,
     ) -> Result<R, ApiError> {
+        let _fetch = self
+            .log_fetch
+            .lock()
+            .map_err(|_| ApiError::internal("ClusterFrontend log_fetch poisoned"))?;
         let participants = self.participants(id)?;
         let cursors: HashMap<MachineId, u64> = {
             let state = self.lock()?;
@@ -305,10 +376,15 @@ impl ClusterFrontend {
                 .map(|machine_id| (*machine_id, agg.after_for(*machine_id)))
                 .collect()
         };
-        let fetched = Self::parallel_map(&participants.backends, |machine_id, backend| {
-            let after = cursors.get(&machine_id).copied().unwrap_or(0);
-            backend.logs_after(id, after)
-        });
+        let id_owned = id.to_string();
+        let fetched = Self::parallel_map_timeout(
+            &participants.backends,
+            OBSERVE_FANOUT_TIMEOUT,
+            move |machine_id, backend| {
+                let after = cursors.get(&machine_id).copied().unwrap_or(0);
+                backend.logs_after(&id_owned, after)
+            },
+        );
         let mut by_machine: HashMap<MachineId, Vec<LogEvent>> = HashMap::new();
         for (machine_id, result) in fetched {
             if let Ok(events) = result {
@@ -567,7 +643,12 @@ impl SimulationBackend for ClusterFrontend {
 
     fn status(&self, id: &str) -> Result<StatusEvent, ApiError> {
         let participants = self.participants(id)?;
-        let results = Self::parallel_map(&participants.backends, |_, backend| backend.status(id));
+        let id_owned = id.to_string();
+        let results = Self::parallel_map_timeout(
+            &participants.backends,
+            OBSERVE_FANOUT_TIMEOUT,
+            move |_, backend| backend.status(&id_owned),
+        );
         let mut ok = Vec::new();
         let mut errs = Vec::new();
         for (machine_id, result) in results {
