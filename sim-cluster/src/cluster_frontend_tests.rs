@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::host::SessionNode;
+use crate::ipc::{HashedId, board_id_hash};
 use crate::topology::{BoardSpec, DirectedEdge, PayloadKind, PortRef};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
@@ -13,6 +14,10 @@ struct MockBackend {
     starts: AtomicUsize,
     stops: AtomicUsize,
     resets: AtomicUsize,
+    inspects: AtomicUsize,
+    steps: AtomicUsize,
+    invokes: AtomicUsize,
+    probe_samples: AtomicUsize,
     fail_create: bool,
     fail_start: AtomicBool,
     fail_status: AtomicBool,
@@ -40,6 +45,10 @@ impl MockBackend {
             starts: AtomicUsize::new(0),
             stops: AtomicUsize::new(0),
             resets: AtomicUsize::new(0),
+            inspects: AtomicUsize::new(0),
+            steps: AtomicUsize::new(0),
+            invokes: AtomicUsize::new(0),
+            probe_samples: AtomicUsize::new(0),
             fail_create,
             fail_start: AtomicBool::new(false),
             fail_status: AtomicBool::new(false),
@@ -212,6 +221,7 @@ impl SimulationBackend for MockBackend {
         Err(ApiError::internal("unused"))
     }
     fn invoke_action(&self, _: &str, _: InvokeActionRequest) -> Result<(), ApiError> {
+        self.invokes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     fn probe_catalog(&self, _: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError> {
@@ -258,7 +268,11 @@ impl SimulationBackend for MockBackend {
         _: Option<u64>,
         _: Option<u64>,
     ) -> Result<crate::contract::ProbeSamplesResponse, ApiError> {
-        Err(ApiError::internal("unused"))
+        self.probe_samples.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::contract::ProbeSamplesResponse {
+            truncated: false,
+            samples: vec![],
+        })
     }
     fn viewer_attach(&self, _: &str) -> Result<String, ApiError> {
         Ok("t".into())
@@ -275,9 +289,11 @@ impl SimulationBackend for MockBackend {
         _: crate::ipc::HashedId<u64>,
         _: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
-        Err(ApiError::internal("unused"))
+        self.inspects.fetch_add(1, Ordering::SeqCst);
+        Ok(InspectReply::Ok)
     }
     fn step(&self, _: &str, _: crate::ipc::HashedId<u64>) -> Result<(), ApiError> {
+        self.steps.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -1002,4 +1018,64 @@ fn shutdown_drops_log_aggregate() {
     assert_eq!(fe.log_high_water(&id).unwrap_err().code, "not_found");
     let state = fe.lock().unwrap();
     assert!(!state.logs.contains_key(&id));
+}
+
+#[test]
+fn machine_for_board_matches_hash() {
+    let mid0 = MachineId::from_u32(1);
+    let mid1 = MachineId::from_u32(2);
+    let map = HashMap::from([(mid0, vec!["a".into()]), (mid1, vec!["b".into()])]);
+    assert_eq!(machine_for_board(&map, board_id_hash("a")), Some(mid0));
+    assert_eq!(machine_for_board(&map, board_id_hash("b")), Some(mid1));
+    assert_eq!(machine_for_board(&map, board_id_hash("missing")), None);
+}
+
+#[test]
+fn single_board_apis_route_to_hosting_backend() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    let fe = two_server_frontend(b0.clone(), b1.clone());
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    let boards0 = b0.live.lock().unwrap().get(&id).cloned().unwrap();
+    let boards1 = b1.live.lock().unwrap().get(&id).cloned().unwrap();
+    assert_eq!(boards0.len(), 1);
+    assert_eq!(boards1.len(), 1);
+    let board_on_1 = boards1[0].clone();
+    let hash = board_id_hash(&board_on_1);
+
+    fe.inspect(&id, hash, InspectRequest::ReadRegs).unwrap();
+    fe.step(&id, hash).unwrap();
+    fe.invoke_action(
+        &id,
+        InvokeActionRequest {
+            board_id: hash,
+            device: HashedId::new(0),
+            action: HashedId::new(0),
+            params: Default::default(),
+        },
+    )
+    .unwrap();
+    fe.probe_samples(&id, hash, HashedId::new(0), None, None)
+        .unwrap();
+
+    assert_eq!(b1.inspects.load(Ordering::SeqCst), 1);
+    assert_eq!(b1.steps.load(Ordering::SeqCst), 1);
+    assert_eq!(b1.invokes.load(Ordering::SeqCst), 1);
+    assert_eq!(b1.probe_samples.load(Ordering::SeqCst), 1);
+    assert_eq!(b0.inspects.load(Ordering::SeqCst), 0);
+    assert_eq!(b0.steps.load(Ordering::SeqCst), 0);
+    assert_eq!(b0.invokes.load(Ordering::SeqCst), 0);
+    assert_eq!(b0.probe_samples.load(Ordering::SeqCst), 0);
+
+    let err = fe
+        .inspect(&id, board_id_hash("missing"), InspectRequest::ReadRegs)
+        .unwrap_err();
+    assert_eq!(err.code, "unknown_board");
 }

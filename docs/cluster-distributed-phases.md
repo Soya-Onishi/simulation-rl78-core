@@ -11,13 +11,21 @@ Integration branch: `feature/cluster-distributed`. Merge to `develop` only after
 | **p1b** | `feature/cluster-distributed-p1b-arbiter-mcast` | Arbiter joins multicast when create supplies group; VT publish/throttle; `RemoteVtTable` → slot0; ClusterStop multicast send/recv | merged (#129) |
 | **p1c** | `feature/cluster-distributed-p1c-create-place` | Frontend First-Fit, multicast allocate, cross-host edge reject, create fanout + compensate; backend spawns assigned boards only; public create ignores client multicast | merged (#130) |
 | **p1d** | `feature/cluster-distributed-p1d-control-agg` | start/stop/reset parallel fanout; status/log aggregate across backends | merged (#131) |
-| **p2** | `feature/cluster-distributed-p2-endpoint` | Endpoint path `node→arbiter→multicast→arbiter→node`; expand binary kinds | this branch |
-| **p3** | `feature/cluster-distributed-p3-targeted` | probe/action/inspect only to hosting backend | pending |
+| **p2** | `feature/cluster-distributed-p2-endpoint` | Endpoint path `node→arbiter→multicast→arbiter→node`; expand binary kinds | merged (#132) |
+| **p3a** | `feature/cluster-distributed-p3a-targeted` | Single-board route: inspect / step / invoke_action / probe_samples → hosting backend | this branch |
+| **p3b** | `feature/cluster-distributed-p3b-catalog-watch` | actions / probe_catalog merge; probe_watch_* fanout + merge | pending |
 | **p4** | `feature/cluster-distributed-p4-csv` | CSV aggregate + time-sort on frontend | pending |
 
 ## TODO (provisional)
 
 - Cross-host **Digital** edges: still rejected at create until Digital board-edge IPC exists. Uart / Analog / Pulse / Scalar cross-host edges are forwarded in p2.
+
+## p3a notes
+
+- Resolve host by scanning `SimRecord.per_server` with `board_id_hash` (no ledger cache).
+- Unknown board hash → `unknown_board` (no `primary_backend` fallback).
+- Catalog / watch / CSV / viewer remain on `primary_backend` until later phases.
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p3a-targeted-design.md`.
 
 ## p2 notes
 

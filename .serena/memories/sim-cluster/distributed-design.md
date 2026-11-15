@@ -75,14 +75,20 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 | p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 (**merged #129**) |
 | p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards (**merged #130**) |
 | p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate (**merged #131**) |
-| p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` (**this branch**) |
-| p3 | `…-p3-targeted` | probe/action/inspect to hosting backend only |
+| p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` (**merged #132**) |
+| p3a | `…-p3a-targeted` | Single-board route: inspect/step/invoke/probe_samples (**this branch**) |
+| p3b | `…-p3b-catalog-watch` | actions/probe_catalog merge; probe_watch fanout+merge |
 | p4 | `…-p4-csv` | CSV aggregate + time-sort |
 
 See also `docs/cluster-distributed-phases.md`.
 
+## Single-board hosting route (p3a)
+- `inspect` / `step` / `invoke_action` / `probe_samples` resolve host via `SimRecord.per_server` + `board_id_hash`; unknown board → `unknown_board`.
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p3a-targeted-design.md`.
+
 ## Out of scope until later phases / re-grill
 - Cross-host Digital edges / Digital board-edge IPC.
-- Targeted probe/action/inspect routing details (p3).
+- actions / probe_catalog merge and probe_watch_* fanout (p3b).
 - CSV merge/sort details (p4).
+
 
