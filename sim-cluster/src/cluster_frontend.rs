@@ -30,8 +30,6 @@ struct SimRecord {
 }
 
 struct FrontendState {
-    /// [`MachineId`] → free board slots.
-    remaining: HashMap<MachineId, u32>,
     used_mcast: Vec<(Ipv4Addr, u16)>,
     sims: HashMap<String, SimRecord>,
 }
@@ -57,14 +55,12 @@ impl ClusterFrontend {
             return Err(ApiError::internal("ClusterFrontend: no servers"));
         }
         let mut slots = HashMap::new();
-        let mut remaining = HashMap::new();
         for (backend, endpoint, max_nodes, machine_id) in servers {
             if slots.contains_key(&machine_id) {
                 return Err(ApiError::internal(format!(
                     "ClusterFrontend: duplicate machine_id {machine_id}"
                 )));
             }
-            remaining.insert(machine_id, max_nodes);
             slots.insert(
                 machine_id,
                 BackendSlot {
@@ -80,7 +76,6 @@ impl ClusterFrontend {
             address_ranges,
             port_ranges,
             state: Mutex::new(FrontendState {
-                remaining,
                 used_mcast: Vec::new(),
                 sims: HashMap::new(),
             }),
@@ -100,14 +95,30 @@ impl ClusterFrontend {
             .collect()
     }
 
+    /// Free board slots per backend: `max_nodes` minus boards assigned in `sims`.
+    fn free_capacity(&self, state: &FrontendState) -> HashMap<MachineId, u32> {
+        let mut used: HashMap<MachineId, u32> = HashMap::new();
+        for rec in state.sims.values() {
+            for (machine_id, boards) in &rec.per_server {
+                *used.entry(*machine_id).or_insert(0) += boards.len() as u32;
+            }
+        }
+        let mut free = HashMap::with_capacity(self.servers.len());
+        for (machine_id, slot) in &self.servers {
+            let taken = used.get(machine_id).copied().unwrap_or(0);
+            free.insert(*machine_id, slot.max_nodes.saturating_sub(taken));
+        }
+        free
+    }
+
     fn plan_create(
         &self,
         state: &FrontendState,
         topo: &LogicalTopology,
     ) -> Result<PlannedCreate, ApiError> {
         let board_ids: Vec<String> = topo.boards.iter().map(|b| b.id.clone()).collect();
-        let mut remaining = state.remaining.clone();
-        let placement = place_boards_first_fit(&board_ids, &mut remaining)
+        let mut free = self.free_capacity(state);
+        let placement = place_boards_first_fit(&board_ids, &mut free)
             .map_err(|err| ApiError::bad_request("insufficient_capacity", err.to_string()))?;
 
         let board_server: HashMap<String, MachineId> =
@@ -149,26 +160,10 @@ impl ClusterFrontend {
             None
         };
 
-        Ok(PlannedCreate {
-            remaining,
-            per_server,
-            mcast,
-        })
+        Ok(PlannedCreate { per_server, mcast })
     }
 
-    /// Return capacity reserved by `plan` without restoring a full remaining snapshot.
-    /// Safe under concurrent creates that may have reserved other sims meanwhile.
-    fn release_plan_reservation(&self, state: &mut FrontendState, plan: &PlannedCreate) {
-        for (machine_id, boards) in &plan.per_server {
-            let n = boards.len() as u32;
-            let max = self
-                .servers
-                .get(machine_id)
-                .map(|slot| slot.max_nodes)
-                .unwrap_or(u32::MAX);
-            let entry = state.remaining.entry(*machine_id).or_insert(0);
-            *entry = (*entry).saturating_add(n).min(max);
-        }
+    fn release_mcast_reservation(state: &mut FrontendState, plan: &PlannedCreate) {
         if let Some(pair) = plan.mcast {
             state.used_mcast.retain(|p| *p != pair);
         }
@@ -205,7 +200,6 @@ impl ClusterFrontend {
 }
 
 struct PlannedCreate {
-    remaining: HashMap<MachineId, u32>,
     per_server: HashMap<MachineId, Vec<String>>,
     mcast: Option<(Ipv4Addr, u16)>,
 }
@@ -218,9 +212,8 @@ impl SimulationBackend for ClusterFrontend {
         let plan = {
             let mut state = self.lock()?;
             let plan = self.plan_create(&state, &topo)?;
-            // Reserve capacity / multicast before fanout so concurrent creates cannot
-            // double-book the same slots or group.
-            state.remaining = plan.remaining.clone();
+            // Inserting SimRecord reserves capacity (derived from sims); multicast
+            // is reserved explicitly before fanout.
             if let Some(pair) = plan.mcast {
                 state.used_mcast.push(pair);
             }
@@ -243,9 +236,9 @@ impl SimulationBackend for ClusterFrontend {
             if let Ok(mut state) = self.lock() {
                 if compensate_ok {
                     state.sims.remove(&id);
-                    self.release_plan_reservation(&mut state, &plan);
+                    Self::release_mcast_reservation(&mut state, &plan);
                 }
-                // If compensate failed, keep SimRecord + reservation so a later
+                // If compensate failed, keep SimRecord + mcast so a later
                 // shutdown can finish cleanup without freeing in-use capacity/mcast.
             }
         };
@@ -354,59 +347,55 @@ impl SimulationBackend for ClusterFrontend {
             };
         };
 
+        // Release only MachineIds this call confirmed gone; merge into the live
+        // ledger under the mutex so concurrent shutdowns cannot resurrect slots.
         let mut first_err: Option<ApiError> = None;
-        let mut still_held: HashMap<MachineId, Vec<String>> = HashMap::new();
-        for (machine_id, boards) in rec.per_server {
+        let mut released: Vec<MachineId> = Vec::new();
+        for &machine_id in rec.per_server.keys() {
             let Some(slot) = self.servers.get(&machine_id) else {
                 if first_err.is_none() {
                     first_err = Some(ApiError::internal(format!(
                         "missing backend for machine_id {machine_id}"
                     )));
                 }
-                still_held.insert(machine_id, boards);
                 continue;
             };
             match slot.backend.shutdown(id) {
-                Ok(()) => {
-                    let mut state = self.lock()?;
-                    let n = boards.len() as u32;
-                    let entry = state.remaining.entry(machine_id).or_insert(0);
-                    *entry = (*entry).saturating_add(n).min(slot.max_nodes);
-                }
-                Err(err) if err.code == "not_found" => {
-                    // Already gone on that backend: free reserved capacity.
-                    let mut state = self.lock()?;
-                    let n = boards.len() as u32;
-                    let entry = state.remaining.entry(machine_id).or_insert(0);
-                    *entry = (*entry).saturating_add(n).min(slot.max_nodes);
-                }
+                Ok(()) => released.push(machine_id),
+                Err(err) if err.code == "not_found" => released.push(machine_id),
                 Err(err) => {
                     if first_err.is_none() {
                         first_err = Some(err);
                     }
-                    still_held.insert(machine_id, boards);
                 }
             }
         }
 
         let mut state = self.lock()?;
-        if still_held.is_empty() {
-            state.sims.remove(id);
-            if let Some(pair) = rec.mcast {
-                state.used_mcast.retain(|p| *p != pair);
+        let emptied = if let Some(entry) = state.sims.get_mut(id) {
+            for machine_id in &released {
+                entry.per_server.remove(machine_id);
             }
-        } else if let Some(entry) = state.sims.get_mut(id) {
-            entry.per_server = still_held;
-            // Keep multicast reserved while any participant remains.
+            entry.per_server.is_empty()
+        } else {
+            false
+        };
+        if emptied {
+            if let Some(done) = state.sims.remove(id) {
+                if let Some(pair) = done.mcast {
+                    state.used_mcast.retain(|p| *p != pair);
+                }
+            }
         }
+        let still_present = state.sims.contains_key(id);
 
         match first_err {
-            Some(err) => Err(ApiError::new(
+            Some(err) if still_present => Err(ApiError::new(
                 err.status,
                 err.code,
                 format!("{err}; some backends may still hold simulation {id}"),
             )),
-            None => Ok(()),
+            _ => Ok(()),
         }
     }
 
@@ -536,11 +525,14 @@ mod tests {
     use super::*;
     use crate::topology::{BoardSpec, DirectedEdge, PayloadKind, PortRef};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     struct MockBackend {
         name: String,
         creates: AtomicUsize,
         fail_create: bool,
+        /// Remaining times `shutdown` should return an error before removing.
+        shutdown_failures: AtomicUsize,
         live: Mutex<HashMap<String, Vec<String>>>,
     }
 
@@ -550,6 +542,7 @@ mod tests {
                 name: name.into(),
                 creates: AtomicUsize::new(0),
                 fail_create: false,
+                shutdown_failures: AtomicUsize::new(0),
                 live: Mutex::new(HashMap::new()),
             })
         }
@@ -559,6 +552,17 @@ mod tests {
                 name: name.into(),
                 creates: AtomicUsize::new(0),
                 fail_create: true,
+                shutdown_failures: AtomicUsize::new(0),
+                live: Mutex::new(HashMap::new()),
+            })
+        }
+
+        fn with_shutdown_failures(name: &str, n: usize) -> Arc<Self> {
+            Arc::new(Self {
+                name: name.into(),
+                creates: AtomicUsize::new(0),
+                fail_create: false,
+                shutdown_failures: AtomicUsize::new(n),
                 live: Mutex::new(HashMap::new()),
             })
         }
@@ -584,6 +588,15 @@ mod tests {
         }
 
         fn shutdown(&self, id: &str) -> Result<(), ApiError> {
+            let prev = self.shutdown_failures.load(Ordering::SeqCst);
+            if prev > 0
+                && self
+                    .shutdown_failures
+                    .compare_exchange(prev, prev - 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                return Err(ApiError::internal(format!("{} shutdown boom", self.name)));
+            }
             self.live
                 .lock()
                 .unwrap()
@@ -810,7 +823,10 @@ mod tests {
         assert_eq!(all, vec!["a".to_string(), "b".to_string()]);
         let state = fe.lock().unwrap();
         assert_eq!(state.used_mcast, vec![(Ipv4Addr::new(239, 0, 0, 1), 30000)]);
-        assert_eq!(state.remaining, HashMap::from([(MachineId::from_u32(1), 0), (MachineId::from_u32(2), 0)]));
+        assert_eq!(
+            fe.free_capacity(&state),
+            HashMap::from([(MachineId::from_u32(1), 0), (MachineId::from_u32(2), 0)])
+        );
     }
 
     #[test]
@@ -838,7 +854,10 @@ mod tests {
         assert!(b0.live.lock().unwrap().is_empty());
         let state = fe.lock().unwrap();
         assert!(state.sims.is_empty());
-        assert_eq!(state.remaining, HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)]));
+        assert_eq!(
+            fe.free_capacity(&state),
+            HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
+        );
         assert!(state.used_mcast.is_empty());
     }
 
@@ -867,6 +886,60 @@ mod tests {
         let state = fe.lock().unwrap();
         assert!(state.sims.is_empty());
         assert!(state.used_mcast.is_empty());
-        assert_eq!(state.remaining, HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)]));
+        assert_eq!(
+            fe.free_capacity(&state),
+            HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
+        );
+    }
+
+    #[test]
+    fn concurrent_partial_shutdown_merges_ledger() {
+        let b0 = MockBackend::with_shutdown_failures("s0", 1);
+        let b1 = MockBackend::with_shutdown_failures("s1", 1);
+        let fe = Arc::new(
+            ClusterFrontend::new(
+                vec![
+                    (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
+                    (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
+                ],
+                vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 1))],
+                vec![(30000, 30000)],
+            )
+            .unwrap(),
+        );
+        let id = fe
+            .create(CreateSimulationRequest {
+                topology: topo_two_disconnected(),
+                id: None,
+                multicast: None,
+                assigned_boards: None,
+            })
+            .unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let fe = Arc::clone(&fe);
+            let id = id.clone();
+            handles.push(thread::spawn(move || fe.shutdown(&id)));
+        }
+        for h in handles {
+            let _ = h.join().expect("shutdown thread");
+        }
+
+        // Must be clean immediately after concurrent joins — a retry loop would
+        // mask the old full-overwrite ledger race.
+        assert!(b0.live.lock().unwrap().is_empty());
+        assert!(b1.live.lock().unwrap().is_empty());
+        let state = fe.lock().unwrap();
+        assert!(
+            state.sims.is_empty(),
+            "ledger leaked after concurrent partial shutdown: {:?}",
+            state.sims.keys().collect::<Vec<_>>()
+        );
+        assert!(state.used_mcast.is_empty());
+        assert_eq!(
+            fe.free_capacity(&state),
+            HashMap::from([(MachineId::from_u32(1), 1), (MachineId::from_u32(2), 1)])
+        );
     }
 }
