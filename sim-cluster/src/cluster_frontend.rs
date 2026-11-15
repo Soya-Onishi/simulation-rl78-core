@@ -117,8 +117,8 @@ impl ClusterFrontend {
         topo: &LogicalTopology,
     ) -> Result<PlannedCreate, ApiError> {
         let board_ids: Vec<String> = topo.boards.iter().map(|b| b.id.clone()).collect();
-        let mut free = self.free_capacity(state);
-        let placement = place_boards_first_fit(&board_ids, &mut free)
+        let free = self.free_capacity(state);
+        let placement = place_boards_first_fit(&board_ids, &free)
             .map_err(|err| ApiError::bad_request("insufficient_capacity", err.to_string()))?;
 
         let board_server: HashMap<String, MachineId> =

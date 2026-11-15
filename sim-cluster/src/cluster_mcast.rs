@@ -344,9 +344,10 @@ impl std::fmt::Display for PlacementError {
 impl std::error::Error for PlacementError {}
 
 /// Place `board_ids` with First-Fit over `remaining` ([`MachineId`] → free slots).
+/// Does not mutate `remaining`; tracks taken slots in a local map.
 pub fn place_boards_first_fit(
     board_ids: &[String],
-    remaining: &mut HashMap<MachineId, u32>,
+    remaining: &HashMap<MachineId, u32>,
 ) -> Result<BoardPlacement, PlacementError> {
     let free_slots: u64 = remaining.values().map(|slots| u64::from(*slots)).sum();
     let need = board_ids.len() as u64;
@@ -356,24 +357,19 @@ pub fn place_boards_first_fit(
             free_slots,
         });
     }
+    let mut taken: HashMap<MachineId, u32> = HashMap::new();
     let mut board_to_server = Vec::with_capacity(board_ids.len());
     for board_id in board_ids {
-        let Some(machine_id) = remaining
-            .iter()
-            .find_map(|(id, &slots)| (slots > 0).then_some(*id))
-        else {
+        let Some(machine_id) = remaining.iter().find_map(|(id, &slots)| {
+            let used = taken.get(id).copied().unwrap_or(0);
+            (used < slots).then_some(*id)
+        }) else {
             return Err(PlacementError::InsufficientCapacity {
                 boards: board_ids.len(),
                 free_slots: 0,
             });
         };
-        let Some(slots) = remaining.get_mut(&machine_id) else {
-            return Err(PlacementError::InsufficientCapacity {
-                boards: board_ids.len(),
-                free_slots: 0,
-            });
-        };
-        *slots -= 1;
+        *taken.entry(machine_id).or_insert(0) += 1;
         board_to_server.push((board_id.clone(), machine_id));
     }
     Ok(BoardPlacement { board_to_server })
@@ -470,11 +466,11 @@ mod tests {
         let boards = vec!["a".into(), "b".into(), "c".into()];
         let mid10 = MachineId::from_u32(10);
         let mid20 = MachineId::from_u32(20);
-        let mut rem = HashMap::from([(mid10, 2u32), (mid20, 2u32)]);
-        let place = place_boards_first_fit(&boards, &mut rem).unwrap();
+        let rem = HashMap::from([(mid10, 2u32), (mid20, 2u32)]);
+        let place = place_boards_first_fit(&boards, &rem).unwrap();
         assert_eq!(place.board_to_server.len(), 3);
-        let free: u32 = rem.values().copied().sum();
-        assert_eq!(free, 1);
+        // Input capacity map is unchanged.
+        assert_eq!(rem, HashMap::from([(mid10, 2u32), (mid20, 2u32)]));
         for (board, mid) in &place.board_to_server {
             assert!(*mid == mid10 || *mid == mid20, "{board} -> {mid}");
         }
@@ -483,7 +479,12 @@ mod tests {
         assert_eq!(place.board_to_server[0].1, first_mid);
         assert_eq!(place.board_to_server[1].1, first_mid);
         assert_ne!(place.board_to_server[2].1, first_mid);
-        assert_eq!(rem.get(&first_mid), Some(&0));
+        let packed_into_first = place
+            .board_to_server
+            .iter()
+            .filter(|(_, mid)| *mid == first_mid)
+            .count();
+        assert_eq!(packed_into_first, 2);
     }
 
     #[test]
