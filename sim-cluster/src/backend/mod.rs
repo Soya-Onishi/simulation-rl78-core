@@ -14,14 +14,14 @@ pub use serve::serve_internal;
 pub use tcpip::{TcpipBackend, check_health};
 
 use crate::contract::{
-    ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent, TopologyView,
+    ActionList, ApiError, CreateSimulationRequest, InvokeActionRequest, LogEvent, StatusEvent,
+    TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
-use crate::topology::LogicalTopology;
 
 /// Control-plane operations shared by HTTP adapters.
 pub trait SimulationBackend: Send + Sync {
-    fn create(&self, topology: LogicalTopology) -> Result<String, ApiError>;
+    fn create(&self, request: CreateSimulationRequest) -> Result<String, ApiError>;
     fn start(&self, id: &str, until_ns: Option<u64>) -> Result<(), ApiError>;
     fn stop(&self, id: &str) -> Result<(), ApiError>;
     fn reset(&self, id: &str) -> Result<(), ApiError>;

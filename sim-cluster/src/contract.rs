@@ -9,10 +9,21 @@ use crate::elf_source;
 use crate::host::SessionNode;
 use crate::topology::LogicalTopology;
 
+/// Optional multicast group assigned by the frontend at create time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateMulticast {
+    /// Multicast IPv4 group address (e.g. `239.0.0.1`).
+    pub address: String,
+    pub port: u16,
+}
+
 /// Body for `POST /api/simulation` and `POST /internal/simulations`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSimulationRequest {
     pub topology: LogicalTopology,
+    /// When set, the arbiter joins this group for VT / ClusterStop sharing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multicast: Option<CreateMulticast>,
 }
 
 /// Topology accepted by create. Local paths and `file://` are rejected.

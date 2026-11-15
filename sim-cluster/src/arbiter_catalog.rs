@@ -355,6 +355,7 @@ mod tests {
             rl78boiler_bin: bin,
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
+            multicast: None,
         }
     }
 

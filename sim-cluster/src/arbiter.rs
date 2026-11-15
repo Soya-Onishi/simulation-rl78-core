@@ -6,10 +6,15 @@
 //! run. `shutdown` on the server→arbiter channel ends the session.
 
 use std::collections::{HashMap, HashSet};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::cluster_mcast::{
+    ClusterMulticast, MulticastMessage, RemoteVtTable, VtPublishThrottle,
+};
 
 /// Ensures board/plant children are killed on early return or panic.
 struct ChildGuard {
@@ -63,6 +68,14 @@ pub enum ArbiterError {
     Message(String),
 }
 
+/// Multicast parameters for one simulation (from create + backend `addr`).
+#[derive(Clone, Debug)]
+pub struct ArbiterMcastOpts {
+    pub group: SocketAddrV4,
+    pub machine_id: u32,
+    pub interface: Ipv4Addr,
+}
+
 /// Options for [`run_arbiter_with_topology`].
 #[derive(Clone, Debug)]
 pub struct ArbiterOptions {
@@ -81,6 +94,8 @@ pub struct ArbiterOptions {
     pub cluster_key: String,
     /// Absolute iceoryx root path for this cluster.
     pub iox_root: PathBuf,
+    /// When set, share VT mins and ClusterStop with other backends.
+    pub multicast: Option<ArbiterMcastOpts>,
 }
 
 /// Spawn nodes and stay up until the server publishes `shutdown`.
@@ -267,7 +282,7 @@ fn run_time_sync(
         }
         if let Some((source, reason)) = cluster_stop {
             log::info!("HostStop from '{source}' ({reason}); broadcasting ClusterStop");
-            broadcast_cluster_stop(control, peers, &source, reason)?;
+            broadcast_cluster_stop(control, peers, &source, reason, None, false)?;
             return Ok(());
         }
         thread::sleep(ARBITER_POLL_IDLE);
@@ -368,6 +383,13 @@ fn run_host_session(
     };
     // Unlink vt_clock on any exit from this session (including early `?`).
     let _vt_lease = VtClockLease::new(&opts.iox_root);
+    let mut mcast_plane = match open_mcast_plane(opts, topo.margin_ns) {
+        Ok(plane) => plane,
+        Err(err) => {
+            logs.shutdown();
+            return Err(err);
+        }
+    };
     let children = match spawn_nodes(opts, topo) {
         Ok(children) => ChildGuard::new(children),
         Err(err) => {
@@ -431,6 +453,7 @@ fn run_host_session(
                         &mut last_stop_reason,
                         &mut running,
                         until_ns,
+                        mcast_plane.as_ref().map(|p| &p.sock),
                     )?;
                 }
                 Some(HostCommand::Stop) if running => {
@@ -441,6 +464,8 @@ fn run_host_session(
                         &mut peers,
                         "server",
                         HostStopReason::ExternalStop,
+                        mcast_plane.as_ref().map(|p| &p.sock),
+                        true,
                     )?;
                     running = false;
                     until_cap = None;
@@ -450,13 +475,17 @@ fn run_host_session(
                     log::info!("host Reset");
                     gdb_step = None;
                     until_cap = None;
-                    // ClusterStop, wait until every board reports Stopped, then Reset + Start.
+                    // Local ClusterStop only: wait until every local board reports Stopped,
+                    // then Reset + Start. Cross-host Reset is frontend fanout (p1d);
+                    // do not multicast here or remotes stop without Reset/Start.
                     // Slot 0 is remote-host min VT (not until); do not use it as a freeze ceiling.
                     broadcast_cluster_stop(
                         &control,
                         &mut peers,
                         "server",
                         HostStopReason::ExternalStop,
+                        mcast_plane.as_ref().map(|p| &p.sock),
+                        false,
                     )?;
                     await_peers_stopped(
                         &control,
@@ -479,6 +508,7 @@ fn run_host_session(
                         &mut until_cap,
                         &mut last_stop_reason,
                         &mut gdb_step,
+                        mcast_plane.as_ref().map(|p| &p.sock),
                     )?;
                 }
                 None => break,
@@ -506,9 +536,21 @@ fn run_host_session(
             &mut running,
             &mut gdb_step,
             &mut last_stop_reason,
+            mcast_plane.as_ref().map(|p| &p.sock),
         )? {
             SyncStep::Continue => {}
             SyncStep::Stopped(reason) => {
+                running = false;
+                until_cap = None;
+                gdb_step = None;
+                last_stop_reason = Some(reason);
+            }
+        }
+
+        if let Some(plane) = mcast_plane.as_mut() {
+            if let Some(reason) =
+                poll_mcast_plane(plane, &vt, &control, &mut peers, running)?
+            {
                 running = false;
                 until_cap = None;
                 gdb_step = None;
@@ -634,12 +676,20 @@ fn apply_start(
     last_stop_reason: &mut Option<HostStopReason>,
     running: &mut bool,
     until_ns: Option<u64>,
+    mcast: Option<&ClusterMulticast>,
 ) -> Result<(), ArbiterError> {
     let now = vt.min_board_vt();
     if should_stay_stopped(until_ns, now) {
         if *running {
             log::info!("start until_ns={until_ns:?} <= now={now}; Host Stop");
-            broadcast_cluster_stop(control, peers, "server", HostStopReason::Until)?;
+            broadcast_cluster_stop(
+                control,
+                peers,
+                "server",
+                HostStopReason::Until,
+                mcast,
+                true,
+            )?;
             *running = false;
         } else {
             log::info!("start until_ns={until_ns:?} <= now={now}; stay stopped");
@@ -667,14 +717,24 @@ fn apply_gdb_step(
     until_cap: &mut Option<u64>,
     last_stop_reason: &mut Option<HostStopReason>,
     gdb_step: &mut Option<GdbStepPhase>,
+    mcast: Option<&ClusterMulticast>,
 ) -> Result<(), ArbiterError> {
     let Some(board_id) = control.resolve_board(board_hash).map(str::to_owned) else {
         log::warn!("gdb Step: unknown board_hash={board_hash}");
         return Ok(());
     };
     if *running {
+        // Local stop only — GDB step/catch-up must not ClusterStop remotes
+        // (they would not receive the following GdbStep / Start{until}).
         log::info!("gdb Step: ClusterStop before insn on '{board_id}'");
-        broadcast_cluster_stop(control, peers, "server", HostStopReason::ExternalStop)?;
+        broadcast_cluster_stop(
+            control,
+            peers,
+            "server",
+            HostStopReason::ExternalStop,
+            mcast,
+            false,
+        )?;
         *running = false;
         *until_cap = None;
         *last_stop_reason = Some(HostStopReason::ExternalStop);
@@ -709,6 +769,7 @@ fn step_time_sync(
     running: &mut bool,
     gdb_step: &mut Option<GdbStepPhase>,
     last_stop_reason: &mut Option<HostStopReason>,
+    mcast: Option<&ClusterMulticast>,
 ) -> Result<SyncStep, ArbiterError> {
     let mut cluster_stop: Option<(String, HostStopReason)> = None;
     let mut gdb_insn: Option<(String, HostStopReason)> = None;
@@ -735,7 +796,7 @@ fn step_time_sync(
     if let Some((source, reason)) = cluster_stop {
         log::info!("HostStop from '{source}' ({reason}); broadcasting ClusterStop");
         *gdb_step = None;
-        broadcast_cluster_stop(control, peers, &source, reason)?;
+        broadcast_cluster_stop(control, peers, &source, reason, mcast, true)?;
         return Ok(SyncStep::Stopped(reason));
     }
     if let Some((source, reason)) = gdb_insn {
@@ -750,13 +811,14 @@ fn step_time_sync(
     }
     let now_vt = vt.min_board_vt();
     if reached_until(*until_ns, now_vt) {
-        let reason = match gdb_step {
-            Some(GdbStepPhase::CatchUp { reason }) => *reason,
-            _ => HostStopReason::Until,
+        // GDB catch-up completion is local; normal until is cluster-wide.
+        let (reason, propagate_mcast) = match gdb_step {
+            Some(GdbStepPhase::CatchUp { reason }) => (*reason, false),
+            _ => (HostStopReason::Until, true),
         };
         log::info!("until_ns reached at vt={now_vt} ({reason}); broadcasting ClusterStop");
         *gdb_step = None;
-        broadcast_cluster_stop(control, peers, "server", reason)?;
+        broadcast_cluster_stop(control, peers, "server", reason, mcast, propagate_mcast)?;
         return Ok(SyncStep::Stopped(reason));
     }
 
@@ -898,12 +960,130 @@ fn broadcast_cluster_stop(
     peers: &mut HashMap<String, PeerState>,
     _source: &str,
     reason: HostStopReason,
+    mcast: Option<&ClusterMulticast>,
+    propagate_mcast: bool,
 ) -> Result<(), ArbiterError> {
     control.publish(&ControlToNode::ClusterStop { reason })?;
     for state in peers.values_mut() {
         *state = PeerState::Stopped;
     }
+    if propagate_mcast {
+        if let Some(sock) = mcast {
+            let msg = MulticastMessage::ClusterStop {
+                machine_id: sock.machine_id(),
+                reason,
+            };
+            if let Err(err) = sock.send(&msg) {
+                log::warn!("multicast ClusterStop send failed: {err}");
+            }
+        }
+    }
     Ok(())
+}
+
+struct McastPlane {
+    sock: ClusterMulticast,
+    remotes: RemoteVtTable,
+    throttle: VtPublishThrottle,
+}
+
+fn open_mcast_plane(
+    opts: &ArbiterOptions,
+    margin_ns: u64,
+) -> Result<Option<McastPlane>, ArbiterError> {
+    let Some(m) = opts.multicast.as_ref() else {
+        return Ok(None);
+    };
+    let sock = ClusterMulticast::join(m.group, m.machine_id, m.interface)?;
+    log::info!(
+        "joined cluster multicast {} interface={} machine_id={:#010x}",
+        m.group,
+        m.interface,
+        m.machine_id
+    );
+    Ok(Some(McastPlane {
+        sock,
+        remotes: RemoteVtTable::new(),
+        throttle: VtPublishThrottle::new(margin_ns),
+    }))
+}
+
+/// Drain multicast, update slot0 from remotes, optionally publish local min VT.
+///
+/// Returns a stop reason when a remote `ClusterStop` is applied locally.
+fn poll_mcast_plane(
+    plane: &mut McastPlane,
+    vt: &VtClock,
+    control: &ArbiterControl,
+    peers: &mut HashMap<String, PeerState>,
+    running: bool,
+) -> Result<Option<HostStopReason>, ArbiterError> {
+    let mut remote_stop = None;
+    for msg in plane.sock.recv_all()? {
+        match msg {
+            MulticastMessage::VtMin {
+                machine_id,
+                min_vt_ns,
+            } => {
+                if machine_id == plane.sock.machine_id() {
+                    continue;
+                }
+                let agg = plane.remotes.upsert(machine_id, min_vt_ns);
+                vt.set_remote_min_ns(agg);
+            }
+            MulticastMessage::ClusterStop {
+                machine_id,
+                reason,
+            } => {
+                if machine_id == plane.sock.machine_id() {
+                    continue;
+                }
+                if running {
+                    log::info!(
+                        "multicast ClusterStop from machine_id={machine_id:#010x} ({reason})"
+                    );
+                    broadcast_cluster_stop(
+                        control,
+                        peers,
+                        "multicast",
+                        reason,
+                        Some(&plane.sock),
+                        false,
+                    )?;
+                    remote_stop = Some(reason);
+                }
+            }
+        }
+    }
+
+    let local_min = vt.min_board_vt();
+    let now = Instant::now();
+    if plane.throttle.should_send(local_min, now) {
+        let msg = MulticastMessage::VtMin {
+            machine_id: plane.sock.machine_id(),
+            min_vt_ns: local_min,
+        };
+        if let Err(err) = plane.sock.send(&msg) {
+            log::warn!("multicast VtMin send failed: {err}");
+        } else {
+            plane.throttle.record_send(local_min, now);
+        }
+    }
+    Ok(remote_stop)
+}
+
+/// Apply a remote VT sample into `table` and return the aggregate for slot 0.
+#[cfg(test)]
+fn apply_remote_vt_sample(
+    table: &mut RemoteVtTable,
+    self_id: u32,
+    machine_id: u32,
+    min_vt_ns: u64,
+) -> Option<u64> {
+    if machine_id == self_id {
+        return None;
+    }
+    Some(table.upsert(machine_id, min_vt_ns))
 }
 
 fn booting_timeout(topo: &LogicalTopology, peers: &HashMap<String, PeerState>) -> ArbiterError {
@@ -973,6 +1153,7 @@ mod tests {
             rl78boiler_bin: PathBuf::from("/tmp/boiler_board"),
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
+            multicast: None,
         };
         assert_eq!(
             binary_for_kind(&opts, crate::KIND_RL78).unwrap(),
@@ -1011,6 +1192,7 @@ mod tests {
             rl78boiler_bin: dir.path().join("missing-rl78boiler"),
             cluster_key: "k".into(),
             iox_root: PathBuf::from("/tmp/iox"),
+            multicast: None,
         };
         let topo = LogicalTopology {
             boards: vec![BoardSpec {
@@ -1046,6 +1228,15 @@ mod tests {
         assert_eq!(gdb_catchup_target(&topo, &vt, "a").unwrap(), 111);
         assert_eq!(gdb_catchup_target(&topo, &vt, "b").unwrap(), 222);
         assert!(gdb_catchup_target(&topo, &vt, "missing").is_err());
+    }
+
+    #[test]
+    fn apply_remote_vt_sample_excludes_self_and_aggregates() {
+        let mut table = RemoteVtTable::new();
+        assert!(apply_remote_vt_sample(&mut table, 1, 1, 10).is_none());
+        assert_eq!(apply_remote_vt_sample(&mut table, 1, 2, 100), Some(100));
+        assert_eq!(apply_remote_vt_sample(&mut table, 1, 3, 40), Some(40));
+        assert_eq!(apply_remote_vt_sample(&mut table, 1, 2, 80), Some(40));
     }
 
     #[test]

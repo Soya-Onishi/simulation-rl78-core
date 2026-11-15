@@ -53,18 +53,22 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 
 ## Git branches
 - Integration: `feature/cluster-distributed` from `develop`.
-- Phase branches: `feature/cluster-distributed-p1` … `p4`, merge into integration in order.
-- Merge integration → `develop` only after all phases complete.
+- Phase branches merge into integration in order; merge integration → `develop` only after all phases complete.
+- Phases are **fine-grained** so each PR can stop for review (do not pack a whole original "p1" into one merge).
 
-## Phases
-| Phase | Scope |
-|-------|--------|
-| p1 | Multicast foundation; VT share; ClusterStop; create/placement/compensate; start/stop/reset fanout; status/log aggregate; provisional cross-host edge reject |
-| p2 | Endpoint path `node→arbiter→multicast→arbiter→node`; expand binary type enum (details at start) |
-| p3 | probe/action/inspect only to backend hosting target node |
-| p4 | CSV: frontend aggregates from backends, time-sort, return |
+## Phases (refined)
 
-Log and probe/action **catalog** stay on existing per-host arbiter→backend→web paths.
+| Phase | Branch | Scope |
+|-------|--------|-------|
+| p1a | `feature/cluster-distributed-p1` | Config; VtClock slot0=remote min; Start{until}; `cluster_mcast` helpers (**merged #128**) |
+| p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 |
+| p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards |
+| p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate |
+| p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` |
+| p3 | `…-p3-targeted` | probe/action/inspect to hosting backend only |
+| p4 | `…-p4-csv` | CSV aggregate + time-sort |
+
+See also `docs/cluster-distributed-phases.md`.
 
 ## Out of scope until later phases / re-grill
 - Cross-host endpoint forwarding (p2).

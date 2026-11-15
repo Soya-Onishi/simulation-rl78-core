@@ -5,13 +5,13 @@ use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
 use crate::contract::{
-    ActionList, ApiError, InvokeActionRequest, LogEvent, StatusEvent, TopologyView,
+    ActionList, ApiError, CreateSimulationRequest, InvokeActionRequest, LogEvent, StatusEvent,
+    TopologyView,
 };
 use crate::host::HostCommand;
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::ipc::HashedId;
 use crate::server::{Job, JobKind, JobReply};
-use crate::topology::LogicalTopology;
 
 use super::SimulationBackend;
 
@@ -59,8 +59,11 @@ impl LocalBackend {
 }
 
 impl SimulationBackend for LocalBackend {
-    fn create(&self, topology: LogicalTopology) -> Result<String, ApiError> {
-        match self.rpc(JobKind::Create(topology))? {
+    fn create(&self, request: CreateSimulationRequest) -> Result<String, ApiError> {
+        match self.rpc(JobKind::Create {
+            topology: request.topology,
+            multicast: request.multicast,
+        })? {
             JobReply::Created { id } => Ok(id),
             JobReply::Err(err) => Err(err),
             other => Err(ApiError::internal(format!(
