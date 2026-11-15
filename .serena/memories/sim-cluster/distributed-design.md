@@ -43,9 +43,11 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 - Any arbiter that decides stop: local `ControlToNode::ClusterStop` + multicast.
 - Receivers: apply local ClusterStop to their boards. No leader. Redundant stop is harmless.
 
-## Control / observe (phase 1)
-- start/stop/reset: frontend fans out in parallel to participating backends; no barrier; partial failure ⇒ overall failure; no auto-rollback of successful peers.
-- status/log: frontend aggregates from participating backends; partial backend loss does not fail the whole stream immediately.
+## Control / observe (phase 1 / p1d)
+- start/stop/reset: frontend fans out in parallel to participating backends; no barrier; partial failure ⇒ overall failure (lowest `MachineId` error); no auto-rollback of successful peers.
+- status: merge assigned-board `SessionNode`s from participants (`SimRecord.per_server`); `virtual_time_ns` = min; session `state` = `running` if any participant is `running`; omit backends that return `Err`; all-fail ⇒ error.
+- log: frontend owns per-sim global `seq` + ring (cap 100); pull/dedupe per-backend local seq; SSE `log_high_water` / `logs_after` contract unchanged; omit failed pulls.
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p1d-design.md`.
 
 ## Multicast wire (phase 1)
 - Binary + type enum (not JSON). At least: host min VT notification; ClusterStop (with reason).
@@ -62,8 +64,8 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 |-------|--------|-------|
 | p1a | `feature/cluster-distributed-p1` | Config; VtClock slot0=remote min; Start{until}; `cluster_mcast` helpers (**merged #128**) |
 | p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 (**merged #129**) |
-| p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards (**this branch**) |
-| p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate |
+| p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards (**merged #130**) |
+| p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate (**this branch**) |
 | p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` |
 | p3 | `…-p3-targeted` | probe/action/inspect to hosting backend only |
 | p4 | `…-p4-csv` | CSV aggregate + time-sort |
