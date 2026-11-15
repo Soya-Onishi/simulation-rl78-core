@@ -17,8 +17,22 @@ use crate::contract::{
     StatusEvent, TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
-use crate::ipc::new_cluster_key;
+use crate::ipc::{HashedId, board_id_hash, new_cluster_key};
 use crate::topology::LogicalTopology;
+
+/// Find which participant hosts `board` (`board_id_hash` of a topology board id).
+#[must_use]
+fn machine_for_board(
+    per_server: &HashMap<MachineId, Vec<String>>,
+    board: HashedId<u64>,
+) -> Option<MachineId> {
+    for (&machine_id, boards) in per_server {
+        if boards.iter().any(|id| board_id_hash(id) == board) {
+            return Some(machine_id);
+        }
+    }
+    None
+}
 
 struct BackendSlot {
     machine_id: MachineId,
@@ -457,6 +471,33 @@ impl ClusterFrontend {
             })
     }
 
+    /// Backend that hosts `board` for a live simulation in the frontend ledger.
+    ///
+    /// Requires `SimRecord` (no post-restart exists-scan): placement is unknown
+    /// without `per_server`.
+    fn backend_for_board(
+        &self,
+        id: &str,
+        board: HashedId<u64>,
+    ) -> Result<Arc<dyn SimulationBackend>, ApiError> {
+        let state = self.lock()?;
+        let Some(rec) = state.sims.get(id) else {
+            return Err(ApiError::not_found("unknown simulation"));
+        };
+        let Some(machine_id) = machine_for_board(&rec.per_server, board) else {
+            return Err(ApiError::bad_request(
+                "unknown_board",
+                format!("board {board} is not assigned to any participating backend"),
+            ));
+        };
+        self.servers
+            .get(&machine_id)
+            .map(|slot| slot.backend.clone())
+            .ok_or_else(|| {
+                ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+            })
+    }
+
     fn slot(&self, machine_id: MachineId) -> Result<&BackendSlot, ApiError> {
         let slot = self.servers.get(&machine_id).ok_or_else(|| {
             ApiError::internal(format!("missing backend for machine_id {machine_id}"))
@@ -676,22 +717,22 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn actions(&self, id: &str) -> Result<ActionList, ApiError> {
-        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
+        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
         self.primary_backend(id)?.actions(id)
     }
 
     fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError> {
-        // TODO(cluster-distributed-p3): route to the backend that hosts the target.
-        self.primary_backend(id)?.invoke_action(id, request)
+        self.backend_for_board(id, request.board_id)?
+            .invoke_action(id, request)
     }
 
     fn probe_catalog(&self, id: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError> {
-        // TODO(cluster-distributed-p3): route / merge from hosting backends.
+        // TODO(cluster-distributed-p3b): route / merge from hosting backends.
         self.primary_backend(id)?.probe_catalog(id)
     }
 
     fn probe_watch_get(&self, id: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
+        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
         self.primary_backend(id)?.probe_watch_get(id)
     }
 
@@ -700,12 +741,12 @@ impl SimulationBackend for ClusterFrontend {
         id: &str,
         probes: Vec<crate::probe_log::ProbeRef>,
     ) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
-        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
+        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
         self.primary_backend(id)?.probe_watch_put(id, probes)
     }
 
     fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError> {
-        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
+        // TODO(cluster-distributed-p3b): route to hosting backend(s) only.
         self.primary_backend(id)?.probe_watch_clear(id)
     }
 
@@ -714,7 +755,7 @@ impl SimulationBackend for ClusterFrontend {
         id: &str,
         after: u64,
     ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
-        // TODO(cluster-distributed-p3): route / merge from hosting backends.
+        // TODO(cluster-distributed-p3b): route / merge from hosting backends.
         self.primary_backend(id)?.probe_watch_live(id, after)
     }
 
@@ -745,8 +786,7 @@ impl SimulationBackend for ClusterFrontend {
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Result<crate::contract::ProbeSamplesResponse, ApiError> {
-        // TODO(cluster-distributed-p3): route to the backend that hosts `board`.
-        self.primary_backend(id)?
+        self.backend_for_board(id, board)?
             .probe_samples(id, board, probe, from_ns, to_ns)
     }
 
@@ -774,13 +814,12 @@ impl SimulationBackend for ClusterFrontend {
         board_id: crate::ipc::HashedId<u64>,
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
-        // TODO(cluster-distributed-p3): route to the backend that hosts `board_id`.
-        self.primary_backend(id)?.inspect(id, board_id, req)
+        self.backend_for_board(id, board_id)?
+            .inspect(id, board_id, req)
     }
 
     fn step(&self, id: &str, board_id: crate::ipc::HashedId<u64>) -> Result<(), ApiError> {
-        // TODO(cluster-distributed-p3): route to the backend that hosts `board_id`.
-        self.primary_backend(id)?.step(id, board_id)
+        self.backend_for_board(id, board_id)?.step(id, board_id)
     }
 }
 
