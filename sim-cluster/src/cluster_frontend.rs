@@ -169,6 +169,9 @@ impl ClusterFrontend {
         }
     }
 
+    /// One participating backend (HashMap key order). Interim for APIs that do
+    /// not yet fan out, aggregate, or route to the hosting backend — see
+    /// `TODO(cluster-distributed-p*)` on those call sites.
     fn primary_backend(&self, id: &str) -> Result<Arc<dyn SimulationBackend>, ApiError> {
         let state = self.lock()?;
         let Some(rec) = state.sims.get(id) else {
@@ -419,34 +422,43 @@ impl SimulationBackend for ClusterFrontend {
     }
 
     fn status(&self, id: &str) -> Result<StatusEvent, ApiError> {
+        // TODO(cluster-distributed-p1d): aggregate status from participating backends.
         self.primary_backend(id)?.status(id)
     }
 
     fn topology(&self, id: &str) -> Result<TopologyView, ApiError> {
+        // Full topology is sent to every participant at create, so one backend
+        // suffices; not deferred aggregation.
         self.primary_backend(id)?.topology(id)
     }
 
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError> {
+        // TODO(cluster-distributed-p1d): aggregate logs from participating backends.
         self.primary_backend(id)?.logs_after(id, after)
     }
 
     fn log_high_water(&self, id: &str) -> Result<u64, ApiError> {
+        // TODO(cluster-distributed-p1d): aggregate log high-water across backends.
         self.primary_backend(id)?.log_high_water(id)
     }
 
     fn actions(&self, id: &str) -> Result<ActionList, ApiError> {
+        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
         self.primary_backend(id)?.actions(id)
     }
 
     fn invoke_action(&self, id: &str, request: InvokeActionRequest) -> Result<(), ApiError> {
+        // TODO(cluster-distributed-p3): route to the backend that hosts the target.
         self.primary_backend(id)?.invoke_action(id, request)
     }
 
     fn probe_catalog(&self, id: &str) -> Result<Vec<crate::probe_log::ProbeCatalogItem>, ApiError> {
+        // TODO(cluster-distributed-p3): route / merge from hosting backends.
         self.primary_backend(id)?.probe_catalog(id)
     }
 
     fn probe_watch_get(&self, id: &str) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
+        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
         self.primary_backend(id)?.probe_watch_get(id)
     }
 
@@ -455,10 +467,12 @@ impl SimulationBackend for ClusterFrontend {
         id: &str,
         probes: Vec<crate::probe_log::ProbeRef>,
     ) -> Result<crate::probe_log::ProbeWatchView, ApiError> {
+        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
         self.primary_backend(id)?.probe_watch_put(id, probes)
     }
 
     fn probe_watch_clear(&self, id: &str) -> Result<(), ApiError> {
+        // TODO(cluster-distributed-p3): route to hosting backend(s) only.
         self.primary_backend(id)?.probe_watch_clear(id)
     }
 
@@ -467,6 +481,7 @@ impl SimulationBackend for ClusterFrontend {
         id: &str,
         after: u64,
     ) -> Result<Vec<crate::probe_log::CoarseBatch>, ApiError> {
+        // TODO(cluster-distributed-p3): route / merge from hosting backends.
         self.primary_backend(id)?.probe_watch_live(id, after)
     }
 
@@ -475,14 +490,17 @@ impl SimulationBackend for ClusterFrontend {
         id: &str,
         range: crate::probe_log::ProbeRange,
     ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
+        // TODO(cluster-distributed-p4): start CSV on hosting backends; aggregate later.
         self.primary_backend(id)?.csv_start(id, range)
     }
 
     fn csv_poll(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+        // TODO(cluster-distributed-p4): aggregate CSV poll across backends (time-sort).
         self.primary_backend(id)?.csv_poll(id, request_id)
     }
 
     fn csv_status(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+        // TODO(cluster-distributed-p4): aggregate CSV status across backends.
         self.primary_backend(id)?.csv_status(id, request_id)
     }
 
@@ -494,19 +512,26 @@ impl SimulationBackend for ClusterFrontend {
         from_ns: Option<u64>,
         to_ns: Option<u64>,
     ) -> Result<crate::contract::ProbeSamplesResponse, ApiError> {
+        // TODO(cluster-distributed-p3): route to the backend that hosts `board`.
         self.primary_backend(id)?
             .probe_samples(id, board, probe, from_ns, to_ns)
     }
 
     fn viewer_attach(&self, id: &str) -> Result<String, ApiError> {
+        // TODO(cluster-distributed): viewer routing across backends is unspecified;
+        // interim primary only.
         self.primary_backend(id)?.viewer_attach(id)
     }
 
     fn viewer_check(&self, id: &str, token: &str) -> Result<(), ApiError> {
+        // TODO(cluster-distributed): viewer routing across backends is unspecified;
+        // interim primary only.
         self.primary_backend(id)?.viewer_check(id, token)
     }
 
     fn viewer_detach(&self, id: &str, token: &str) -> Result<(), ApiError> {
+        // TODO(cluster-distributed): viewer routing across backends is unspecified;
+        // interim primary only.
         self.primary_backend(id)?.viewer_detach(id, token)
     }
 
@@ -516,10 +541,12 @@ impl SimulationBackend for ClusterFrontend {
         board_id: crate::ipc::HashedId<u64>,
         req: InspectRequest,
     ) -> Result<InspectReply, ApiError> {
+        // TODO(cluster-distributed-p3): route to the backend that hosts `board_id`.
         self.primary_backend(id)?.inspect(id, board_id, req)
     }
 
     fn step(&self, id: &str, board_id: crate::ipc::HashedId<u64>) -> Result<(), ApiError> {
+        // TODO(cluster-distributed-p3): route to the backend that hosts `board_id`.
         self.primary_backend(id)?.step(id, board_id)
     }
 }

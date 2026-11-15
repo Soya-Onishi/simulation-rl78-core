@@ -502,7 +502,8 @@ fn run_host_session(
                     gdb_step = None;
                     until_cap = None;
                     // Local ClusterStop only: wait until every local board reports Stopped,
-                    // then Reset + Start. Cross-host Reset is frontend fanout (p1d);
+                    // then Reset + Start.
+                    // TODO(cluster-distributed-p1d): Cross-host Reset is frontend fanout;
                     // do not multicast here or remotes stop without Reset/Start.
                     // Slot 0 is remote-host min VT (not until); do not use it as a freeze ceiling.
                     broadcast_cluster_stop(
