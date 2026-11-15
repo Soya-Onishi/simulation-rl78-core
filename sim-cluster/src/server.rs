@@ -1036,13 +1036,48 @@ fn live_watch(sim: &mut Simulation, fetch_from: u64) -> CoarseLive {
         .watch
         .pending
         .iter()
-        .filter(|batch| batch.min_virtual_time_ns >= fetch_from)
-        .cloned()
+        .filter_map(|batch| filter_batch_for_fetch(batch, fetch_from))
         .collect();
     CoarseLive {
         cursor_vt: sim.virtual_time_ns,
         batches,
     }
+}
+
+/// Keep a batch visible for live fetch.
+///
+/// If the batch floor is already in-window, keep the whole batch. This preserves
+/// put-watch snapshots whose `min_virtual_time_ns` was raised to current sim VT
+/// even when quiet-probe sample VTs are older than `fetch_from`.
+///
+/// Otherwise slice to samples with `virtual_time_ns >= fetch_from`, preserving
+/// `seq` so frontend host-local dedupe still works on mixed-age drain batches.
+fn filter_batch_for_fetch(batch: &CoarseBatch, fetch_from: u64) -> Option<CoarseBatch> {
+    if batch.min_virtual_time_ns >= fetch_from {
+        return Some(batch.clone());
+    }
+    if batch.samples.is_empty() {
+        return None;
+    }
+    let samples: Vec<_> = batch
+        .samples
+        .iter()
+        .filter(|sample| sample.virtual_time_ns >= fetch_from)
+        .cloned()
+        .collect();
+    if samples.is_empty() {
+        return None;
+    }
+    let min_virtual_time_ns = samples
+        .iter()
+        .map(|sample| sample.virtual_time_ns)
+        .min()
+        .unwrap_or(0);
+    Some(CoarseBatch {
+        seq: batch.seq,
+        min_virtual_time_ns,
+        samples,
+    })
 }
 
 fn fanout_live(sim: &mut Simulation, records: &[ProbeRecord]) {
@@ -1581,5 +1616,47 @@ mod tests {
             watch.pending.back().map(|batch| batch.seq),
             Some(WATCH_PENDING_KEEP as u64 + 2)
         );
+    }
+
+    #[test]
+    fn filter_batch_keeps_in_window_samples_from_mixed_batch() {
+        let board = board_id_hash("a");
+        let sample = |vt: u64| ProbeView {
+            virtual_time_ns: vt,
+            board,
+            probe: crate::ipc::HashedId::new(1),
+            probe_label: "p".into(),
+            kind: "digital".into(),
+            value: "0".into(),
+        };
+        let batch = CoarseBatch::new(7, vec![sample(10), sample(200), sample(50)]);
+        let filtered = filter_batch_for_fetch(&batch, 100).unwrap();
+        assert_eq!(filtered.seq, 7);
+        assert_eq!(filtered.samples.len(), 1);
+        assert_eq!(filtered.samples[0].virtual_time_ns, 200);
+        assert!(filter_batch_for_fetch(&batch, 1000).is_none());
+    }
+
+    #[test]
+    fn filter_batch_keeps_raised_floor_snapshot_with_old_sample_vt() {
+        let board = board_id_hash("a");
+        let mut batch = CoarseBatch::new(
+            3,
+            vec![ProbeView {
+                virtual_time_ns: 1,
+                board,
+                probe: crate::ipc::HashedId::new(1),
+                probe_label: "quiet".into(),
+                kind: "digital".into(),
+                value: "1".into(),
+            }],
+        );
+        // Mimic snapshot_watch: raise floor to current sim VT while sample VT stays old.
+        batch.min_virtual_time_ns = 1_000;
+        let kept = filter_batch_for_fetch(&batch, 900).unwrap();
+        assert_eq!(kept.seq, 3);
+        assert_eq!(kept.samples.len(), 1);
+        assert_eq!(kept.samples[0].virtual_time_ns, 1);
+        assert_eq!(kept.min_virtual_time_ns, 1_000);
     }
 }

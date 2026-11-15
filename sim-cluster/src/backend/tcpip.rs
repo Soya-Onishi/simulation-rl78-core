@@ -299,9 +299,12 @@ impl SimulationBackend for TcpipBackend {
     }
 
     fn probe_watch_live(&self, id: &str, after: u64) -> Result<CoarseLive, ApiError> {
-        self.get_json(&format!(
-            "/internal/simulations/{id}/probes/live?after={after}"
-        ))
+        // Same short timeout as status/logs: SSE polls live frequently and must
+        // not stall on a dead peer for the full control-plane RPC timeout.
+        self.get_json_timeout(
+            &format!("/internal/simulations/{id}/probes/live?after={after}"),
+            OBSERVE_RPC_TIMEOUT,
+        )
     }
 
     fn csv_start(

@@ -968,7 +968,18 @@ impl SimulationBackend for ClusterFrontend {
         let current_min_vt = merged_status.virtual_time_ns;
         let fetch_from = current_min_vt.saturating_sub(WATCH_VT_WINDOW_NS);
 
-        let fetched = Self::parallel_map(&participants.backends, |_, backend| {
+        // Only hosts that answered status: a dead peer already failed the short
+        // observe timeout and must not be hit again with a long control RPC.
+        let live_backends: HashMap<_, _> = statuses
+            .iter()
+            .filter_map(|(machine_id, _)| {
+                participants
+                    .backends
+                    .get(machine_id)
+                    .map(|backend| (*machine_id, Arc::clone(backend)))
+            })
+            .collect();
+        let fetched = Self::parallel_map(&live_backends, |_, backend| {
             backend.probe_watch_live(id, fetch_from)
         });
 
