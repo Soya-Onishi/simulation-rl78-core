@@ -131,8 +131,12 @@ async fn create_simulation(
     Json(body): Json<CreateSimulationRequest>,
 ) -> Result<(StatusCode, Json<CreateSimulationResponse>), ApiError> {
     let topology = prepare_create_topology(body.topology)?;
+    let request = CreateSimulationRequest {
+        topology,
+        multicast: body.multicast,
+    };
     let backend = state.backend.clone();
-    let id = tokio::task::spawn_blocking(move || backend.create(topology))
+    let id = tokio::task::spawn_blocking(move || backend.create(request))
         .await
         .map_err(|err| ApiError::internal(err.to_string()))??;
     Ok((StatusCode::CREATED, Json(CreateSimulationResponse { id })))

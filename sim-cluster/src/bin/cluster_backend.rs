@@ -29,7 +29,7 @@ fn main() {
         }
     };
 
-    let opts = match ServerOptions::from_current_exe() {
+    let opts = match ServerOptions::from_backend_config(&cfg) {
         Ok(opts) => opts,
         Err(err) => {
             eprintln!("cluster-backend: {err}");

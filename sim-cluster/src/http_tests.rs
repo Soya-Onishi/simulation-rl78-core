@@ -19,7 +19,10 @@ use super::router;
 struct TopoMock;
 
 impl SimulationBackend for TopoMock {
-    fn create(&self, _topology: LogicalTopology) -> Result<String, ApiError> {
+    fn create(
+        &self,
+        _request: crate::contract::CreateSimulationRequest,
+    ) -> Result<String, ApiError> {
         Ok("sim-1".into())
     }
     fn start(&self, _id: &str, _until_ns: Option<u64>) -> Result<(), ApiError> {

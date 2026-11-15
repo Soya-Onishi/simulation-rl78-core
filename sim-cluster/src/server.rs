@@ -13,7 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::action::{ActionRequest, ActionUpstream};
-use crate::arbiter::{ArbiterOptions, run_arbiter_with_topology};
+use crate::arbiter::{ArbiterMcastOpts, ArbiterOptions, run_arbiter_with_topology};
 use crate::backend::LocalBackend;
 use crate::contract::{
     ActionList, AdvertisedAction, ApiError, InvokeActionRequest, LogEvent, ProbeSamplesResponse,
@@ -44,14 +44,37 @@ const WATCH_PENDING_KEEP: usize = 64;
 const ARBITER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Options for [`spawn_worker`].
-#[derive(Clone, Debug, Default)]
-pub struct ServerOptions {}
+#[derive(Clone, Debug)]
+pub struct ServerOptions {
+    /// Backend bind / multicast interface IPv4 (`BackendConfig::addr`).
+    pub interface: std::net::Ipv4Addr,
+    /// `machine_id` derived from [`Self::interface`].
+    pub machine_id: u32,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        let interface = std::net::Ipv4Addr::LOCALHOST;
+        Self {
+            interface,
+            machine_id: crate::config::machine_id_from_ipv4(interface),
+        }
+    }
+}
 
 impl ServerOptions {
-    /// Construct options for the current `cluster-backend` process.
-    pub fn from_current_exe() -> Result<Self, ServerError> {
-        let _ = std::env::current_exe().map_err(ServerError::Io)?;
-        Ok(Self {})
+    /// Construct options from `backend.yaml`.
+    pub fn from_backend_config(cfg: &crate::config::BackendConfig) -> Result<Self, ServerError> {
+        let interface = cfg
+            .ipv4()
+            .map_err(|err| ServerError::Message(err.to_string()))?;
+        let machine_id = cfg
+            .machine_id()
+            .map_err(|err| ServerError::Message(err.to_string()))?;
+        Ok(Self {
+            interface,
+            machine_id,
+        })
     }
 }
 
@@ -98,7 +121,10 @@ pub struct Job {
 /// Operations handled by the worker.
 #[derive(Debug)]
 pub enum JobKind {
-    Create(LogicalTopology),
+    Create {
+        topology: LogicalTopology,
+        multicast: Option<crate::contract::CreateMulticast>,
+    },
     Command {
         id: String,
         cmd: HostCommand,
@@ -317,16 +343,30 @@ fn worker_loop(rx: Receiver<Job>, opts: ServerOptions) {
 
 fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
     let reply = match job.kind {
-        JobKind::Create(topo) => match prepare_create_topology(topo) {
+        JobKind::Create {
+            topology,
+            multicast,
+        } => match prepare_create_topology(topology) {
             Err(err) => JobReply::Err(err),
-            Ok(topo) => match create_simulation(topo, opts) {
-                Ok(sim) => {
-                    let id = sim.id.clone();
-                    world.sims.insert(id.clone(), sim);
-                    JobReply::Created { id }
+            Ok(topo) => {
+                let mcast = match multicast {
+                    None => Ok(None),
+                    Some(m) => resolve_arbiter_mcast(m, opts).map(Some).map_err(|err| {
+                        ApiError::bad_request("invalid_multicast", err.to_string())
+                    }),
+                };
+                match mcast {
+                    Err(err) => JobReply::Err(err),
+                    Ok(mcast) => match create_simulation(topo, mcast, opts) {
+                        Ok(sim) => {
+                            let id = sim.id.clone();
+                            world.sims.insert(id.clone(), sim);
+                            JobReply::Created { id }
+                        }
+                        Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
+                    },
                 }
-                Err(err) => JobReply::Err(ApiError::internal(err.to_string())),
-            },
+            }
         },
         JobKind::Command { id, cmd } => match world.sims.get_mut(&id) {
             Some(sim) => match command_simulation(sim, cmd) {
@@ -512,8 +552,36 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
     let _ = job.reply.send(reply);
 }
 
+fn resolve_arbiter_mcast(
+    m: crate::contract::CreateMulticast,
+    opts: &ServerOptions,
+) -> Result<ArbiterMcastOpts, ServerError> {
+    if m.port == 0 {
+        return Err(ServerError::Message(
+            "multicast.port: must be 1..=65535".into(),
+        ));
+    }
+    let addr: std::net::Ipv4Addr = m.address.parse().map_err(|_| {
+        ServerError::Message(format!(
+            "multicast.address: expected IPv4 address, got {:?}",
+            m.address
+        ))
+    })?;
+    if !addr.is_multicast() {
+        return Err(ServerError::Message(format!(
+            "multicast.address: must be a multicast IPv4 address, got {addr}"
+        )));
+    }
+    Ok(ArbiterMcastOpts {
+        group: std::net::SocketAddrV4::new(addr, m.port),
+        machine_id: opts.machine_id,
+        interface: opts.interface,
+    })
+}
+
 fn create_simulation(
     topo: LogicalTopology,
+    multicast: Option<ArbiterMcastOpts>,
     _opts: &ServerOptions,
 ) -> Result<Simulation, ServerError> {
     let id = new_cluster_key();
@@ -537,6 +605,7 @@ fn create_simulation(
         rl78boiler_bin: exe_dir.join("boiler_board"),
         cluster_key: id.clone(),
         iox_root: iox_root.clone(),
+        multicast,
     };
     let nodes: Vec<SessionNode> = topo
         .boards

@@ -133,7 +133,7 @@ async fn create(
     Json(body): Json<CreateSimulationRequest>,
 ) -> Result<(StatusCode, Json<CreateSimulationResponse>), ApiError> {
     let backend = state.backend.clone();
-    let id = blocking(move || backend.create(body.topology)).await?;
+    let id = blocking(move || backend.create(body)).await?;
     Ok((StatusCode::CREATED, Json(CreateSimulationResponse { id })))
 }
 

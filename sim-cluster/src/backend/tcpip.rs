@@ -206,11 +206,9 @@ fn remote_error(status: u16, bytes: &[u8]) -> ApiError {
 }
 
 impl SimulationBackend for TcpipBackend {
-    fn create(&self, topology: LogicalTopology) -> Result<String, ApiError> {
-        let body: CreateSimulationResponse = read_json(self.post_json(
-            "/internal/simulations",
-            &CreateSimulationRequest { topology },
-        )?)?;
+    fn create(&self, request: CreateSimulationRequest) -> Result<String, ApiError> {
+        let body: CreateSimulationResponse =
+            read_json(self.post_json("/internal/simulations", &request)?)?;
         Ok(body.id)
     }
 
@@ -401,7 +399,10 @@ mod tests {
     }
 
     impl SimulationBackend for MockBackend {
-        fn create(&self, _topology: LogicalTopology) -> Result<String, ApiError> {
+        fn create(
+            &self,
+            _request: CreateSimulationRequest,
+        ) -> Result<String, ApiError> {
             self.set("create");
             Ok("sim-1".into())
         }
@@ -589,7 +590,12 @@ mod tests {
         )
         .unwrap();
 
-        let id = backend.create(one_board()).unwrap();
+        let id = backend
+            .create(CreateSimulationRequest {
+                topology: one_board(),
+                multicast: None,
+            })
+            .unwrap();
         assert_eq!(id, "sim-1");
         backend.start(&id, Some(10)).unwrap();
         backend.stop(&id).unwrap();
