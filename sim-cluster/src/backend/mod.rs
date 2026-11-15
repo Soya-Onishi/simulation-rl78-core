@@ -56,6 +56,7 @@ pub trait SimulationBackend: Send + Sync {
         &self,
         id: &str,
         range: crate::probe_log::ProbeRange,
+        request_id: u64,
     ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError>;
     fn csv_poll(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;
     fn csv_status(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError>;

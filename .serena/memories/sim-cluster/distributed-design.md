@@ -77,8 +77,8 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 | p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate (**merged #131**) |
 | p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` (**merged #132**) |
 | p3a | `…-p3a-targeted` | Single-board route: inspect/step/invoke/probe_samples (**merged #133**) |
-| p3b | `…-p3b-catalog-watch` | actions/probe_catalog merge; probe_watch fanout+merge (**this branch**) |
-| p4 | `…-p4-csv` | CSV aggregate + time-sort |
+| p3b | `…-p3b-catalog-watch` | actions/probe_catalog merge; probe_watch fanout+merge (**merged #134**) |
+| p4 | `…-p4-csv` | CSV aggregate + time-sort (**this branch**) |
 
 See also `docs/cluster-distributed-phases.md`.
 
@@ -91,8 +91,14 @@ See also `docs/cluster-distributed-phases.md`.
 - Live: SSE VT cursor (`CoarseLive.cursor_vt`); fetch floor = cluster min VT − 100ms; host-local seq dedupe in `ClusterFrontend` (`ProbeWatchAggregate`); sim-shared (reconnect may briefly be empty).
 - Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p3b-catalog-watch-design.md`.
 
+## CSV aggregate (p4)
+- Frontend issues one `request_id` for all participants; `csv_start` body carries it.
+- `probes` merged MachineId ascending, `probe_id` first-wins.
+- `CsvMergeState` k-way merge keeps CSV `virtual_time_ns` non-decreasing across polls.
+- Partial start without cancel is intentional (~60s busy); documented in code.
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p4-csv-design.md`.
+
 ## Out of scope until later phases / re-grill
 - Cross-host Digital edges / Digital board-edge IPC.
-- CSV merge/sort details (p4).
 
 

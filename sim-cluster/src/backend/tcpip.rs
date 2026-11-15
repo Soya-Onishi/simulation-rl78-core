@@ -311,10 +311,11 @@ impl SimulationBackend for TcpipBackend {
         &self,
         id: &str,
         range: ProbeRange,
+        request_id: u64,
     ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
         let body: CsvStartBody = read_json(self.post_json(
             &format!("/internal/simulations/{id}/probes/csv/start"),
-            &range,
+            &crate::backend::wire::CsvStartRequest { request_id, range },
         )?)?;
         Ok((body.request_id, body.probes))
     }
@@ -505,9 +506,10 @@ mod tests {
             &self,
             _id: &str,
             _range: ProbeRange,
+            request_id: u64,
         ) -> Result<(u64, Vec<ProbePointName>), ApiError> {
             Ok((
-                3,
+                request_id,
                 vec![ProbePointName {
                     probe_id: crate::ipc::HashedId::new(1),
                     board_hash: crate::ipc::board_id_hash("mcu-a"),
@@ -667,6 +669,7 @@ mod tests {
                     from_ns: None,
                     to_ns: None,
                 },
+                3,
             )
             .unwrap();
         assert_eq!(req_id, 3);

@@ -174,6 +174,7 @@ pub enum JobKind {
     ProbeCsvStart {
         id: String,
         range: ProbeRange,
+        request_id: u64,
     },
     ProbeCsvPoll {
         id: String,
@@ -460,8 +461,12 @@ fn dispatch_job(world: &mut World, job: Job, opts: &ServerOptions) {
             Some(sim) => JobReply::ProbeCoarse(live_watch(sim, after)),
             None => JobReply::Err(ApiError::not_found("unknown simulation")),
         },
-        JobKind::ProbeCsvStart { id, range } => match world.sims.get_mut(&id) {
-            Some(sim) => match start_csv(sim, range) {
+        JobKind::ProbeCsvStart {
+            id,
+            range,
+            request_id,
+        } => match world.sims.get_mut(&id) {
+            Some(sim) => match start_csv(sim, range, request_id) {
                 Ok((request_id, catalog)) => JobReply::ProbeCsvStart {
                     request_id,
                     catalog,
@@ -1224,6 +1229,7 @@ fn query_samples(
 fn start_csv(
     sim: &mut Simulation,
     range: ProbeRange,
+    request_id: u64,
 ) -> Result<(u64, Vec<ProbePointName>), ApiError> {
     require_catalog(sim)?;
     if sim
@@ -1243,7 +1249,9 @@ fn start_csv(
     }
     let expected: HashSet<crate::ipc::HashedId<u64>> = by_board.keys().copied().collect();
     let done = expected.is_empty();
-    let request_id = next_probe_request(sim);
+    // Accept frontend-issued request_id; advance local counter past it so later
+    // probe/action ids do not collide with this CSV job.
+    sim.next_request_id = sim.next_request_id.max(request_id.saturating_add(1));
     for (board_hash, ids) in by_board {
         sim.probe_ctrl
             .publish_csv(ProbeQueryWire::csv(

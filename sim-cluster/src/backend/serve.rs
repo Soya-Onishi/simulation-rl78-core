@@ -13,12 +13,12 @@ use crate::contract::{
     TopologyView,
 };
 use crate::inspect::{InspectReply, InspectRequest};
-use crate::probe_log::{
-    CoarseLive, CsvPoll, ProbeCatalogItem, ProbeRange, ProbeRef, ProbeWatchView,
-};
+use crate::probe_log::{CoarseLive, CsvPoll, ProbeCatalogItem, ProbeRef, ProbeWatchView};
 
 use super::SimulationBackend;
-use super::wire::{CsvStartBody, ExistsBody, HealthBody, HighWaterBody, ViewerTokenBody};
+use super::wire::{
+    CsvStartBody, CsvStartRequest, ExistsBody, HealthBody, HighWaterBody, ViewerTokenBody,
+};
 
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
@@ -293,10 +293,12 @@ async fn probe_watch_live(
 async fn csv_start(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(range): Json<ProbeRange>,
+    Json(body): Json<CsvStartRequest>,
 ) -> Result<Json<CsvStartBody>, ApiError> {
     let backend = state.backend.clone();
-    let (request_id, probes) = blocking(move || backend.csv_start(&id, range)).await?;
+    let request_id = body.request_id;
+    let range = body.range;
+    let (request_id, probes) = blocking(move || backend.csv_start(&id, range, request_id)).await?;
     Ok(Json(CsvStartBody { request_id, probes }))
 }
 

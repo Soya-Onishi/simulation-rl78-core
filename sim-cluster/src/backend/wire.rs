@@ -29,3 +29,11 @@ pub struct CsvStartBody {
     pub request_id: u64,
     pub probes: Vec<ProbePointName>,
 }
+
+/// Internal CSV start: shared `request_id` from the frontend plus VT range.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CsvStartRequest {
+    pub request_id: u64,
+    #[serde(flatten)]
+    pub range: crate::probe_log::ProbeRange,
+}
