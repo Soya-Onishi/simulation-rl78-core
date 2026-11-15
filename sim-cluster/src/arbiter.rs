@@ -475,7 +475,9 @@ fn run_host_session(
                     log::info!("host Reset");
                     gdb_step = None;
                     until_cap = None;
-                    // ClusterStop, wait until every board reports Stopped, then Reset + Start.
+                    // Local ClusterStop only: wait until every local board reports Stopped,
+                    // then Reset + Start. Cross-host Reset is frontend fanout (p1d);
+                    // do not multicast here or remotes stop without Reset/Start.
                     // Slot 0 is remote-host min VT (not until); do not use it as a freeze ceiling.
                     broadcast_cluster_stop(
                         &control,
@@ -483,7 +485,7 @@ fn run_host_session(
                         "server",
                         HostStopReason::ExternalStop,
                         mcast_plane.as_ref().map(|p| &p.sock),
-                        true,
+                        false,
                     )?;
                     await_peers_stopped(
                         &control,
@@ -722,6 +724,8 @@ fn apply_gdb_step(
         return Ok(());
     };
     if *running {
+        // Local stop only — GDB step/catch-up must not ClusterStop remotes
+        // (they would not receive the following GdbStep / Start{until}).
         log::info!("gdb Step: ClusterStop before insn on '{board_id}'");
         broadcast_cluster_stop(
             control,
@@ -729,7 +733,7 @@ fn apply_gdb_step(
             "server",
             HostStopReason::ExternalStop,
             mcast,
-            true,
+            false,
         )?;
         *running = false;
         *until_cap = None;
@@ -807,13 +811,14 @@ fn step_time_sync(
     }
     let now_vt = vt.min_board_vt();
     if reached_until(*until_ns, now_vt) {
-        let reason = match gdb_step {
-            Some(GdbStepPhase::CatchUp { reason }) => *reason,
-            _ => HostStopReason::Until,
+        // GDB catch-up completion is local; normal until is cluster-wide.
+        let (reason, propagate_mcast) = match gdb_step {
+            Some(GdbStepPhase::CatchUp { reason }) => (*reason, false),
+            _ => (HostStopReason::Until, true),
         };
         log::info!("until_ns reached at vt={now_vt} ({reason}); broadcasting ClusterStop");
         *gdb_step = None;
-        broadcast_cluster_stop(control, peers, "server", reason, mcast, true)?;
+        broadcast_cluster_stop(control, peers, "server", reason, mcast, propagate_mcast)?;
         return Ok(SyncStep::Stopped(reason));
     }
 
