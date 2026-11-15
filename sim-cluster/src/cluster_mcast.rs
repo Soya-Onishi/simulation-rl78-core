@@ -127,7 +127,15 @@ pub struct ClusterMulticast {
 }
 
 impl ClusterMulticast {
-    /// Bind, join `group`, and set loopback so same-host multi-process tests work.
+    /// Bind and join `group`.
+    ///
+    /// `interface` is [`crate::config::BackendConfig::addr`] (parsed IPv4): used
+    /// both for group membership and as the multicast send interface
+    /// (`IP_MULTICAST_IF`), so multi-NIC hosts egress on the cluster address.
+    ///
+    /// Multicast loopback is disabled so this host does not re-receive its own
+    /// datagrams (one `cluster-backend` per machine; avoids extra decode work).
+    /// Linux defaults `IP_MULTICAST_LOOP` to on, so this is set explicitly.
     pub fn join(
         group: SocketAddrV4,
         machine_id: u32,
@@ -139,9 +147,10 @@ impl ClusterMulticast {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         socket.bind(&SockAddr::from(bind_addr))?;
+        socket.set_multicast_if_v4(&interface)?;
         let socket: UdpSocket = socket.into();
         socket.set_nonblocking(true)?;
-        socket.set_multicast_loop_v4(true)?;
+        socket.set_multicast_loop_v4(false)?;
         socket.set_multicast_ttl_v4(1)?;
         socket.join_multicast_v4(group.ip(), &interface)?;
         Ok(Self {
@@ -465,28 +474,4 @@ mod tests {
         assert!(!has_cross_host_edge(&[("a".into(), "a".into())], &map));
     }
 
-    /// Needs a host that delivers IPv4 multicast loopback (often blocked in CI sandboxes).
-    #[test]
-    #[ignore]
-    fn multicast_loopback_recv() {
-        // Unique port per run to avoid leftover binds from other tests/processes.
-        let port = 40_000 + (std::process::id() % 20_000) as u16;
-        let group = SocketAddrV4::new(Ipv4Addr::new(239, 255, 0, 77), port);
-        let sock = ClusterMulticast::join(group, 1, Ipv4Addr::LOCALHOST).unwrap();
-        let msg = MulticastMessage::VtMin {
-            machine_id: 1,
-            min_vt_ns: 99,
-        };
-        sock.send(&msg).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(500);
-        let mut got = Vec::new();
-        while Instant::now() < deadline {
-            got.extend(sock.recv_all().unwrap());
-            if got.contains(&msg) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(got.contains(&msg), "got={got:?}");
-    }
 }

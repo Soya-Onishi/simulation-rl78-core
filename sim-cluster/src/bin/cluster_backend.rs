@@ -36,7 +36,7 @@ fn main() {
             process::exit(1);
         }
     };
-    if let Err(err) = run_backend(&cfg.listen.socket_addr(), opts) {
+    if let Err(err) = run_backend(&cfg.socket_addr(), opts) {
         eprintln!("cluster-backend: {err}");
         process::exit(1);
     }

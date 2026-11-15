@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 pub use backend::BackendConfig;
 pub use frontend::{FrontendConfig, ServerAddr};
 
-/// `listen.ip` / `listen.port` shared by both YAML files.
+/// `listen.ip` / `listen.port` for `frontend.yaml` (backend uses top-level `addr` / `port`).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenAddr {
@@ -400,28 +400,30 @@ mod tests {
 
     #[test]
     fn backend_yaml_round_trip() {
-        let file = write_temp("backend", "listen:\n  ip: 127.0.0.1\n  port: 8091\n");
+        let file = write_temp("backend", "addr: 127.0.0.1\nport: 8091\n");
         let cfg = BackendConfig::load(file.path()).unwrap();
-        assert_eq!(cfg.listen.port, 8091);
-        assert_eq!(cfg.identity_ipv4().unwrap(), Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(cfg.port, 8091);
+        assert_eq!(cfg.ipv4().unwrap(), Ipv4Addr::new(127, 0, 0, 1));
         assert_eq!(cfg.machine_id().unwrap(), machine_id_from_ipv4(Ipv4Addr::LOCALHOST));
+        assert_eq!(cfg.socket_addr(), "127.0.0.1:8091");
     }
 
     #[test]
-    fn backend_unspecified_requires_advertise_ip() {
-        let file = write_temp("backend0", "listen:\n  ip: 0.0.0.0\n  port: 8091\n");
+    fn backend_rejects_unspecified_addr() {
+        let file = write_temp("backend0", "addr: 0.0.0.0\nport: 8091\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
-        assert!(err.to_string().contains("advertise_ip"), "{err}");
+        assert!(err.to_string().contains("addr"), "{err}");
     }
 
     #[test]
-    fn backend_advertise_ip_with_unspecified_listen() {
-        let file = write_temp(
-            "backend-adv",
-            "listen:\n  ip: 0.0.0.0\n  port: 8091\nadvertise_ip: 10.0.0.5\n",
-        );
+    fn backend_addr_specific_ipv4() {
+        let file = write_temp("backend-addr", "addr: 10.0.0.5\nport: 8091\n");
         let cfg = BackendConfig::load(file.path()).unwrap();
-        assert_eq!(cfg.identity_ipv4().unwrap(), Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(cfg.ipv4().unwrap(), Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(
+            cfg.machine_id().unwrap(),
+            machine_id_from_ipv4(Ipv4Addr::new(10, 0, 0, 5))
+        );
     }
 
     #[test]
@@ -447,10 +449,7 @@ mod tests {
 
     #[test]
     fn unknown_key_is_rejected() {
-        let file = write_temp(
-            "unknown",
-            "listen:\n  ip: 127.0.0.1\n  port: 8091\nextra: 1\n",
-        );
+        let file = write_temp("unknown", "addr: 127.0.0.1\nport: 8091\nextra: 1\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
         assert!(err.to_string().contains("invalid YAML"), "{err}");
     }
@@ -473,26 +472,23 @@ mod tests {
 
     #[test]
     fn port_zero_rejected() {
-        let file = write_temp("port0", "listen:\n  ip: 127.0.0.1\n  port: 0\n");
+        let file = write_temp("port0", "addr: 127.0.0.1\nport: 0\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
         assert!(err.to_string().contains("port"), "{err}");
     }
 
     #[test]
-    fn empty_ip_rejected() {
-        let file = write_temp("empty-ip", "listen:\n  ip: \"\"\n  port: 8091\n");
+    fn empty_addr_rejected() {
+        let file = write_temp("empty-addr", "addr: \"\"\nport: 8091\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
-        assert!(err.to_string().contains("ip"), "{err}");
+        assert!(err.to_string().contains("addr"), "{err}");
     }
 
     #[test]
-    fn hostname_listen_requires_advertise_ip() {
-        let file = write_temp("host", "listen:\n  ip: localhost\n  port: 8091\n");
+    fn hostname_addr_rejected() {
+        let file = write_temp("host", "addr: localhost\nport: 8091\n");
         let err = BackendConfig::load(file.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("advertise_ip") || err.to_string().contains("IPv4"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("addr") || err.to_string().contains("IPv4"), "{err}");
     }
 
     #[test]

@@ -13,7 +13,7 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 ## Config
 - `frontend.yaml`: `servers[].max_nodes` (required, positive). Multicast address ranges + port ranges required iff `servers.len() >= 2`; optional if exactly one server.
 - Range examples: `239.0.0.1-239.0.0.10`, `30000-30100` (multiple ranges allowed).
-- `backend.yaml`: `advertise_ip` required when `listen.ip` is `0.0.0.0`; else may omit and use `listen.ip` for `machine_id`.
+- `backend.yaml`: top-level `addr` (specific IPv4, not `0.0.0.0`) + `port`. Used for HTTP bind, `machine_id`, and multicast send/join interface (`IP_MULTICAST_IF`). No separate `listen` / `advertise_ip`.
 - Phase 1: IPv6 unsupported (error).
 
 ## Create
