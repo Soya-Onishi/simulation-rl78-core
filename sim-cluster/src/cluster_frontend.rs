@@ -238,11 +238,16 @@ impl SimulationBackend for ClusterFrontend {
         let rollback_ledger = |compensate_ok: bool| {
             if let Ok(mut state) = self.lock() {
                 if compensate_ok {
+                    // Compensation succeeded: backends are clean; drop this
+                    // sim's SimRecord and release its used_mcast reservation
+                    // so create can reuse those board slots / multicast.
                     state.sims.remove(&id);
                     Self::release_mcast_reservation(&mut state, &plan);
                 }
-                // If compensate failed, keep SimRecord + mcast so a later
-                // shutdown can finish cleanup without freeing in-use capacity/mcast.
+                // Compensation failed: do not touch sims/used_mcast here
+                // (remnants may still run). Keep those reservations pinned
+                // so another create cannot reuse them until shutdown(id)
+                // tears down remnants and then releases the entries.
             }
         };
 
