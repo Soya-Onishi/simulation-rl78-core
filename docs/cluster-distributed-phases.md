@@ -10,14 +10,20 @@ Integration branch: `feature/cluster-distributed`. Merge to `develop` only after
 | **p1a** | `feature/cluster-distributed-p1` | Config (`addr`/`port`, `max_nodes`, multicast ranges); `VtClock` slot0 = remote min; `Start { until_ns }`; `cluster_mcast` module (wire + helpers, not arbiter-wired) | merged (#128) |
 | **p1b** | `feature/cluster-distributed-p1b-arbiter-mcast` | Arbiter joins multicast when create supplies group; VT publish/throttle; `RemoteVtTable` → slot0; ClusterStop multicast send/recv | merged (#129) |
 | **p1c** | `feature/cluster-distributed-p1c-create-place` | Frontend First-Fit, multicast allocate, cross-host edge reject, create fanout + compensate; backend spawns assigned boards only; public create ignores client multicast | merged (#130) |
-| **p1d** | `feature/cluster-distributed-p1d-control-agg` | start/stop/reset parallel fanout; status/log aggregate across backends | this branch |
-| **p2** | `feature/cluster-distributed-p2-endpoint` | Endpoint path `node→arbiter→multicast→arbiter→node`; expand binary kinds | pending |
+| **p1d** | `feature/cluster-distributed-p1d-control-agg` | start/stop/reset parallel fanout; status/log aggregate across backends | merged (#131) |
+| **p2** | `feature/cluster-distributed-p2-endpoint` | Endpoint path `node→arbiter→multicast→arbiter→node`; expand binary kinds | this branch |
 | **p3** | `feature/cluster-distributed-p3-targeted` | probe/action/inspect only to hosting backend | pending |
 | **p4** | `feature/cluster-distributed-p4-csv` | CSV aggregate + time-sort on frontend | pending |
 
-## TODO (provisional until p2)
+## TODO (provisional)
 
-- Cross-host topology edges: reject at create in p1c; remove after p2 endpoint forwarding.
+- Cross-host **Digital** edges: still rejected at create until Digital board-edge IPC exists. Uart / Analog / Pulse / Scalar cross-host edges are forwarded in p2.
+
+## p2 notes
+
+- Same-host edges remain peer iceoryx. Cross-host: send-host arbiter subscribes, multicast `Endpoint`, recv-host arbiter publishes.
+- Wire: `MulticastMsgKind::Endpoint` + `payload_kind` + iceoryx-shaped sample bytes.
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p2-endpoint-design.md`.
 
 ## p1d notes
 

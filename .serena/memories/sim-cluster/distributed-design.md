@@ -22,9 +22,10 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 - Payload to each participating backend: full topology JSON, assigned board ids, and (if multicast used) multicast address+port.
 - Backend spawns **only** assigned boards; keeps full topology for local edges.
 - Multicast addr/port chosen at **create** (not start); free when the sim's `SimRecord` is removed. "Unused" = not present in any live `SimRecord.mcast` (no separate used_mcast cache; assume ranges not used elsewhere; no OS-wide probe).
-- Distinct create errors: capacity / multicast exhaustion / duplicate participant IPs / cross-host edge.
+- Distinct create errors: capacity / multicast exhaustion / duplicate participant IPs / cross-host Digital edge.
 - Partial create success → compensate (destroy successes) then fail overall; if compensate fails, surface that remnant may exist.
-- **Cross-host edges** (endpoints whose endpoint boards land on different backends): reject at create in phase 1. Mark code + design memo TODO: provisional until phase 2 endpoint multicast; then remove rejection.
+- **Cross-host edges**: Uart/Analog/Pulse/Scalar allowed (p2 arbiter bridge). **Digital** cross-host still rejected at create (TODO until Digital IPC).
+
 
 ## Virtual time
 - Per-host local `VtClock` shm (not cross-machine).
@@ -49,9 +50,17 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 - log: frontend owns per-sim global `seq` + ring (cap 100) behind `Arc<Mutex<LogAggregate>>` (serialize pull+ingest per sim only); pull/dedupe per-backend local seq; SSE `log_high_water` / `logs_after` contract unchanged; omit failed/timed-out pulls.
 - Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p1d-design.md`.
 
-## Multicast wire (phase 1)
-- Binary + type enum (not JSON). At least: host min VT notification; ClusterStop (with reason).
-- Phase 2+ variants re-grilled at phase start; prefer same binary shapes as iceoryx payloads where possible.
+## Endpoint forwarding (p2)
+- Path: `board(TX pub) → send-host arbiter(sub) → multicast Endpoint → recv-host arbiter(pub) → board(RX sub)`.
+- Same-host edges stay peer iceoryx (arbiter not in path).
+- Forwardable kinds: Uart / Analog / Pulse / Scalar. Digital: no board-edge IPC; **create still rejects cross-host Digital** (TODO until Digital IPC).
+- Wire: `MulticastMsgKind::Endpoint = 3`; body = `machine_id` BE + `edge_id` LE + `payload_kind` + iceoryx `repr(C)` sample bytes.
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p2-endpoint-design.md`.
+
+## Multicast wire
+- Binary + type enum (not JSON). Kinds: host min VT; ClusterStop; Endpoint (p2).
+- Prefer same binary shapes as iceoryx payloads for Endpoint samples.
+
 
 ## Git branches
 - Integration: `feature/cluster-distributed` from `develop`.
@@ -65,15 +74,15 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 | p1a | `feature/cluster-distributed-p1` | Config; VtClock slot0=remote min; Start{until}; `cluster_mcast` helpers (**merged #128**) |
 | p1b | `…-p1b-arbiter-mcast` | Arbiter multicast VT + ClusterStop ↔ slot0 (**merged #129**) |
 | p1c | `…-p1c-create-place` | First-Fit, mcast allocate, cross-host reject, create fanout/compensate, assigned boards (**merged #130**) |
-| p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate (**this branch**) |
-| p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` |
+| p1d | `…-p1d-control-agg` | start/stop/reset fanout; status/log aggregate (**merged #131**) |
+| p2 | `…-p2-endpoint` | Endpoint `node→arbiter→multicast→arbiter→node` (**this branch**) |
 | p3 | `…-p3-targeted` | probe/action/inspect to hosting backend only |
 | p4 | `…-p4-csv` | CSV aggregate + time-sort |
 
 See also `docs/cluster-distributed-phases.md`.
 
 ## Out of scope until later phases / re-grill
-- Cross-host endpoint forwarding (p2).
+- Cross-host Digital edges / Digital board-edge IPC.
 - Targeted probe/action/inspect routing details (p3).
 - CSV merge/sort details (p4).
-- Exact binary layouts beyond p1 VT + ClusterStop.
+

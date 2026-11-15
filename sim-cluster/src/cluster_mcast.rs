@@ -1,6 +1,10 @@
-//! Phase-1 UDP multicast between arbiters: virtual-time mins and Cluster Stop.
+//! UDP multicast between arbiters: virtual-time mins, Cluster Stop, and
+//! cross-host endpoint samples (p2).
 //!
-//! Wire format is fixed binary (not JSON). Endpoint payloads arrive in phase 2.
+//! Wire format is fixed binary (not JSON). Endpoint sample bodies match the
+//! iceoryx `repr(C)` layouts for [`sim_kernel::UartFrame`],
+//! [`sim_kernel::AnalogVoltage`], [`sim_kernel::Pulse`], and
+//! [`sim_kernel::Scalar`].
 
 use std::collections::HashMap;
 use std::io;
@@ -11,20 +15,31 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::config::MachineId;
 use crate::control::HostStopReason;
+use crate::topology::{DirectedEdge, PayloadKind};
 
 /// Magic bytes for sim-cluster multicast datagrams.
 const MAGIC: [u8; 4] = *b"SCMC";
 const VERSION: u8 = 1;
 
+/// UDP recv buffer; must fit Endpoint headers + largest iceoryx sample.
+const RECV_BUF_LEN: usize = 256;
+
 /// Default keepalive / resend interval (wall clock), per design.
 pub const DEFAULT_MAX_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Multicast message kinds (phase 1). Extended in phase 2+.
+/// Wire `payload_kind` for [`MulticastMessage::Endpoint`].
+pub const ENDPOINT_KIND_UART: u8 = 1;
+pub const ENDPOINT_KIND_ANALOG: u8 = 2;
+pub const ENDPOINT_KIND_PULSE: u8 = 3;
+pub const ENDPOINT_KIND_SCALAR: u8 = 4;
+
+/// Multicast message kinds.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MulticastMsgKind {
     VtMin = 1,
     ClusterStop = 2,
+    Endpoint = 3,
 }
 
 impl MulticastMsgKind {
@@ -33,12 +48,13 @@ impl MulticastMsgKind {
         match value {
             1 => Some(Self::VtMin),
             2 => Some(Self::ClusterStop),
+            3 => Some(Self::Endpoint),
             _ => None,
         }
     }
 }
 
-/// Decoded multicast payload (phase 1).
+/// Decoded multicast payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MulticastMessage {
     /// Sender's local `min_board_vt`.
@@ -49,6 +65,13 @@ pub enum MulticastMessage {
     ClusterStop {
         machine_id: MachineId,
         reason: HostStopReason,
+    },
+    /// Cross-host board-edge sample (p2).
+    Endpoint {
+        machine_id: MachineId,
+        edge_id: u64,
+        payload_kind: u8,
+        payload: Vec<u8>,
     },
 }
 
@@ -76,11 +99,23 @@ impl MulticastMessage {
                 out.extend_from_slice(&machine_id.to_be_bytes());
                 out.push(reason.to_wire());
             }
+            Self::Endpoint {
+                machine_id,
+                edge_id,
+                payload_kind,
+                payload,
+            } => {
+                out.push(MulticastMsgKind::Endpoint as u8);
+                out.extend_from_slice(&machine_id.to_be_bytes());
+                out.extend_from_slice(&edge_id.to_le_bytes());
+                out.push(*payload_kind);
+                out.extend_from_slice(payload);
+            }
         }
         out
     }
 
-    /// `None` if the datagram is not a well-formed phase-1 message.
+    /// `None` if the datagram is not a well-formed multicast message.
     #[must_use]
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let rest = bytes.strip_prefix(&MAGIC)?;
@@ -110,7 +145,170 @@ impl MulticastMessage {
                 let reason = HostStopReason::from_wire(rest[4])?;
                 Some(Self::ClusterStop { machine_id, reason })
             }
+            MulticastMsgKind::Endpoint => {
+                // machine_id(4) + edge_id(8) + payload_kind(1) + payload
+                if rest.len() < 13 {
+                    return None;
+                }
+                let machine_id = MachineId::from_be_bytes(rest[0..4].try_into().ok()?);
+                let edge_id = u64::from_le_bytes(rest[4..12].try_into().ok()?);
+                let payload_kind = rest[12];
+                let payload = rest[13..].to_vec();
+                if expected_endpoint_payload_len(payload_kind)? != payload.len() {
+                    return None;
+                }
+                if !validate_endpoint_payload(payload_kind, &payload) {
+                    return None;
+                }
+                Some(Self::Endpoint {
+                    machine_id,
+                    edge_id,
+                    payload_kind,
+                    payload,
+                })
+            }
         }
+    }
+}
+
+/// Fixed Endpoint sample body sizes (field-wise LE layout; padding bytes are 0).
+/// Matches `repr(C)` sizes of the iceoryx sample types on this target.
+pub const ENDPOINT_UART_LEN: usize = 24;
+pub const ENDPOINT_ANALOG_LEN: usize = 8;
+pub const ENDPOINT_PULSE_LEN: usize = 16;
+pub const ENDPOINT_SCALAR_LEN: usize = 8;
+
+const _: () = assert!(std::mem::size_of::<sim_kernel::UartFrame>() == ENDPOINT_UART_LEN);
+const _: () = assert!(std::mem::size_of::<sim_kernel::AnalogVoltage>() == ENDPOINT_ANALOG_LEN);
+const _: () = assert!(std::mem::size_of::<sim_kernel::Pulse>() == ENDPOINT_PULSE_LEN);
+const _: () = assert!(std::mem::size_of::<sim_kernel::Scalar>() == ENDPOINT_SCALAR_LEN);
+const _: () = assert!(6 + 13 + ENDPOINT_UART_LEN <= RECV_BUF_LEN);
+
+/// Expected sample body length for an Endpoint `payload_kind`, or `None` if unknown.
+#[must_use]
+pub fn expected_endpoint_payload_len(payload_kind: u8) -> Option<usize> {
+    match payload_kind {
+        ENDPOINT_KIND_UART => Some(ENDPOINT_UART_LEN),
+        ENDPOINT_KIND_ANALOG => Some(ENDPOINT_ANALOG_LEN),
+        ENDPOINT_KIND_PULSE => Some(ENDPOINT_PULSE_LEN),
+        ENDPOINT_KIND_SCALAR => Some(ENDPOINT_SCALAR_LEN),
+        _ => None,
+    }
+}
+
+/// Wire `payload_kind` for a topology [`PayloadKind`], if forwardable in p2.
+#[must_use]
+pub fn endpoint_payload_kind_wire(kind: PayloadKind) -> Option<u8> {
+    match kind {
+        PayloadKind::Uart => Some(ENDPOINT_KIND_UART),
+        PayloadKind::Analog => Some(ENDPOINT_KIND_ANALOG),
+        PayloadKind::Pulse => Some(ENDPOINT_KIND_PULSE),
+        PayloadKind::Scalar => Some(ENDPOINT_KIND_SCALAR),
+        PayloadKind::Digital => None,
+    }
+}
+
+/// Encode a UART sample for the Endpoint body (LE fields, zero padding).
+#[must_use]
+pub fn encode_uart_payload(frame: &sim_kernel::UartFrame) -> Vec<u8> {
+    let mut out = vec![0u8; ENDPOINT_UART_LEN];
+    out[0..2].copy_from_slice(&frame.data.to_le_bytes());
+    out[2] = frame.data_bits;
+    // out[3..8] padding
+    out[8..16].copy_from_slice(&frame.bit_time.0.to_le_bytes());
+    out[16] = frame.stop_bits as u8;
+    out[17] = frame.parity as u8;
+    out[18] = u8::from(frame.inverted);
+    out
+}
+
+/// Decode + validate a UART Endpoint body. Rejects invalid enum/bool values.
+#[must_use]
+pub fn decode_uart_payload(bytes: &[u8]) -> Option<sim_kernel::UartFrame> {
+    if bytes.len() != ENDPOINT_UART_LEN {
+        return None;
+    }
+    let data = u16::from_le_bytes(bytes[0..2].try_into().ok()?);
+    let data_bits = bytes[2];
+    let bit_time = sim_kernel::Tick(u64::from_le_bytes(bytes[8..16].try_into().ok()?));
+    let stop_bits = match bytes[16] {
+        0 => sim_kernel::UartStopBits::One,
+        1 => sim_kernel::UartStopBits::Two,
+        _ => return None,
+    };
+    let parity = match bytes[17] {
+        0 => sim_kernel::UartParity::None,
+        1 => sim_kernel::UartParity::Even,
+        2 => sim_kernel::UartParity::Odd,
+        _ => return None,
+    };
+    let inverted = match bytes[18] {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    Some(sim_kernel::UartFrame {
+        data,
+        data_bits,
+        bit_time,
+        stop_bits,
+        parity,
+        inverted,
+    })
+}
+
+#[must_use]
+pub fn encode_analog_payload(v: &sim_kernel::AnalogVoltage) -> Vec<u8> {
+    v.0.to_le_bytes().to_vec()
+}
+
+#[must_use]
+pub fn decode_analog_payload(bytes: &[u8]) -> Option<sim_kernel::AnalogVoltage> {
+    Some(sim_kernel::AnalogVoltage(i64::from_le_bytes(
+        bytes.try_into().ok()?,
+    )))
+}
+
+#[must_use]
+pub fn encode_pulse_payload(p: &sim_kernel::Pulse) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ENDPOINT_PULSE_LEN);
+    out.extend_from_slice(&p.hi_width_ns.to_le_bytes());
+    out.extend_from_slice(&p.lo_width_ns.to_le_bytes());
+    out
+}
+
+#[must_use]
+pub fn decode_pulse_payload(bytes: &[u8]) -> Option<sim_kernel::Pulse> {
+    if bytes.len() != ENDPOINT_PULSE_LEN {
+        return None;
+    }
+    Some(sim_kernel::Pulse {
+        hi_width_ns: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+        lo_width_ns: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+    })
+}
+
+#[must_use]
+pub fn encode_scalar_payload(s: &sim_kernel::Scalar) -> Vec<u8> {
+    s.0.to_le_bytes().to_vec()
+}
+
+#[must_use]
+pub fn decode_scalar_payload(bytes: &[u8]) -> Option<sim_kernel::Scalar> {
+    Some(sim_kernel::Scalar(f64::from_le_bytes(
+        bytes.try_into().ok()?,
+    )))
+}
+
+/// True when `payload` is a well-formed body for `payload_kind`.
+#[must_use]
+pub fn validate_endpoint_payload(payload_kind: u8, payload: &[u8]) -> bool {
+    match payload_kind {
+        ENDPOINT_KIND_UART => decode_uart_payload(payload).is_some(),
+        ENDPOINT_KIND_ANALOG => decode_analog_payload(payload).is_some(),
+        ENDPOINT_KIND_PULSE => decode_pulse_payload(payload).is_some(),
+        ENDPOINT_KIND_SCALAR => decode_scalar_payload(payload).is_some(),
+        _ => false,
     }
 }
 
@@ -177,7 +375,7 @@ impl ClusterMulticast {
     /// Malformed datagrams are skipped so a junk packet does not look like
     /// an empty socket (which would stop [`Self::recv_all`] early).
     pub fn try_recv(&self) -> io::Result<Option<MulticastMessage>> {
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; RECV_BUF_LEN];
         loop {
             match self.socket.recv_from(&mut buf) {
                 Ok((n, _)) => {
@@ -375,14 +573,9 @@ pub fn place_boards_first_fit(
     Ok(BoardPlacement { board_to_server })
 }
 
-/// True when any topology edge connects boards on different backends ([`MachineId`]).
+/// True when any `(from, to)` board pair lands on different backends.
 ///
-/// Missing board ids in `board_server` also return true (fail closed) so create
-/// cannot silently accept incomplete placement maps.
-///
-/// TODO(cluster-distributed-p2): provisional — remove once cross-host endpoint
-/// multicast (`node→arbiter→multicast→arbiter→node`) is implemented. See
-/// `docs/cluster-distributed-p1.md`.
+/// Missing board ids in `board_server` also return true (fail closed).
 #[must_use]
 pub fn has_cross_host_edge(
     edges: &[(String, String)],
@@ -394,6 +587,29 @@ pub fn has_cross_host_edge(
             (Some(&sa), Some(&sb)) => sa != sb,
             _ => true,
         })
+}
+
+/// True when any **Digital** topology edge spans different backends.
+///
+/// TODO(cluster-distributed-p2): provisional until Digital board-edge IPC exists.
+/// Missing board ids fail closed (treated as cross-host).
+#[must_use]
+pub fn has_cross_host_digital_edge(
+    edges: &[DirectedEdge],
+    board_server: &HashMap<String, MachineId>,
+) -> bool {
+    edges.iter().any(|edge| {
+        if edge.payload != PayloadKind::Digital {
+            return false;
+        }
+        match (
+            board_server.get(&edge.from.path),
+            board_server.get(&edge.to.path),
+        ) {
+            (Some(&sa), Some(&sb)) => sa != sb,
+            _ => true,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -428,6 +644,117 @@ mod tests {
             reason: HostStopReason::Until,
         };
         assert_eq!(MulticastMessage::decode(&msg.encode()), Some(msg));
+    }
+
+    #[test]
+    fn endpoint_round_trip_each_kind() {
+        let kinds = [
+            (
+                ENDPOINT_KIND_UART,
+                vec![0u8; std::mem::size_of::<sim_kernel::UartFrame>()],
+            ),
+            (
+                ENDPOINT_KIND_ANALOG,
+                vec![0u8; std::mem::size_of::<sim_kernel::AnalogVoltage>()],
+            ),
+            (
+                ENDPOINT_KIND_PULSE,
+                vec![0u8; std::mem::size_of::<sim_kernel::Pulse>()],
+            ),
+            (
+                ENDPOINT_KIND_SCALAR,
+                vec![0u8; std::mem::size_of::<sim_kernel::Scalar>()],
+            ),
+        ];
+        for (payload_kind, payload) in kinds {
+            let msg = MulticastMessage::Endpoint {
+                machine_id: MachineId::from_u32(0x0a00_0002),
+                edge_id: 0x1122_3344_5566_7788,
+                payload_kind,
+                payload,
+            };
+            assert_eq!(MulticastMessage::decode(&msg.encode()), Some(msg));
+        }
+    }
+
+    #[test]
+    fn endpoint_rejects_wrong_payload_len_and_kind() {
+        let mut bad = MulticastMessage::Endpoint {
+            machine_id: MachineId::from_u32(1),
+            edge_id: 1,
+            payload_kind: ENDPOINT_KIND_PULSE,
+            payload: vec![0u8; 3],
+        }
+        .encode();
+        assert_eq!(MulticastMessage::decode(&bad), None);
+        // Truncate after payload_kind.
+        bad.truncate(4 + 1 + 1 + 4 + 8 + 1);
+        assert_eq!(MulticastMessage::decode(&bad), None);
+        let unknown = MulticastMessage::Endpoint {
+            machine_id: MachineId::from_u32(1),
+            edge_id: 1,
+            payload_kind: 99,
+            payload: vec![0u8; 8],
+        };
+        assert_eq!(MulticastMessage::decode(&unknown.encode()), None);
+    }
+
+    #[test]
+    fn cross_host_digital_edge_detect() {
+        use crate::topology::{DirectedEdge, PortRef};
+
+        let mut map = HashMap::new();
+        map.insert("a".into(), MachineId::from_u32(10));
+        map.insert("b".into(), MachineId::from_u32(20));
+        let digital = DirectedEdge {
+            from: PortRef {
+                path: "a".into(),
+                port: "d".into(),
+            },
+            to: PortRef {
+                path: "b".into(),
+                port: "d".into(),
+            },
+            route: vec![],
+            payload: PayloadKind::Digital,
+            uart_ring_len: None,
+        };
+        let uart = DirectedEdge {
+            from: PortRef {
+                path: "a".into(),
+                port: "u".into(),
+            },
+            to: PortRef {
+                path: "b".into(),
+                port: "u".into(),
+            },
+            route: vec![],
+            payload: PayloadKind::Uart,
+            uart_ring_len: None,
+        };
+        assert!(has_cross_host_digital_edge(
+            std::slice::from_ref(&digital),
+            &map
+        ));
+        assert!(!has_cross_host_digital_edge(&[uart], &map));
+        assert!(has_cross_host_digital_edge(
+            &[DirectedEdge {
+                to: PortRef {
+                    path: "missing".into(),
+                    port: "d".into(),
+                },
+                ..digital
+            }],
+            &map
+        ));
+    }
+
+    #[test]
+    fn uart_payload_rejects_invalid_enum() {
+        let mut bad = encode_uart_payload(&sim_kernel::UartFrame::default());
+        bad[16] = 9; // invalid stop_bits
+        assert!(decode_uart_payload(&bad).is_none());
+        assert!(!validate_endpoint_payload(ENDPOINT_KIND_UART, &bad));
     }
 
     #[test]

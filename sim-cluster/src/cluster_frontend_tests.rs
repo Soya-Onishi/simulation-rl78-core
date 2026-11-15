@@ -348,7 +348,54 @@ fn single_server_create_no_multicast() {
 }
 
 #[test]
-fn cross_host_edge_rejected() {
+fn cross_host_uart_edge_allowed() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    let fe = ClusterFrontend::new(
+        vec![
+            (b0.clone(), "s0".into(), 1, MachineId::from_u32(1)),
+            (b1.clone(), "s1".into(), 1, MachineId::from_u32(2)),
+        ],
+        vec![(Ipv4Addr::new(239, 0, 0, 1), Ipv4Addr::new(239, 0, 0, 3))],
+        vec![(30000, 30002)],
+    )
+    .unwrap();
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_connected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    assert_eq!(b0.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(b1.creates.load(Ordering::SeqCst), 1);
+    assert!(!id.is_empty());
+}
+
+fn topo_two_digital_connected() -> LogicalTopology {
+    LogicalTopology {
+        boards: vec![board("a"), board("b")],
+        edges: vec![DirectedEdge {
+            from: PortRef {
+                path: "a".into(),
+                port: "d".into(),
+            },
+            to: PortRef {
+                path: "b".into(),
+                port: "d".into(),
+            },
+            route: vec![],
+            payload: PayloadKind::Digital,
+            uart_ring_len: None,
+        }],
+        margin_ns: 1,
+        booting_timeout_ms: 1000,
+    }
+}
+
+#[test]
+fn cross_host_digital_edge_rejected() {
     let fe = ClusterFrontend::new(
         vec![
             (
@@ -370,7 +417,7 @@ fn cross_host_edge_rejected() {
     .unwrap();
     let err = fe
         .create(CreateSimulationRequest {
-            topology: topo_two_connected(),
+            topology: topo_two_digital_connected(),
             id: None,
             multicast: None,
             assigned_boards: None,

@@ -15,8 +15,8 @@ use super::runtime::IpcError;
 
 type EdgeFrames = (crate::ipc::HashedId<u64>, Vec<UartFrame>);
 
-type UartPub = Publisher<ipc::Service, UartFrame, ()>;
-type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
+pub(crate) type UartPub = Publisher<ipc::Service, UartFrame, ()>;
+pub(crate) type UartSub = Subscriber<ipc::Service, UartFrame, ()>;
 
 /// Node UART endpoints for this board.
 ///
@@ -98,7 +98,7 @@ impl NodeUartPorts {
     }
 }
 
-fn open_or_create_uart_publisher(
+pub(crate) fn open_or_create_uart_publisher(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,
@@ -121,7 +121,7 @@ fn open_or_create_uart_publisher(
         .map_err(|e| IpcError::Message(format!("uart publisher {name}: {e:?}")))
 }
 
-fn open_or_create_uart_subscriber(
+pub(crate) fn open_or_create_uart_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,

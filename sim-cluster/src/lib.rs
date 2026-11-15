@@ -22,6 +22,7 @@ pub mod contract;
 pub mod control;
 pub mod data_plane;
 pub mod elf_source;
+mod endpoint_bridge;
 pub mod gdb;
 pub mod host;
 pub mod http;
