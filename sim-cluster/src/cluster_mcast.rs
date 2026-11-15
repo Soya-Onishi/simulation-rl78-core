@@ -141,9 +141,9 @@ impl ClusterMulticast {
         machine_id: u32,
         interface: Ipv4Addr,
     ) -> io::Result<Self> {
-        // Bind the multicast address+port (common Linux pattern) so membership
-        // delivers datagrams to this socket; SO_REUSEADDR allows multiple joins.
-        let bind_addr = SocketAddrV4::new(*group.ip(), group.port());
+        // Bind the cluster interface address (BackendConfig::addr) so the send
+        // source and membership stay on that NIC; SO_REUSEADDR allows joins.
+        let bind_addr = SocketAddrV4::new(interface, group.port());
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         socket.bind(&SockAddr::from(bind_addr))?;
@@ -372,6 +372,9 @@ pub fn place_boards_first_fit(
 
 /// True when any topology edge connects boards on different servers.
 ///
+/// Missing board ids in `board_server` also return true (fail closed) so create
+/// cannot silently accept incomplete placement maps.
+///
 /// TODO(cluster-distributed-p2): provisional — remove once cross-host endpoint
 /// multicast (`node→arbiter→multicast→arbiter→node`) is implemented. See
 /// `docs/cluster-distributed-p1.md`.
@@ -383,7 +386,7 @@ pub fn has_cross_host_edge(
     edges.iter().any(|(a, b)| {
         match (board_server.get(a), board_server.get(b)) {
             (Some(&sa), Some(&sb)) => sa != sb,
-            _ => false,
+            _ => true,
         }
     })
 }
@@ -472,6 +475,8 @@ mod tests {
         map.insert("b".into(), 1);
         assert!(has_cross_host_edge(&[("a".into(), "b".into())], &map));
         assert!(!has_cross_host_edge(&[("a".into(), "a".into())], &map));
+        // Incomplete placement map must not be treated as same-host.
+        assert!(has_cross_host_edge(&[("a".into(), "missing".into())], &map));
     }
 
 }

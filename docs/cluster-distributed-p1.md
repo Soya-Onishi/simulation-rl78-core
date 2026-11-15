@@ -8,6 +8,7 @@ Confirmed design: Serena `mem:sim-cluster/distributed-design` (2026-11-14).
 - Frontend placement (`max_nodes`, First-Fit), create fanout with compensate
 - start/stop/reset fanout; status/log aggregation
 - `VtClock` slot 0 = remote hosts' min VT; `until_ns` on `ControlToNode::Start`
+- `backend.yaml`: `addr` + `port` (HTTP bind, `machine_id`, multicast send/join IF)
 
 ## Branches
 

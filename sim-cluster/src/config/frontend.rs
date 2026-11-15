@@ -1,6 +1,5 @@
 //! `simulation-frontend` YAML.
 
-use std::net::Ipv4Addr;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -109,13 +108,5 @@ impl FrontendConfig {
             )));
         }
         Ok(())
-    }
-
-    /// IPv4 of `servers[index]` for `machine_id` / placement keys.
-    #[must_use]
-    pub fn server_ipv4(&self, index: usize) -> Option<Ipv4Addr> {
-        self.servers
-            .get(index)
-            .and_then(|s| s.ip.parse::<Ipv4Addr>().ok())
     }
 }
