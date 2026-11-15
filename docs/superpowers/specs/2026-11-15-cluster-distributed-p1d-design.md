@@ -97,7 +97,7 @@ Lifecycle:
 
 `log_high_water(id)` = pull+ingest from participants (same as a `logs_after` pull), then return `next_seq.saturating_sub(1)`. This matches single-backend SSE subscribe: connection starts “from now,” without replaying backlog already sitting on backends.
 
-Concurrent `log_high_water` / `logs_after` share a `log_fetch` mutex around the whole pull+ingest so one caller cannot advance global seq under another’s in-flight subscribe.
+Concurrent `log_high_water` / `logs_after` for the same sim share that sim’s `Arc<Mutex<LogAggregate>>` around the whole pull+ingest so one caller cannot advance global seq under another’s in-flight subscribe. Other simulations do not block each other.
 
 Status and log fanout use a bounded wait (`OBSERVE_FANOUT_TIMEOUT`, 2s): timed-out participants are treated as `Err` and omitted. Control fanout still waits for every participant.
 

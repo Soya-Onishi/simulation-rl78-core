@@ -863,7 +863,7 @@ fn status_omits_timed_out_backend_quickly() {
 fn concurrent_log_high_water_does_not_skip_ingested_lines() {
     let b0 = MockBackend::new("s0");
     let b1 = MockBackend::new("s1");
-    // Slow pull so a second client can race without the log_fetch gate.
+    // Slow pull so a second client can contend on the same sim's aggregate mutex.
     *b0.logs_delay.lock().unwrap() = Duration::from_millis(50);
     let fe = Arc::new(two_server_frontend(b0.clone(), b1.clone()));
     let id = fe

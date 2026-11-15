@@ -40,7 +40,8 @@ struct SimRecord {
 
 struct FrontendState {
     sims: HashMap<String, SimRecord>,
-    logs: HashMap<String, LogAggregate>,
+    /// Per-simulation aggregate; `Mutex` serializes pull+ingest for that sim only.
+    logs: HashMap<String, Arc<Mutex<LogAggregate>>>,
 }
 
 /// Live ledger participants keyed by `MachineId`.
@@ -64,9 +65,6 @@ pub struct ClusterFrontend {
     address_ranges: Vec<(Ipv4Addr, Ipv4Addr)>,
     port_ranges: Vec<(u16, u16)>,
     state: Mutex<FrontendState>,
-    /// Serializes log pull+ingest so concurrent `log_high_water` / `logs_after`
-    /// cannot advance global seq under another caller's feet (SSE gap).
-    log_fetch: Mutex<()>,
 }
 
 impl ClusterFrontend {
@@ -106,7 +104,6 @@ impl ClusterFrontend {
                 sims: HashMap::new(),
                 logs: HashMap::new(),
             }),
-            log_fetch: Mutex::new(()),
         })
     }
 
@@ -349,33 +346,55 @@ impl ClusterFrontend {
         Err(failures.remove(0).1)
     }
 
-    /// Fetch new local logs, then ingest and read under one mutex hold so a
-    /// concurrent pull cannot trim events before this caller snapshots them.
+    /// Fetch new local logs, then ingest and read while holding that sim's
+    /// `LogAggregate` mutex so concurrent `log_high_water` / `logs_after` on
+    /// the same id cannot advance global seq under each other (SSE gap).
+    /// Other simulations are unaffected.
     ///
-    /// The whole pull+ingest is also gated by `log_fetch` so another client's
-    /// ingest cannot advance global seq while this call's `log_high_water` is
-    /// still in flight (would make a new SSE skip those lines forever).
+    /// Lock order: take `FrontendState` only to clone participants + `Arc`,
+    /// release it, then lock the aggregate — never nest state under the agg.
     fn with_pulled_logs<R>(
         &self,
         id: &str,
         read: impl FnOnce(&LogAggregate) -> R,
     ) -> Result<R, ApiError> {
-        let _fetch = self
-            .log_fetch
-            .lock()
-            .map_err(|_| ApiError::internal("ClusterFrontend log_fetch poisoned"))?;
-        let participants = self.participants(id)?;
-        let cursors: HashMap<MachineId, u64> = {
+        let (participants, agg) = {
             let state = self.lock()?;
-            let Some(agg) = state.logs.get(id) else {
+            let Some(rec) = state.sims.get(id) else {
                 return Err(ApiError::not_found("unknown simulation"));
             };
-            participants
-                .backends
-                .keys()
-                .map(|machine_id| (*machine_id, agg.after_for(*machine_id)))
-                .collect()
+            let Some(agg) = state.logs.get(id).cloned() else {
+                return Err(ApiError::not_found("unknown simulation"));
+            };
+            let per_server = rec.per_server.clone();
+            let mut backends = HashMap::with_capacity(per_server.len());
+            for &machine_id in per_server.keys() {
+                let backend = self
+                    .servers
+                    .get(&machine_id)
+                    .ok_or_else(|| {
+                        ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+                    })?
+                    .backend
+                    .clone();
+                backends.insert(machine_id, backend);
+            }
+            (
+                Participants {
+                    per_server,
+                    backends,
+                },
+                agg,
+            )
         };
+        let mut agg = agg
+            .lock()
+            .map_err(|_| ApiError::internal("LogAggregate mutex poisoned"))?;
+        let cursors: HashMap<MachineId, u64> = participants
+            .backends
+            .keys()
+            .map(|machine_id| (*machine_id, agg.after_for(*machine_id)))
+            .collect();
         let id_owned = id.to_string();
         let fetched = Self::parallel_map_timeout(
             &participants.backends,
@@ -397,12 +416,8 @@ impl ClusterFrontend {
                 batches.push((machine_id, events));
             }
         }
-        let mut state = self.lock()?;
-        let Some(agg) = state.logs.get_mut(id) else {
-            return Err(ApiError::not_found("unknown simulation"));
-        };
         agg.ingest(batches);
-        Ok(read(agg))
+        Ok(read(&agg))
     }
 
     /// Shut down `id` on every backend in `succeeded`. Returns false if any
@@ -491,7 +506,9 @@ impl SimulationBackend for ClusterFrontend {
             // Inserting the record reserves board slots and multicast (derived from
             // sims) before fanout. Log aggregate is created with the ledger entry.
             state.sims.insert(id.clone(), record.clone());
-            state.logs.insert(id.clone(), LogAggregate::new());
+            state
+                .logs
+                .insert(id.clone(), Arc::new(Mutex::new(LogAggregate::new())));
             record
         };
 

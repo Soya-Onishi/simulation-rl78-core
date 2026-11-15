@@ -46,7 +46,7 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 ## Control / observe (phase 1 / p1d)
 - start/stop/reset: frontend fans out in parallel to participating backends; no barrier; partial failure ⇒ overall failure (lowest `MachineId` error); no auto-rollback of successful peers.
 - status: merge assigned-board `SessionNode`s from participants (`SimRecord.per_server`); `virtual_time_ns` = min; session `state` = `running` if any participant is `running`; omit backends that return `Err`; all-fail ⇒ error.
-- log: frontend owns per-sim global `seq` + ring (cap 100); pull/dedupe per-backend local seq; SSE `log_high_water` / `logs_after` contract unchanged; omit failed pulls.
+- log: frontend owns per-sim global `seq` + ring (cap 100) behind `Arc<Mutex<LogAggregate>>` (serialize pull+ingest per sim only); pull/dedupe per-backend local seq; SSE `log_high_water` / `logs_after` contract unchanged; omit failed/timed-out pulls.
 - Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p1d-design.md`.
 
 ## Multicast wire (phase 1)
