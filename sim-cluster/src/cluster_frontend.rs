@@ -169,6 +169,53 @@ impl ClusterFrontend {
         }
     }
 
+    /// Drop this sim's board-slot reservation (`SimRecord` in `sims`) and its
+    /// multicast booking in `used_mcast` after compensation cleaned backends.
+    fn rollback_ledger(&self, id: &str, plan: &PlannedCreate) {
+        if let Ok(mut state) = self.lock() {
+            state.sims.remove(id);
+            Self::release_mcast_reservation(&mut state, plan);
+        }
+    }
+
+    /// Shut down `id` on every backend in `succeeded`. Returns false if any
+    /// shutdown fails or a machine_id is missing from `self.servers`.
+    fn compensate_previous(&self, succeeded: &[MachineId], id: &str) -> bool {
+        let mut ok = true;
+        for &prev in succeeded {
+            match self.servers.get(&prev) {
+                Some(slot) if slot.backend.shutdown(id).is_ok() => {}
+                _ => ok = false,
+            }
+        }
+        ok
+    }
+
+    /// Roll back the ledger when compensation succeeded, then return the create
+    /// error. When compensation failed, leave `sims` / `used_mcast` pinned so
+    /// another create cannot reuse them until `shutdown(id)` tears down remnants.
+    fn fail_after_compensate(
+        &self,
+        id: &str,
+        plan: &PlannedCreate,
+        head: String,
+        compensate_ok: bool,
+        err: Option<ApiError>,
+    ) -> Result<String, ApiError> {
+        if compensate_ok {
+            self.rollback_ledger(id, plan);
+        }
+        let msg = if compensate_ok {
+            format!("{head}; compensated")
+        } else {
+            format!("{head}; compensate incomplete — remnant may exist with id {id}")
+        };
+        match err {
+            Some(err) => Err(ApiError::new(err.status, err.code, msg)),
+            None => Err(ApiError::internal(msg)),
+        }
+    }
+
     /// One participating backend (HashMap key order). Interim for APIs that do
     /// not yet fan out, aggregate, or route to the hosting backend — see
     /// `TODO(cluster-distributed-p*)` on those call sites.
@@ -235,22 +282,6 @@ impl SimulationBackend for ClusterFrontend {
             port,
         });
 
-        let rollback_ledger = |compensate_ok: bool| {
-            if let Ok(mut state) = self.lock() {
-                if compensate_ok {
-                    // Compensation succeeded: backends are clean; drop this
-                    // sim's SimRecord and release its used_mcast reservation
-                    // so create can reuse those board slots / multicast.
-                    state.sims.remove(&id);
-                    Self::release_mcast_reservation(&mut state, &plan);
-                }
-                // Compensation failed: do not touch sims/used_mcast here
-                // (remnants may still run). Keep those reservations pinned
-                // so another create cannot reuse them until shutdown(id)
-                // tears down remnants and then releases the entries.
-            }
-        };
-
         let mut succeeded: Vec<MachineId> = Vec::new();
         for (&machine_id, boards) in &plan.per_server {
             let (backend, endpoint) = {
@@ -264,54 +295,29 @@ impl SimulationBackend for ClusterFrontend {
                 assigned_boards: Some(boards.clone()),
             };
             match backend.create(req) {
-                Ok(remote_id) => {
-                    if remote_id != id {
-                        let cleanup_ok = backend.shutdown(&remote_id).is_ok();
-                        let mut compensate_ok = cleanup_ok;
-                        for &prev in &succeeded {
-                            if let Some(prev_slot) = self.servers.get(&prev) {
-                                if prev_slot.backend.shutdown(&id).is_err() {
-                                    compensate_ok = false;
-                                }
-                            } else {
-                                compensate_ok = false;
-                            }
-                        }
-                        rollback_ledger(compensate_ok);
-                        let msg = if compensate_ok {
-                            format!(
-                                "backend {endpoint} returned id {remote_id}, expected {id}; compensated"
-                            )
-                        } else {
-                            format!(
-                                "backend {endpoint} returned id {remote_id}, expected {id}; \
-                                 compensate incomplete — remnant may exist"
-                            )
-                        };
-                        return Err(ApiError::internal(msg));
-                    }
+                Ok(remote_id) if remote_id == id => {
                     succeeded.push(machine_id);
                 }
+                Ok(remote_id) => {
+                    let cleanup_ok = backend.shutdown(&remote_id).is_ok();
+                    let compensate_ok = cleanup_ok && self.compensate_previous(&succeeded, &id);
+                    return self.fail_after_compensate(
+                        &id,
+                        &plan,
+                        format!("backend {endpoint} returned id {remote_id}, expected {id}"),
+                        compensate_ok,
+                        None,
+                    );
+                }
                 Err(err) => {
-                    let mut compensate_ok = true;
-                    for &prev in &succeeded {
-                        if let Some(prev_slot) = self.servers.get(&prev) {
-                            if prev_slot.backend.shutdown(&id).is_err() {
-                                compensate_ok = false;
-                            }
-                        } else {
-                            compensate_ok = false;
-                        }
-                    }
-                    rollback_ledger(compensate_ok);
-                    let msg = if compensate_ok {
-                        format!("create failed on {endpoint}: {err}; compensated")
-                    } else {
-                        format!(
-                            "create failed on {endpoint}: {err}; compensate incomplete — remnant may exist with id {id}"
-                        )
-                    };
-                    return Err(ApiError::new(err.status, err.code, msg));
+                    let compensate_ok = self.compensate_previous(&succeeded, &id);
+                    return self.fail_after_compensate(
+                        &id,
+                        &plan,
+                        format!("create failed on {endpoint}: {err}"),
+                        compensate_ok,
+                        Some(err),
+                    );
                 }
             }
         }
