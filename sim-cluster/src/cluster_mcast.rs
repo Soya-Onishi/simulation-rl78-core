@@ -141,9 +141,10 @@ impl ClusterMulticast {
         machine_id: u32,
         interface: Ipv4Addr,
     ) -> io::Result<Self> {
-        // Bind the cluster interface address (BackendConfig::addr) so the send
-        // source and membership stay on that NIC; SO_REUSEADDR allows joins.
-        let bind_addr = SocketAddrV4::new(interface, group.port());
+        // Bind the multicast group address+port so datagrams destined to the
+        // group are delivered here. `interface` (BackendConfig::addr) selects
+        // the NIC for IP_MULTICAST_IF (send) and IP_ADD_MEMBERSHIP (join).
+        let bind_addr = SocketAddrV4::new(*group.ip(), group.port());
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_reuse_address(true)?;
         socket.bind(&SockAddr::from(bind_addr))?;
