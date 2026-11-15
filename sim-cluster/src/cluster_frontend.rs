@@ -37,15 +37,18 @@ struct FrontendState {
     logs: HashMap<String, LogAggregate>,
 }
 
-/// Live ledger participants, with backends ordered by ascending `MachineId`.
+/// Live ledger participants keyed by `MachineId`.
 struct Participants {
     per_server: HashMap<MachineId, Vec<String>>,
-    backends: Vec<(MachineId, Arc<dyn SimulationBackend>)>,
+    backends: HashMap<MachineId, Arc<dyn SimulationBackend>>,
 }
 
 impl Participants {
+    /// Ascending `MachineId` order for stable status/log merge.
     fn machine_order(&self) -> Vec<MachineId> {
-        self.backends.iter().map(|(id, _)| *id).collect()
+        let mut ids: Vec<_> = self.backends.keys().copied().collect();
+        ids.sort_by_key(|id| id.as_u32());
+        ids
     }
 }
 
@@ -204,7 +207,7 @@ impl ClusterFrontend {
             return Err(ApiError::not_found("unknown simulation"));
         };
         let per_server = rec.per_server.clone();
-        let mut backends = Vec::with_capacity(per_server.len());
+        let mut backends = HashMap::with_capacity(per_server.len());
         for &machine_id in per_server.keys() {
             let backend = self
                 .servers
@@ -214,9 +217,8 @@ impl ClusterFrontend {
                 })?
                 .backend
                 .clone();
-            backends.push((machine_id, backend));
+            backends.insert(machine_id, backend);
         }
-        backends.sort_by_key(|(machine_id, _)| machine_id.as_u32());
         Ok(Participants {
             per_server,
             backends,
@@ -225,14 +227,14 @@ impl ClusterFrontend {
 
     /// Run `f` on every participant. Single-participant skips thread spawn.
     fn parallel_map<T: Send>(
-        backends: &[(MachineId, Arc<dyn SimulationBackend>)],
+        backends: &HashMap<MachineId, Arc<dyn SimulationBackend>>,
         f: impl Fn(MachineId, &dyn SimulationBackend) -> Result<T, ApiError> + Sync + Send,
     ) -> Vec<(MachineId, Result<T, ApiError>)> {
         if backends.is_empty() {
             return Vec::new();
         }
         if backends.len() == 1 {
-            let (machine_id, backend) = &backends[0];
+            let (machine_id, backend) = backends.iter().next().expect("len checked");
             return vec![(*machine_id, f(*machine_id, backend.as_ref()))];
         }
         thread::scope(|scope| {
@@ -299,8 +301,8 @@ impl ClusterFrontend {
             };
             participants
                 .backends
-                .iter()
-                .map(|(machine_id, _)| (*machine_id, agg.after_for(*machine_id)))
+                .keys()
+                .map(|machine_id| (*machine_id, agg.after_for(*machine_id)))
                 .collect()
         };
         let fetched = Self::parallel_map(&participants.backends, |machine_id, backend| {
@@ -314,9 +316,9 @@ impl ClusterFrontend {
             }
         }
         let mut batches = Vec::new();
-        for (machine_id, _) in &participants.backends {
-            if let Some(events) = by_machine.remove(machine_id) {
-                batches.push((*machine_id, events));
+        for machine_id in participants.machine_order() {
+            if let Some(events) = by_machine.remove(&machine_id) {
+                batches.push((machine_id, events));
             }
         }
         let mut state = self.lock()?;
