@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -10,7 +11,7 @@ use crate::backend::SimulationBackend;
 use crate::cluster_mcast::{
     allocate_multicast, has_cross_host_digital_edge, place_boards_first_fit,
 };
-use crate::cluster_observe::{LogAggregate, ProbeWatchAggregate};
+use crate::cluster_observe::{CsvMergeState, LogAggregate, ProbeWatchAggregate};
 use crate::config::MachineId;
 use crate::contract::{
     ActionList, ApiError, CreateMulticast, CreateSimulationRequest, InvokeActionRequest, LogEvent,
@@ -19,7 +20,7 @@ use crate::contract::{
 use crate::inspect::{InspectReply, InspectRequest};
 use crate::ipc::{HashedId, board_id_hash, new_cluster_key};
 use crate::probe_log::{
-    CoarseLive, ProbeCatalogItem, ProbeRef, ProbeWatchView, WATCH_VT_WINDOW_NS,
+    CoarseLive, ProbeCatalogItem, ProbePointName, ProbeRef, ProbeWatchView, WATCH_VT_WINDOW_NS,
 };
 use crate::topology::LogicalTopology;
 
@@ -57,6 +58,8 @@ struct FrontendState {
     logs: HashMap<String, Arc<Mutex<LogAggregate>>>,
     /// Per-simulation host-local coarse seq cursors for live watch (p3b).
     probe_watch: HashMap<String, Arc<Mutex<ProbeWatchAggregate>>>,
+    /// Active CSV merge buffers keyed by simulation id (p4).
+    csv_merge: HashMap<String, Arc<Mutex<CsvMergeState>>>,
 }
 
 /// Live ledger participants keyed by `MachineId`.
@@ -80,6 +83,8 @@ pub struct ClusterFrontend {
     address_ranges: Vec<(Ipv4Addr, Ipv4Addr)>,
     port_ranges: Vec<(u16, u16)>,
     state: Mutex<FrontendState>,
+    /// Process-wide CSV request ids (1-based); single frontend process assumed.
+    csv_request_ids: AtomicU64,
 }
 
 impl ClusterFrontend {
@@ -119,7 +124,9 @@ impl ClusterFrontend {
                 sims: HashMap::new(),
                 logs: HashMap::new(),
                 probe_watch: HashMap::new(),
+                csv_merge: HashMap::new(),
             }),
+            csv_request_ids: AtomicU64::new(1),
         })
     }
 
@@ -211,6 +218,7 @@ impl ClusterFrontend {
             state.sims.remove(id);
             state.logs.remove(id);
             state.probe_watch.remove(id);
+            state.csv_merge.remove(id);
         }
     }
 
@@ -662,6 +670,7 @@ impl SimulationBackend for ClusterFrontend {
             state.sims.remove(id);
             state.logs.remove(id);
             state.probe_watch.remove(id);
+            state.csv_merge.remove(id);
         }
         let still_present = state.sims.contains_key(id);
 
@@ -1020,19 +1029,168 @@ impl SimulationBackend for ClusterFrontend {
         &self,
         id: &str,
         range: crate::probe_log::ProbeRange,
-    ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
-        // TODO(cluster-distributed-p4): start CSV on hosting backends; aggregate later.
-        self.primary_backend(id)?.csv_start(id, range)
+        _request_id: u64,
+    ) -> Result<(u64, Vec<ProbePointName>), ApiError> {
+        let participants = self.participants(id)?;
+        // Public HTTP may pass 0; ClusterFrontend always issues the shared id.
+        let request_id = self.csv_request_ids.fetch_add(1, Ordering::Relaxed);
+        // INTENTIONAL (p4 design): do not cancel CSV jobs on hosts that already
+        // accepted start when another participant fails. Those hosts stay busy
+        // up to the ~60s csv_job deadline and may return 409 conflict on retry.
+        // This is an accepted limitation (no host-side cancel API). Do not
+        // "fix" by adding cancel/retry-same-id without a design change.
+        // Bugbot/reviewers: see docs/superpowers/specs/2026-11-15-cluster-distributed-p4-csv-design.md.
+        let results = Self::parallel_map(&participants.backends, |_, backend| {
+            backend.csv_start(id, range, request_id)
+        });
+        let mut failures: Vec<(MachineId, ApiError)> = Vec::new();
+        let mut by_machine: HashMap<MachineId, Vec<ProbePointName>> = HashMap::new();
+        for (machine_id, result) in results {
+            match result {
+                Ok((echo_id, probes)) => {
+                    if echo_id != request_id {
+                        failures.push((
+                            machine_id,
+                            ApiError::internal(format!(
+                                "csv_start echo request_id {echo_id}, expected {request_id}"
+                            )),
+                        ));
+                    } else {
+                        by_machine.insert(machine_id, probes);
+                    }
+                }
+                Err(err) => failures.push((machine_id, err)),
+            }
+        }
+        if !failures.is_empty() {
+            failures.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+            return Err(failures.remove(0).1);
+        }
+        let order = participants.machine_order();
+        let mut merged = Vec::new();
+        let mut seen = HashMap::new();
+        for machine_id in &order {
+            let Some(probes) = by_machine.remove(machine_id) else {
+                continue;
+            };
+            for point in probes {
+                if seen.insert(point.probe_id, ()).is_none() {
+                    merged.push(point);
+                }
+            }
+        }
+        let merge = Arc::new(Mutex::new(CsvMergeState::new(request_id, order)));
+        let mut state = self.lock()?;
+        state.csv_merge.insert(id.to_string(), merge);
+        Ok((request_id, merged))
     }
 
     fn csv_poll(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
-        // TODO(cluster-distributed-p4): aggregate CSV poll across backends (time-sort).
-        self.primary_backend(id)?.csv_poll(id, request_id)
+        let agg = {
+            let state = self.lock()?;
+            state
+                .csv_merge
+                .get(id)
+                .cloned()
+                .ok_or_else(|| ApiError::not_found("unknown csv export"))?
+        };
+        let order = {
+            let guard = agg
+                .lock()
+                .map_err(|_| ApiError::internal("CsvMergeState mutex poisoned"))?;
+            if guard.request_id != request_id {
+                return Err(ApiError::not_found("unknown csv export"));
+            }
+            guard.machine_order()
+        };
+        let mut backends = HashMap::with_capacity(order.len());
+        for machine_id in order {
+            let backend = self
+                .servers
+                .get(&machine_id)
+                .ok_or_else(|| {
+                    ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+                })?
+                .backend
+                .clone();
+            backends.insert(machine_id, backend);
+        }
+        let fetched = Self::parallel_map(&backends, |_, backend| backend.csv_poll(id, request_id));
+        let mut failures: Vec<(MachineId, ApiError)> = Vec::new();
+        let mut ok: Vec<(MachineId, crate::probe_log::CsvPoll)> = Vec::new();
+        for (machine_id, result) in fetched {
+            match result {
+                Ok(poll) => ok.push((machine_id, poll)),
+                Err(err) => failures.push((machine_id, err)),
+            }
+        }
+        if !failures.is_empty() {
+            let mut state = self.lock()?;
+            if let Some(current) = state.csv_merge.get(id)
+                && Arc::ptr_eq(current, &agg)
+            {
+                state.csv_merge.remove(id);
+            }
+            failures.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+            return Err(failures.remove(0).1);
+        }
+        let mut agg = agg
+            .lock()
+            .map_err(|_| ApiError::internal("CsvMergeState mutex poisoned"))?;
+        for (machine_id, poll) in ok {
+            agg.ingest(machine_id, poll);
+        }
+        Ok(agg.emit_ready())
     }
 
     fn csv_status(&self, id: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
-        // TODO(cluster-distributed-p4): aggregate CSV status across backends.
-        self.primary_backend(id)?.csv_status(id, request_id)
+        let agg = {
+            let state = self.lock()?;
+            state
+                .csv_merge
+                .get(id)
+                .cloned()
+                .ok_or_else(|| ApiError::not_found("unknown csv export"))?
+        };
+        let order = {
+            let guard = agg
+                .lock()
+                .map_err(|_| ApiError::internal("CsvMergeState mutex poisoned"))?;
+            if guard.request_id != request_id {
+                return Err(ApiError::not_found("unknown csv export"));
+            }
+            guard.machine_order()
+        };
+        let mut backends = HashMap::with_capacity(order.len());
+        for machine_id in order {
+            let backend = self
+                .servers
+                .get(&machine_id)
+                .ok_or_else(|| {
+                    ApiError::internal(format!("missing backend for machine_id {machine_id}"))
+                })?
+                .backend
+                .clone();
+            backends.insert(machine_id, backend);
+        }
+        let fetched =
+            Self::parallel_map(&backends, |_, backend| backend.csv_status(id, request_id));
+        let mut failures: Vec<(MachineId, ApiError)> = Vec::new();
+        let mut ok: Vec<(MachineId, crate::probe_log::CsvPoll)> = Vec::new();
+        for (machine_id, result) in fetched {
+            match result {
+                Ok(poll) => ok.push((machine_id, poll)),
+                Err(err) => failures.push((machine_id, err)),
+            }
+        }
+        if !failures.is_empty() {
+            failures.sort_by_key(|(machine_id, _)| machine_id.as_u32());
+            return Err(failures.remove(0).1);
+        }
+        let agg = agg
+            .lock()
+            .map_err(|_| ApiError::internal("CsvMergeState mutex poisoned"))?;
+        Ok(agg.status_from_hosts(ok.iter().map(|(machine_id, poll)| (*machine_id, poll))))
     }
 
     fn probe_samples(

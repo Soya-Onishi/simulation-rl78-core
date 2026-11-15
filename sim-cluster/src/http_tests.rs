@@ -110,8 +110,9 @@ impl SimulationBackend for TopoMock {
         &self,
         _id: &str,
         _range: ProbeRange,
+        request_id: u64,
     ) -> Result<(u64, Vec<ProbePointName>), ApiError> {
-        Ok((0, vec![]))
+        Ok((request_id, vec![]))
     }
     fn csv_poll(&self, _id: &str, _request_id: u64) -> Result<CsvPoll, ApiError> {
         Ok(CsvPoll {

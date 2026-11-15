@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::config::MachineId;
 use crate::contract::{LogEvent, StatusEvent};
 use crate::host::SessionNode;
-use crate::probe_log::CoarseBatch;
+use crate::probe_log::{CoarseBatch, CsvPoll, ProbeRecord};
 
 /// Same capacity as `server::LOG_CAP` — frontend remapped log ring.
 pub(crate) const LOG_CAP: usize = 100;
@@ -140,6 +140,132 @@ impl ProbeWatchAggregate {
             self.per_backend_seq.insert(machine_id, max_seen);
         }
         out
+    }
+}
+
+/// Per-simulation CSV merge buffers for cross-host time-ordered drain (p4).
+pub(crate) struct CsvMergeState {
+    pub(crate) request_id: u64,
+    hosts: HashMap<MachineId, HostCsvBuf>,
+}
+
+struct HostCsvBuf {
+    queue: VecDeque<ProbeRecord>,
+    done: bool,
+    failed: bool,
+    truncated: bool,
+}
+
+impl CsvMergeState {
+    pub(crate) fn new(request_id: u64, hosts: impl IntoIterator<Item = MachineId>) -> Self {
+        let mut map = HashMap::new();
+        for machine_id in hosts {
+            map.insert(
+                machine_id,
+                HostCsvBuf {
+                    queue: VecDeque::new(),
+                    done: false,
+                    failed: false,
+                    truncated: false,
+                },
+            );
+        }
+        Self {
+            request_id,
+            hosts: map,
+        }
+    }
+
+    pub(crate) fn machine_order(&self) -> Vec<MachineId> {
+        let mut ids: Vec<_> = self.hosts.keys().copied().collect();
+        ids.sort_by_key(|id| id.as_u32());
+        ids
+    }
+
+    pub(crate) fn ingest(&mut self, machine_id: MachineId, poll: CsvPoll) {
+        let Some(buf) = self.hosts.get_mut(&machine_id) else {
+            return;
+        };
+        buf.queue.extend(poll.records);
+        buf.done = poll.done;
+        buf.failed |= poll.failed;
+        buf.truncated |= poll.truncated;
+    }
+
+    /// Read-only status view: do not mark host `done` from status RPCs (host
+    /// `pending` may still hold unread rows that only `csv_poll` drains).
+    pub(crate) fn status_from_hosts<'a>(
+        &self,
+        polls: impl IntoIterator<Item = (MachineId, &'a CsvPoll)>,
+    ) -> CsvPoll {
+        let by_machine: HashMap<MachineId, &CsvPoll> = polls.into_iter().collect();
+        let all_host_done = self.hosts.keys().all(|machine_id| {
+            by_machine
+                .get(machine_id)
+                .map(|poll| poll.done)
+                .unwrap_or(false)
+        });
+        let failed = self.hosts.keys().any(|machine_id| {
+            by_machine
+                .get(machine_id)
+                .map(|poll| poll.failed)
+                .unwrap_or(false)
+        }) || self.hosts.values().any(|buf| buf.failed);
+        let truncated = self.hosts.keys().any(|machine_id| {
+            by_machine
+                .get(machine_id)
+                .map(|poll| poll.truncated)
+                .unwrap_or(false)
+        }) || self.hosts.values().any(|buf| buf.truncated);
+        CsvPoll {
+            records: Vec::new(),
+            done: all_host_done && self.hosts.values().all(|buf| buf.queue.is_empty()),
+            failed,
+            truncated,
+        }
+    }
+
+    /// Emit records that cannot reverse virtual time across hosts (k-way merge).
+    pub(crate) fn emit_ready(&mut self) -> CsvPoll {
+        let mut records = Vec::new();
+        loop {
+            let waiting = self
+                .hosts
+                .values()
+                .any(|buf| !buf.done && buf.queue.is_empty());
+            if waiting {
+                break;
+            }
+            let mut best: Option<(u64, u32, MachineId)> = None;
+            for (&machine_id, buf) in &self.hosts {
+                let Some(front) = buf.queue.front() else {
+                    continue;
+                };
+                let key = (front.virtual_time_ns, machine_id.as_u32(), machine_id);
+                match best {
+                    Some(cur) if (key.0, key.1) >= (cur.0, cur.1) => {}
+                    _ => best = Some(key),
+                }
+            }
+            let Some((_, _, machine_id)) = best else {
+                break;
+            };
+            let rec = self
+                .hosts
+                .get_mut(&machine_id)
+                .and_then(|buf| buf.queue.pop_front())
+                .expect("best host had a front");
+            records.push(rec);
+        }
+        CsvPoll {
+            records,
+            done: self
+                .hosts
+                .values()
+                .all(|buf| buf.done && buf.queue.is_empty()),
+            failed: self.hosts.values().any(|buf| buf.failed),
+            truncated: self.hosts.values().any(|buf| buf.truncated),
+        }
     }
 }
 

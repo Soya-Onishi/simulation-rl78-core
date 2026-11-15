@@ -13,12 +13,19 @@ Integration branch: `feature/cluster-distributed`. Merge to `develop` only after
 | **p1d** | `feature/cluster-distributed-p1d-control-agg` | start/stop/reset parallel fanout; status/log aggregate across backends | merged (#131) |
 | **p2** | `feature/cluster-distributed-p2-endpoint` | Endpoint path `node→arbiter→multicast→arbiter→node`; expand binary kinds | merged (#132) |
 | **p3a** | `feature/cluster-distributed-p3a-targeted` | Single-board route: inspect / step / invoke_action / probe_samples → hosting backend | merged (#133) |
-| **p3b** | `feature/cluster-distributed-p3b-catalog-watch` | actions / probe_catalog merge; probe_watch_* fanout + merge | this branch |
-| **p4** | `feature/cluster-distributed-p4-csv` | CSV aggregate + time-sort on frontend | pending |
+| **p3b** | `feature/cluster-distributed-p3b-catalog-watch` | actions / probe_catalog merge; probe_watch_* fanout + merge | merged (#134) |
+| **p4** | `feature/cluster-distributed-p4-csv` | CSV aggregate + time-sort on frontend | this branch |
 
 ## TODO (provisional)
 
 - Cross-host **Digital** edges: still rejected at create until Digital board-edge IPC exists. Uart / Analog / Pulse / Scalar cross-host edges are forwarded in p2.
+
+## p4 notes
+
+- `csv_start`: shared frontend `request_id` to all participants; merge `probes` (MachineId ascending; `probe_id` first-wins).
+- `csv_poll` / `csv_status`: fanout; `CsvMergeState` k-way merge so CSV time order holds across polls.
+- Partial start success without cancel is intentional (up to ~60s busy); see design comment.
+- Spec: `docs/superpowers/specs/2026-11-15-cluster-distributed-p4-csv-design.md`.
 
 ## p3b notes
 

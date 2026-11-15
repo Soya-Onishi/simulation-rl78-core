@@ -694,7 +694,8 @@ async fn probes_csv(
     let id_start = id.clone();
     let (request_id, catalog) = tokio::task::spawn_blocking({
         let backend = backend.clone();
-        move || backend.csv_start(&id_start, range)
+        // Argument ignored by ClusterFrontend (it allocates); leaf backends use it.
+        move || backend.csv_start(&id_start, range, 0)
     })
     .await
     .map_err(|err| ApiError::internal(err.to_string()))??;

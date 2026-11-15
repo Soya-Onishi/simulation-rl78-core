@@ -4,7 +4,9 @@ use super::*;
 use crate::contract::AdvertisedAction;
 use crate::host::SessionNode;
 use crate::ipc::{HashedId, board_id_hash};
-use crate::probe_log::{CoarseBatch, ProbeCatalogItem, ProbeRef, ProbeWatchView};
+use crate::probe_log::{
+    CoarseBatch, ProbeCatalogItem, ProbePointName, ProbeRecord, ProbeRef, ProbeWatchView,
+};
 use crate::topology::{BoardSpec, DirectedEdge, PayloadKind, PortRef};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
@@ -42,6 +44,17 @@ struct MockBackend {
     watch: Mutex<Vec<ProbeRef>>,
     /// Coarse batches returned by `probe_watch_live` (filtered by fetch floor).
     coarse: Mutex<Vec<CoarseBatch>>,
+    csv_probes: Mutex<Vec<ProbePointName>>,
+    csv_started: Mutex<Option<u64>>,
+    csv_poll_state: Mutex<MockCsvPollState>,
+}
+
+struct MockCsvPollState {
+    request_id: u64,
+    pending: Vec<ProbeRecord>,
+    done: bool,
+    failed: bool,
+    truncated: bool,
 }
 
 impl MockBackend {
@@ -75,6 +88,15 @@ impl MockBackend {
             catalog: Mutex::new(Vec::new()),
             watch: Mutex::new(Vec::new()),
             coarse: Mutex::new(Vec::new()),
+            csv_probes: Mutex::new(Vec::new()),
+            csv_started: Mutex::new(None),
+            csv_poll_state: Mutex::new(MockCsvPollState {
+                request_id: 0,
+                pending: Vec::new(),
+                done: true,
+                failed: false,
+                truncated: false,
+            }),
         })
     }
 
@@ -275,14 +297,37 @@ impl SimulationBackend for MockBackend {
         &self,
         _: &str,
         _: crate::probe_log::ProbeRange,
+        request_id: u64,
     ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
-        Err(ApiError::internal("unused"))
+        let probes = self.csv_probes.lock().unwrap().clone();
+        *self.csv_started.lock().unwrap() = Some(request_id);
+        self.csv_poll_state.lock().unwrap().request_id = request_id;
+        Ok((request_id, probes))
     }
-    fn csv_poll(&self, _: &str, _: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
-        Err(ApiError::internal("unused"))
+    fn csv_poll(&self, _: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+        let mut state = self.csv_poll_state.lock().unwrap();
+        if state.request_id != request_id {
+            return Err(ApiError::not_found("unknown csv export"));
+        }
+        let records = std::mem::take(&mut state.pending);
+        Ok(crate::probe_log::CsvPoll {
+            records,
+            done: state.done,
+            failed: state.failed,
+            truncated: state.truncated,
+        })
     }
-    fn csv_status(&self, _: &str, _: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
-        Err(ApiError::internal("unused"))
+    fn csv_status(&self, _: &str, request_id: u64) -> Result<crate::probe_log::CsvPoll, ApiError> {
+        let state = self.csv_poll_state.lock().unwrap();
+        if state.request_id != request_id {
+            return Err(ApiError::not_found("unknown csv export"));
+        }
+        Ok(crate::probe_log::CsvPoll {
+            records: Vec::new(),
+            done: state.done,
+            failed: state.failed,
+            truncated: state.truncated,
+        })
     }
     fn probe_samples(
         &self,
@@ -1252,4 +1297,119 @@ fn probe_watch_live_dedupes_host_seq_and_sets_cursor_vt() {
     let third = fe.probe_watch_live(&id, second.cursor_vt).unwrap();
     assert_eq!(third.batches.len(), 1);
     assert_eq!(third.batches[0].seq, 2);
+}
+
+#[test]
+fn csv_start_shares_request_id_and_merges_probes() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    *b0.csv_probes.lock().unwrap() = vec![ProbePointName {
+        probe_id: HashedId::new(1),
+        board_hash: board_id_hash("a"),
+        board_label: "a".into(),
+        name: "p0".into(),
+        kind: crate::probe_log::ProbeKind::Digital,
+    }];
+    *b1.csv_probes.lock().unwrap() = vec![
+        ProbePointName {
+            probe_id: HashedId::new(1),
+            board_hash: board_id_hash("a"),
+            board_label: "a".into(),
+            name: "p0-dup".into(),
+            kind: crate::probe_log::ProbeKind::Digital,
+        },
+        ProbePointName {
+            probe_id: HashedId::new(2),
+            board_hash: board_id_hash("b"),
+            board_label: "b".into(),
+            name: "p1".into(),
+            kind: crate::probe_log::ProbeKind::Digital,
+        },
+    ];
+    let fe = two_server_frontend(b0.clone(), b1.clone());
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    let (request_id, probes) = fe
+        .csv_start(
+            &id,
+            crate::probe_log::ProbeRange {
+                from_ns: None,
+                to_ns: None,
+            },
+            0,
+        )
+        .unwrap();
+    assert_eq!(b0.csv_started.lock().unwrap().as_ref(), Some(&request_id));
+    assert_eq!(b1.csv_started.lock().unwrap().as_ref(), Some(&request_id));
+    assert_eq!(probes.len(), 2);
+    assert_eq!(probes[0].name, "p0");
+    assert_eq!(probes[1].name, "p1");
+}
+
+#[test]
+fn csv_poll_keeps_global_time_order_across_polls() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    let fe = two_server_frontend(b0.clone(), b1.clone());
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    let (request_id, _) = fe
+        .csv_start(
+            &id,
+            crate::probe_log::ProbeRange {
+                from_ns: None,
+                to_ns: None,
+            },
+            0,
+        )
+        .unwrap();
+
+    let rec = |vt: u64, probe: u64| ProbeRecord {
+        probe_id: HashedId::new(probe),
+        virtual_time_ns: vt,
+        kind: crate::probe_log::ProbeKind::Digital,
+        value: 0,
+    };
+
+    // Poll 1: host0 has t=100 done; host1 still waiting (not done, empty) → emit nothing yet.
+    {
+        let mut s0 = b0.csv_poll_state.lock().unwrap();
+        s0.request_id = request_id;
+        s0.pending = vec![rec(100, 1)];
+        s0.done = true;
+    }
+    {
+        let mut s1 = b1.csv_poll_state.lock().unwrap();
+        s1.request_id = request_id;
+        s1.pending.clear();
+        s1.done = false;
+    }
+    let first = fe.csv_poll(&id, request_id).unwrap();
+    assert!(first.records.is_empty());
+    assert!(!first.done);
+
+    // Poll 2: host1 delivers t=50 then done → emit 50 then 100.
+    {
+        let mut s1 = b1.csv_poll_state.lock().unwrap();
+        s1.pending = vec![rec(50, 2)];
+        s1.done = true;
+    }
+    let second = fe.csv_poll(&id, request_id).unwrap();
+    assert_eq!(second.records.len(), 2);
+    assert_eq!(second.records[0].virtual_time_ns, 50);
+    assert_eq!(second.records[1].virtual_time_ns, 100);
+    assert!(second.done);
+    assert!(!second.failed);
 }

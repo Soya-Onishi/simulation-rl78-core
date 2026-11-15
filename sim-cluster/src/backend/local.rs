@@ -240,10 +240,12 @@ impl SimulationBackend for LocalBackend {
         &self,
         id: &str,
         range: crate::probe_log::ProbeRange,
+        request_id: u64,
     ) -> Result<(u64, Vec<crate::probe_log::ProbePointName>), ApiError> {
         match self.rpc(JobKind::ProbeCsvStart {
             id: id.to_string(),
             range,
+            request_id,
         })? {
             JobReply::ProbeCsvStart {
                 request_id,
