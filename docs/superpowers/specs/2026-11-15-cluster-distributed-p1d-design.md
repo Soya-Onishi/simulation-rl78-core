@@ -99,7 +99,9 @@ Lifecycle:
 
 Concurrent `log_high_water` / `logs_after` for the same sim share that sim’s `Arc<Mutex<LogAggregate>>` around the whole pull+ingest so one caller cannot advance global seq under another’s in-flight subscribe. Other simulations do not block each other.
 
-Status and log fanout use a bounded wait (`OBSERVE_FANOUT_TIMEOUT`, 2s): timed-out participants are treated as `Err` and omitted. Control fanout still waits for every participant.
+Status / log HTTP RPCs on `TcpipBackend` use a 2s observe timeout (control stays at 60s). Observe fanout uses `thread::scope` (join all workers); no detached threads.
+
+On `log_high_water` (SSE subscribe), a participant that fails the log pull has its `backend.log_high_water` applied as a cursor skip without ingesting lines. If that high-water call also fails, the backend is marked `baseline_pending`: the first later successful pull advances the cursor over that batch without emitting it. Live `logs_after` still omits failed peers for that poll, but honors `baseline_pending` when a peer recovers.
 
 **Assumptions (local backend):** local seq is strictly increasing per append; `logs_after` may resend seqs already seen — step 3’s `event.seq > per_backend_after[m]` dedupes. Gaps: advance only on ingested seqs (skip hole until it appears or is never filled).
 

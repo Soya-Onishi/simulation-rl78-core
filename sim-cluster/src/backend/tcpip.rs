@@ -19,6 +19,9 @@ use super::SimulationBackend;
 use super::wire::{CsvStartBody, ExistsBody, HealthBody, HighWaterBody, ViewerTokenBody};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bound for status / log GETs so observe fanout can join workers promptly
+/// instead of leaking detached threads for the full control-plane timeout.
+const OBSERVE_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// HTTP client for one `cluster-backend`.
 #[derive(Clone)]
@@ -58,7 +61,15 @@ fn encode_path_segment(raw: &str) -> String {
 
 impl TcpipBackend {
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
-        read_json(get(&self.url(path), RPC_TIMEOUT)?)
+        self.get_json_timeout(path, RPC_TIMEOUT)
+    }
+
+    fn get_json_timeout<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, ApiError> {
+        read_json(get(&self.url(path), timeout)?)
     }
 
     fn post_json<B: Serialize>(
@@ -237,7 +248,10 @@ impl SimulationBackend for TcpipBackend {
     }
 
     fn status(&self, id: &str) -> Result<StatusEvent, ApiError> {
-        self.get_json(&format!("/internal/simulations/{id}/status"))
+        self.get_json_timeout(
+            &format!("/internal/simulations/{id}/status"),
+            OBSERVE_RPC_TIMEOUT,
+        )
     }
 
     fn topology(&self, id: &str) -> Result<crate::contract::TopologyView, ApiError> {
@@ -245,12 +259,18 @@ impl SimulationBackend for TcpipBackend {
     }
 
     fn logs_after(&self, id: &str, after: u64) -> Result<Vec<LogEvent>, ApiError> {
-        self.get_json(&format!("/internal/simulations/{id}/logs?after={after}"))
+        self.get_json_timeout(
+            &format!("/internal/simulations/{id}/logs?after={after}"),
+            OBSERVE_RPC_TIMEOUT,
+        )
     }
 
     fn log_high_water(&self, id: &str) -> Result<u64, ApiError> {
         Ok(self
-            .get_json::<HighWaterBody>(&format!("/internal/simulations/{id}/logs/high-water"))?
+            .get_json_timeout::<HighWaterBody>(
+                &format!("/internal/simulations/{id}/logs/high-water"),
+                OBSERVE_RPC_TIMEOUT,
+            )?
             .seq)
     }
 

@@ -1,6 +1,6 @@
 //! Status merge and frontend log aggregate for multi-backend simulations (p1d).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::config::MachineId;
 use crate::contract::{LogEvent, StatusEvent};
@@ -16,6 +16,9 @@ pub(crate) struct LogAggregate {
     /// Next global seq to assign (1-based, matching backend `next_seq`).
     next_seq: u64,
     buffer: VecDeque<LogEvent>,
+    /// Subscribe could not learn a backend high-water; first successful pull
+    /// must advance the cursor over that backlog without emitting lines.
+    baseline_pending: HashSet<MachineId>,
 }
 
 impl LogAggregate {
@@ -24,6 +27,7 @@ impl LogAggregate {
             per_backend_after: HashMap::new(),
             next_seq: 1,
             buffer: VecDeque::new(),
+            baseline_pending: HashSet::new(),
         }
     }
 
@@ -36,6 +40,26 @@ impl LogAggregate {
             .get(&machine_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Skip local seqs up to `local_hw` without ingesting lines (subscribe-time
+    /// omit of backlog on a backend that failed the pull).
+    pub(crate) fn advance_backend_cursor(&mut self, machine_id: MachineId, local_hw: u64) {
+        let cur = self.after_for(machine_id);
+        if local_hw > cur {
+            self.per_backend_after.insert(machine_id, local_hw);
+        }
+        self.baseline_pending.remove(&machine_id);
+    }
+
+    pub(crate) fn mark_baseline_pending(&mut self, machine_id: MachineId) {
+        self.baseline_pending.insert(machine_id);
+    }
+
+    /// If this backend still needs a subscribe baseline, consume the flag and
+    /// return true so the caller can skip the first recovered batch.
+    pub(crate) fn take_baseline_pending(&mut self, machine_id: MachineId) -> bool {
+        self.baseline_pending.remove(&machine_id)
     }
 
     /// Append newly fetched backend batches. `batches` must already be in the
@@ -260,5 +284,36 @@ mod tests {
         }
         assert_eq!(agg.buffer.len(), LOG_CAP);
         assert_eq!(agg.after(0).first().unwrap().text, "x0");
+    }
+
+    #[test]
+    fn advance_backend_cursor_skips_without_ingest() {
+        let mut agg = LogAggregate::new();
+        let m0 = MachineId::from_u32(1);
+        agg.advance_backend_cursor(m0, 5);
+        assert_eq!(agg.after_for(m0), 5);
+        assert_eq!(agg.high_water(), 0);
+        let mk = |seq: u64| LogEvent {
+            seq,
+            level: "info".into(),
+            origin: "t".into(),
+            board: None,
+            text: format!("s{seq}"),
+        };
+        agg.ingest(vec![(m0, vec![mk(3), mk(5), mk(6)])]);
+        assert_eq!(agg.after(0).len(), 1);
+        assert_eq!(agg.after(0)[0].text, "s6");
+    }
+
+    #[test]
+    fn baseline_pending_clears_on_advance() {
+        let mut agg = LogAggregate::new();
+        let m0 = MachineId::from_u32(1);
+        agg.mark_baseline_pending(m0);
+        assert!(agg.take_baseline_pending(m0));
+        assert!(!agg.take_baseline_pending(m0));
+        agg.mark_baseline_pending(m0);
+        agg.advance_backend_cursor(m0, 3);
+        assert!(!agg.take_baseline_pending(m0));
     }
 }

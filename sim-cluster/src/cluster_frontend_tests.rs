@@ -5,7 +5,7 @@ use crate::host::SessionNode;
 use crate::topology::{BoardSpec, DirectedEdge, PayloadKind, PortRef};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 struct MockBackend {
     name: String,
@@ -17,6 +17,7 @@ struct MockBackend {
     fail_start: AtomicBool,
     fail_status: AtomicBool,
     fail_logs: AtomicBool,
+    fail_log_high_water: AtomicBool,
     /// Remaining times `shutdown` should return an error before removing.
     shutdown_failures: AtomicUsize,
     status_delay: Mutex<Duration>,
@@ -43,6 +44,7 @@ impl MockBackend {
             fail_start: AtomicBool::new(false),
             fail_status: AtomicBool::new(false),
             fail_logs: AtomicBool::new(false),
+            fail_log_high_water: AtomicBool::new(false),
             shutdown_failures: AtomicUsize::new(shutdown_failures),
             status_delay: Mutex::new(Duration::ZERO),
             logs_delay: Mutex::new(Duration::ZERO),
@@ -200,6 +202,9 @@ impl SimulationBackend for MockBackend {
         Ok(entries.iter().filter(|e| e.seq > after).cloned().collect())
     }
     fn log_high_water(&self, id: &str) -> Result<u64, ApiError> {
+        if self.fail_log_high_water.load(Ordering::SeqCst) {
+            return Err(ApiError::internal(format!("{} high-water boom", self.name)));
+        }
         let seqs = self.next_log_seq.lock().unwrap();
         Ok(seqs.get(id).map(|s| s.saturating_sub(1)).unwrap_or(0))
     }
@@ -833,13 +838,11 @@ fn status_stop_reason_when_all_stopped() {
 }
 
 #[test]
-fn status_omits_timed_out_backend_quickly() {
+fn log_high_water_skips_failed_backend_backlog() {
     let b0 = MockBackend::new("s0");
     let b1 = MockBackend::new("s1");
-    *b1.status_delay.lock().unwrap() = Duration::from_secs(30);
-    *b0.session_state.lock().unwrap() = "running".into();
-    b0.virtual_time_ns.store(9, Ordering::SeqCst);
-    let fe = two_server_frontend(b0.clone(), b1);
+    b1.fail_logs.store(true, Ordering::SeqCst);
+    let fe = two_server_frontend(b0.clone(), b1.clone());
     let id = fe
         .create(CreateSimulationRequest {
             topology: topo_two_disconnected(),
@@ -848,15 +851,48 @@ fn status_omits_timed_out_backend_quickly() {
             assigned_boards: None,
         })
         .unwrap();
-    let started = Instant::now();
-    let status = fe.status(&id).unwrap();
+    b0.push_log(&id, "from-0");
+    b1.push_log(&id, "hidden-backlog");
+    let hw = fe.log_high_water(&id).unwrap();
+    assert_eq!(hw, 1, "only successful backend lines are ingested");
+    b1.fail_logs.store(false, Ordering::SeqCst);
+    // Cursor was advanced past b1's backlog at subscribe; must not replay.
     assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "status waited too long for hung backend"
+        fe.logs_after(&id, hw).unwrap().is_empty(),
+        "failed-backend backlog must not appear after subscribe high-water"
     );
-    assert_eq!(status.state, "running");
-    assert_eq!(status.virtual_time_ns, 9);
-    assert_eq!(status.nodes.len(), 1);
+    b1.push_log(&id, "after-subscribe");
+    let fresh = fe.logs_after(&id, hw).unwrap();
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].text, "after-subscribe");
+}
+
+#[test]
+fn log_high_water_defers_skip_when_high_water_also_fails() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    b1.fail_logs.store(true, Ordering::SeqCst);
+    b1.fail_log_high_water.store(true, Ordering::SeqCst);
+    let fe = two_server_frontend(b0.clone(), b1.clone());
+    let id = fe
+        .create(CreateSimulationRequest {
+            topology: topo_two_disconnected(),
+            id: None,
+            multicast: None,
+            assigned_boards: None,
+        })
+        .unwrap();
+    b1.push_log(&id, "dead-backlog");
+    let hw = fe.log_high_water(&id).unwrap();
+    assert_eq!(hw, 0);
+    b1.fail_logs.store(false, Ordering::SeqCst);
+    b1.fail_log_high_water.store(false, Ordering::SeqCst);
+    // First recovered pull must skip backlog (baseline pending), not emit it.
+    assert!(fe.logs_after(&id, hw).unwrap().is_empty());
+    b1.push_log(&id, "after-recover");
+    let fresh = fe.logs_after(&id, hw).unwrap();
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].text, "after-recover");
 }
 
 #[test]
