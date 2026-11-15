@@ -1079,3 +1079,14 @@ fn single_board_apis_route_to_hosting_backend() {
         .unwrap_err();
     assert_eq!(err.code, "unknown_board");
 }
+
+#[test]
+fn single_board_apis_unknown_simulation() {
+    let b0 = MockBackend::new("s0");
+    let b1 = MockBackend::new("s1");
+    let fe = two_server_frontend(b0, b1);
+    let err = fe
+        .inspect("no-such-sim", board_id_hash("a"), InspectRequest::ReadRegs)
+        .unwrap_err();
+    assert_eq!(err.code, "not_found");
+}
