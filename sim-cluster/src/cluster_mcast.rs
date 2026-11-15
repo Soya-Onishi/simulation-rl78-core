@@ -307,16 +307,19 @@ pub fn allocate_multicast(
     None
 }
 
-/// First-Fit board placement onto servers (topology board order × servers order).
+/// First-Fit board placement onto backends keyed by `machine_id`.
+///
+/// Boards are taken in `board_ids` order. For each board, backends are tried in
+/// [`HashMap::iter`] order over `remaining` (not YAML `servers[]` order).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoardPlacement {
-    /// `board_id` → index into the frontend `servers` list.
-    pub board_to_server: Vec<(String, usize)>,
+    /// `board_id` → backend `machine_id`.
+    pub board_to_server: Vec<(String, u32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlacementError {
-    InsufficientCapacity { boards: usize, free_slots: u32 },
+    InsufficientCapacity { boards: usize, free_slots: u64 },
 }
 
 impl std::fmt::Display for PlacementError {
@@ -332,32 +335,43 @@ impl std::fmt::Display for PlacementError {
 
 impl std::error::Error for PlacementError {}
 
-/// Place `board_ids` with First-Fit using remaining capacity per server.
+/// Place `board_ids` with First-Fit over `remaining` (`machine_id` → free slots).
 pub fn place_boards_first_fit(
     board_ids: &[String],
-    remaining: &mut [u32],
+    remaining: &mut HashMap<u32, u32>,
 ) -> Result<BoardPlacement, PlacementError> {
-    let free_slots: u32 = remaining.iter().copied().sum();
-    if (board_ids.len() as u32) > free_slots {
+    let free_slots: u64 = remaining.values().map(|slots| u64::from(*slots)).sum();
+    let need = board_ids.len() as u64;
+    if need > free_slots {
         return Err(PlacementError::InsufficientCapacity {
             boards: board_ids.len(),
             free_slots,
         });
     }
     let mut board_to_server = Vec::with_capacity(board_ids.len());
-    let mut server = 0usize;
     for board_id in board_ids {
-        while server < remaining.len() && remaining[server] == 0 {
-            server += 1;
-        }
-        debug_assert!(server < remaining.len());
-        remaining[server] -= 1;
-        board_to_server.push((board_id.clone(), server));
+        let Some(machine_id) = remaining
+            .iter()
+            .find_map(|(id, &slots)| (slots > 0).then_some(*id))
+        else {
+            return Err(PlacementError::InsufficientCapacity {
+                boards: board_ids.len(),
+                free_slots: 0,
+            });
+        };
+        let Some(slots) = remaining.get_mut(&machine_id) else {
+            return Err(PlacementError::InsufficientCapacity {
+                boards: board_ids.len(),
+                free_slots: 0,
+            });
+        };
+        *slots -= 1;
+        board_to_server.push((board_id.clone(), machine_id));
     }
     Ok(BoardPlacement { board_to_server })
 }
 
-/// True when any topology edge connects boards on different servers.
+/// True when any topology edge connects boards on different backends (`machine_id`).
 ///
 /// Missing board ids in `board_server` also return true (fail closed) so create
 /// cannot silently accept incomplete placement maps.
@@ -368,7 +382,7 @@ pub fn place_boards_first_fit(
 #[must_use]
 pub fn has_cross_host_edge(
     edges: &[(String, String)],
-    board_server: &HashMap<String, usize>,
+    board_server: &HashMap<String, u32>,
 ) -> bool {
     edges
         .iter()
@@ -446,20 +460,27 @@ mod tests {
     #[test]
     fn first_fit_placement() {
         let boards = vec!["a".into(), "b".into(), "c".into()];
-        let mut rem = [2, 2];
+        let mut rem = HashMap::from([(10, 2u32), (20, 2u32)]);
         let place = place_boards_first_fit(&boards, &mut rem).unwrap();
-        assert_eq!(
-            place.board_to_server,
-            vec![("a".into(), 0), ("b".into(), 0), ("c".into(), 1)]
-        );
-        assert_eq!(rem, [0, 1]);
+        assert_eq!(place.board_to_server.len(), 3);
+        let free: u32 = rem.values().copied().sum();
+        assert_eq!(free, 1);
+        for (board, mid) in &place.board_to_server {
+            assert!(*mid == 10 || *mid == 20, "{board} -> {mid}");
+        }
+        // First-Fit packs into the first HashMap::iter entry until full.
+        let first_mid = place.board_to_server[0].1;
+        assert_eq!(place.board_to_server[0].1, first_mid);
+        assert_eq!(place.board_to_server[1].1, first_mid);
+        assert_ne!(place.board_to_server[2].1, first_mid);
+        assert_eq!(rem.get(&first_mid), Some(&0));
     }
 
     #[test]
     fn cross_host_edge_detect() {
         let mut map = HashMap::new();
-        map.insert("a".into(), 0);
-        map.insert("b".into(), 1);
+        map.insert("a".into(), 10);
+        map.insert("b".into(), 20);
         assert!(has_cross_host_edge(&[("a".into(), "b".into())], &map));
         assert!(!has_cross_host_edge(&[("a".into(), "a".into())], &map));
         // Incomplete placement map must not be treated as same-host.

@@ -17,7 +17,7 @@ Related: `mem:core`, grill session for cluster multicast / VT / phases.
 - Phase 1: IPv6 unsupported (error).
 
 ## Create
-- Frontend First-Fit: walk `boards[]` order, fill `servers[]` in order up to remaining `max_nodes` (capacity is concurrent board processes across all sims on that backend).
+- Frontend First-Fit: walk `boards[]` order; for each board, assign to the first backend with remaining capacity while iterating a `machine_id → remaining` HashMap (`HashMap::iter` order — not YAML `servers[]` order). Capacity is concurrent board processes across all sims on that backend. `ClusterFrontend` keys backends by `machine_id`.
 - One node = one topology `boards[]` entry (including plant kinds).
 - Payload to each participating backend: full topology JSON, assigned board ids, and (if multicast used) multicast address+port.
 - Backend spawns **only** assigned boards; keeps full topology for local edges.
