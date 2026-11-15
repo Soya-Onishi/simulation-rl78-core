@@ -19,8 +19,8 @@ use super::runtime::IpcError;
 /// a smaller ring than analog (256) is enough.
 pub const DEFAULT_PULSE_RING_LEN: usize = 64;
 
-type PulsePub = Publisher<ipc::Service, Pulse, ()>;
-type PulseSub = Subscriber<ipc::Service, Pulse, ()>;
+pub(crate) type PulsePub = Publisher<ipc::Service, Pulse, ()>;
+pub(crate) type PulseSub = Subscriber<ipc::Service, Pulse, ()>;
 
 /// Node pulse endpoints for this board.
 pub struct NodePulsePorts {
@@ -64,7 +64,7 @@ impl NodePulsePorts {
     }
 }
 
-fn open_or_create_pulse_publisher(
+pub(crate) fn open_or_create_pulse_publisher(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,
@@ -87,7 +87,7 @@ fn open_or_create_pulse_publisher(
         .map_err(|e| IpcError::Message(format!("pulse publisher {name}: {e:?}")))
 }
 
-fn open_or_create_pulse_subscriber(
+pub(crate) fn open_or_create_pulse_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,

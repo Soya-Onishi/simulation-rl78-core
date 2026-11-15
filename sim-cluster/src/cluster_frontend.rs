@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::backend::SimulationBackend;
-use crate::cluster_mcast::{allocate_multicast, has_cross_host_edge, place_boards_first_fit};
+use crate::cluster_mcast::{
+    allocate_multicast, has_cross_host_digital_edge, place_boards_first_fit,
+};
 use crate::cluster_observe::LogAggregate;
 use crate::config::MachineId;
 use crate::contract::{
@@ -107,13 +109,6 @@ impl ClusterFrontend {
             .map_err(|_| ApiError::internal("ClusterFrontend state poisoned"))
     }
 
-    fn edge_pairs(topo: &LogicalTopology) -> Vec<(String, String)> {
-        topo.edges
-            .iter()
-            .map(|e| (e.from.path.clone(), e.to.path.clone()))
-            .collect()
-    }
-
     /// Multicast pairs reserved by live `SimRecord`s (no separate used_mcast cache).
     fn used_multicast(state: &FrontendState) -> Vec<(Ipv4Addr, u16)> {
         state.sims.values().filter_map(|rec| rec.mcast).collect()
@@ -149,12 +144,11 @@ impl ClusterFrontend {
 
         let board_server: HashMap<String, MachineId> =
             placement.board_to_server.iter().cloned().collect();
-        let edges = Self::edge_pairs(topo);
-        // TODO(cluster-distributed-p2): remove once cross-host endpoint multicast exists.
-        if has_cross_host_edge(&edges, &board_server) {
+        // TODO(cluster-distributed-p2): reject until Digital board-edge IPC exists.
+        if has_cross_host_digital_edge(&topo.edges, &board_server) {
             return Err(ApiError::bad_request(
                 "cross_host_edge",
-                "topology has an edge whose endpoints land on different backends (unsupported until p2)",
+                "topology has a Digital edge whose endpoints land on different backends (unsupported until Digital IPC)",
             ));
         }
 

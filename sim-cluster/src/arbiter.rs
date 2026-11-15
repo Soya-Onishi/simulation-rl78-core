@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::cluster_mcast::{ClusterMulticast, MulticastMessage, RemoteVtTable, VtPublishThrottle};
+use crate::endpoint_bridge::{EndpointBridge, should_ignore_endpoint};
 
 /// Ensures board/plant children are killed on early return or panic.
 struct ChildGuard {
@@ -416,6 +417,24 @@ fn run_host_session(
             return Err(err);
         }
     };
+    let endpoint_bridge = if mcast_plane.is_some() {
+        match EndpointBridge::open(&node, &opts.cluster_key, topo, &local_boards) {
+            Ok(bridge) => {
+                log::info!(
+                    "endpoint bridge open (egress={}, ingress={})",
+                    bridge.egress_len(),
+                    bridge.ingress_len()
+                );
+                Some(bridge)
+            }
+            Err(err) => {
+                logs.shutdown();
+                return Err(ArbiterError::Ipc(err));
+            }
+        }
+    } else {
+        None
+    };
     let children = match spawn_nodes(opts, topo, &local_boards) {
         Ok(children) => ChildGuard::new(children),
         Err(err) => {
@@ -575,7 +594,19 @@ fn run_host_session(
         }
 
         if let Some(plane) = mcast_plane.as_mut() {
-            if let Some(reason) = poll_mcast_plane(plane, &vt, &control, &mut peers, running)? {
+            if let Some(bridge) = endpoint_bridge.as_ref() {
+                if let Err(err) = bridge.pump_egress(&plane.sock, plane.sock.machine_id()) {
+                    log::warn!("endpoint bridge egress: {err}");
+                }
+            }
+            if let Some(reason) = poll_mcast_plane(
+                plane,
+                &vt,
+                &control,
+                &mut peers,
+                running,
+                endpoint_bridge.as_ref(),
+            )? {
                 running = false;
                 until_cap = None;
                 gdb_step = None;
@@ -1054,22 +1085,24 @@ fn poll_mcast_plane(
     control: &ArbiterControl,
     peers: &mut HashMap<String, PeerState>,
     running: bool,
+    endpoint_bridge: Option<&EndpointBridge>,
 ) -> Result<Option<HostStopReason>, ArbiterError> {
     let mut remote_stop = None;
+    let local_id = plane.sock.machine_id();
     for msg in plane.sock.recv_all()? {
-        match msg {
+        match &msg {
             MulticastMessage::VtMin {
                 machine_id,
                 min_vt_ns,
             } => {
-                if machine_id == plane.sock.machine_id() {
+                if *machine_id == local_id {
                     continue;
                 }
-                let agg = plane.remotes.upsert(machine_id, min_vt_ns);
+                let agg = plane.remotes.upsert(*machine_id, *min_vt_ns);
                 vt.set_remote_min_ns(agg);
             }
             MulticastMessage::ClusterStop { machine_id, reason } => {
-                if machine_id == plane.sock.machine_id() {
+                if *machine_id == local_id {
                     continue;
                 }
                 if running {
@@ -1078,11 +1111,24 @@ fn poll_mcast_plane(
                         control,
                         peers,
                         "multicast",
-                        reason,
+                        *reason,
                         Some(&plane.sock),
                         false,
                     )?;
-                    remote_stop = Some(reason);
+                    remote_stop = Some(*reason);
+                }
+            }
+            MulticastMessage::Endpoint {
+                machine_id,
+                edge_id,
+                payload_kind,
+                payload,
+            } => {
+                if should_ignore_endpoint(*machine_id, local_id) {
+                    continue;
+                }
+                if let Some(bridge) = endpoint_bridge {
+                    bridge.handle_endpoint(*edge_id, *payload_kind, payload);
                 }
             }
         }

@@ -16,8 +16,8 @@ use super::runtime::IpcError;
 /// Default analog edge subscriber buffer.
 pub const DEFAULT_ANALOG_RING_LEN: usize = 256;
 
-type AnalogPub = Publisher<ipc::Service, AnalogVoltage, ()>;
-type AnalogSub = Subscriber<ipc::Service, AnalogVoltage, ()>;
+pub(crate) type AnalogPub = Publisher<ipc::Service, AnalogVoltage, ()>;
+pub(crate) type AnalogSub = Subscriber<ipc::Service, AnalogVoltage, ()>;
 
 /// Node analog endpoints for this board.
 pub struct NodeAnalogPorts {
@@ -62,7 +62,7 @@ impl NodeAnalogPorts {
     }
 }
 
-fn open_or_create_analog_publisher(
+pub(crate) fn open_or_create_analog_publisher(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,
@@ -85,7 +85,7 @@ fn open_or_create_analog_publisher(
         .map_err(|e| IpcError::Message(format!("analog publisher {name}: {e:?}")))
 }
 
-fn open_or_create_analog_subscriber(
+pub(crate) fn open_or_create_analog_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,

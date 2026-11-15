@@ -19,8 +19,8 @@ use super::runtime::IpcError;
 /// plant step, not as rare waveform-parameter changes like pulse (64).
 pub const DEFAULT_SCALAR_RING_LEN: usize = 256;
 
-type ScalarPub = Publisher<ipc::Service, Scalar, ()>;
-type ScalarSub = Subscriber<ipc::Service, Scalar, ()>;
+pub(crate) type ScalarPub = Publisher<ipc::Service, Scalar, ()>;
+pub(crate) type ScalarSub = Subscriber<ipc::Service, Scalar, ()>;
 
 /// Node scalar endpoints for this board.
 pub struct NodeScalarPorts {
@@ -65,7 +65,7 @@ impl NodeScalarPorts {
     }
 }
 
-fn open_or_create_scalar_publisher(
+pub(crate) fn open_or_create_scalar_publisher(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,
@@ -88,7 +88,7 @@ fn open_or_create_scalar_publisher(
         .map_err(|e| IpcError::Message(format!("scalar publisher {name}: {e:?}")))
 }
 
-fn open_or_create_scalar_subscriber(
+pub(crate) fn open_or_create_scalar_subscriber(
     node: &Node<ipc::Service>,
     name: &str,
     capacity: usize,

@@ -16,7 +16,10 @@ pub(crate) mod server_arbiter;
 mod uart_bus;
 
 pub use action_bus::{ArbiterNodeActions, NodeActions};
-pub use analog_bus::NodeAnalogPorts;
+pub(crate) use analog_bus::{
+    AnalogPub, AnalogSub, open_or_create_analog_publisher, open_or_create_analog_subscriber,
+};
+pub use analog_bus::{DEFAULT_ANALOG_RING_LEN, NodeAnalogPorts};
 pub use control_bus::{ArbiterControl, NodeControl};
 pub use hash::{
     HashedId, Hexable, board_hash_table, board_id_hash, edge_hash_table, edge_id_hash,
@@ -40,11 +43,20 @@ pub use probe_ctrl::{
     QUERY_REPLY_LAST, QUERY_REPLY_TRUNCATED,
 };
 pub use probe_forward::{MSG_CATALOG, MSG_CATALOG_END, MSG_SAMPLE, ProbeToServer};
-pub use pulse_bus::NodePulsePorts;
+pub use pulse_bus::{DEFAULT_PULSE_RING_LEN, NodePulsePorts};
+pub(crate) use pulse_bus::{
+    PulsePub, PulseSub, open_or_create_pulse_publisher, open_or_create_pulse_subscriber,
+};
 pub use runtime::{IpcError, create_node, isolated_config, new_cluster_key, root_path_for_cluster};
-pub use scalar_bus::NodeScalarPorts;
+pub use scalar_bus::{DEFAULT_SCALAR_RING_LEN, NodeScalarPorts};
+pub(crate) use scalar_bus::{
+    ScalarPub, ScalarSub, open_or_create_scalar_publisher, open_or_create_scalar_subscriber,
+};
 pub use server_arbiter::{
     ArbiterHostPort, ArbiterLink, ArbiterProbeForward, ArbiterServerActions, ServerActions,
     ServerHostPort, ServerLink, ServerLogInbox, ServerProbeCtrl, ServerProbeInbox, open_pair,
 };
 pub use uart_bus::NodeUartPorts;
+pub(crate) use uart_bus::{
+    UartPub, UartSub, open_or_create_uart_publisher, open_or_create_uart_subscriber,
+};
