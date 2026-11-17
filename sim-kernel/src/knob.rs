@@ -157,13 +157,11 @@ mod tests {
     fn set_rejects_out_of_range() {
         let mut knob = Knob::new("pressure", 1.0, 0.0, 2.0, Some("norm"), "set pressure").unwrap();
         let hash = id_hash(SET_ID);
-        knob
-            .apply(hash, Tick::ZERO, &[(id_hash(VALUE_ID), 1.5)])
+        knob.apply(hash, Tick::ZERO, &[(id_hash(VALUE_ID), 1.5)])
             .unwrap();
         assert_eq!(knob.get(), 1.5);
         assert!(
-            knob
-                .apply(hash, Tick::ZERO, &[(id_hash(VALUE_ID), 2.5)])
+            knob.apply(hash, Tick::ZERO, &[(id_hash(VALUE_ID), 2.5)])
                 .is_err()
         );
     }

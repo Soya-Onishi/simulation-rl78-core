@@ -69,11 +69,13 @@ impl BoilerModel {
             });
 
         let flow_st = Arc::clone(&state);
-        let _flow = Wire::new().source(flow.port_mut()).sink(move |values, changed| {
-            if let Some(&Scalar(v)) = values.get(changed) {
-                flow_st.lock().expect("boiler").flow_lpm = v.max(0.0);
-            }
-        });
+        let _flow = Wire::new()
+            .source(flow.port_mut())
+            .sink(move |values, changed| {
+                if let Some(&Scalar(v)) = values.get(changed) {
+                    flow_st.lock().expect("boiler").flow_lpm = v.max(0.0);
+                }
+            });
 
         let heat = Arc::clone(&state);
         let _uart = Wire::new()
@@ -237,32 +239,76 @@ fn build_plant() -> (Plant<BoilerModel>, BoardPorts, Vec<ProbePoint>) {
 }
 
 #[cfg(test)]
+fn build_plant_with_ins() -> (
+    Plant<BoilerModel>,
+    InPort<Scalar>,
+    InPort<Scalar>,
+    InPort<UartFrame>,
+) {
+    let mut inlet_temp_c = InPort::new("inlet_temp_c").expect("inlet_temp_c");
+    let mut flow_lpm = InPort::new("flow_lpm").expect("flow_lpm");
+    let mut uart_heat_rx = InPort::new("uart_heat_rx").expect("uart_heat_rx");
+    let outlet_temp_c = OutPort::new("outlet_temp_c").expect("outlet_temp_c");
+    let inlet_therm_v = OutPort::new("inlet_therm_v").expect("inlet_therm_v");
+    let outlet_therm_v = OutPort::new("outlet_therm_v").expect("outlet_therm_v");
+    let flow_pulse = OutPort::new("flow_pulse").expect("flow_pulse");
+    let inlet_tap = ProbeTap::new(
+        "inlet_therm_v",
+        ProbePolicy::MinInterval {
+            min_ns: THERM_PROBE_MIN_NS,
+        },
+    );
+    let outlet_tap = ProbeTap::new(
+        "outlet_therm_v",
+        ProbePolicy::MinInterval {
+            min_ns: THERM_PROBE_MIN_NS,
+        },
+    );
+    let model = BoilerModel::attach(
+        &mut inlet_temp_c,
+        &mut flow_lpm,
+        &mut uart_heat_rx,
+        outlet_temp_c.clone(),
+        inlet_therm_v.clone(),
+        outlet_therm_v.clone(),
+        flow_pulse.clone(),
+        Arc::clone(&inlet_tap),
+        Arc::clone(&outlet_tap),
+    );
+    // Clone after attach so SourcePort shares the wired SolidWire.
+    let inlet_h = inlet_temp_c.clone();
+    let flow_h = flow_lpm.clone();
+    let uart_h = uart_heat_rx.clone();
+    let mut ports = BoardPorts::new();
+    ports.insert_in(inlet_temp_c).expect("inlet_temp_c");
+    ports.insert_in(flow_lpm).expect("flow_lpm");
+    ports.insert_in(uart_heat_rx).expect("uart_heat_rx");
+    ports.insert_out(outlet_temp_c).expect("outlet_temp_c");
+    ports.insert_out(inlet_therm_v).expect("inlet_therm_v");
+    ports.insert_out(outlet_therm_v).expect("outlet_therm_v");
+    ports.insert_out(flow_pulse).expect("flow_pulse");
+    let _ = ports;
+    (Plant::new(model), inlet_h, flow_h, uart_h)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sim_kernel::{UartParity, UartStopBits};
 
     #[test]
     fn zero_flow_freezes_outlet_temp() {
-        let (mut plant, ports, _) = build_plant();
-        ports
-            .in_port::<Scalar>("inlet_temp_c")
-            .unwrap()
-            .receive(Scalar(20.0));
-        ports
-            .in_port::<Scalar>("flow_lpm")
-            .unwrap()
-            .receive(Scalar(0.0));
-        ports
-            .in_port::<UartFrame>("uart_heat_rx")
-            .unwrap()
-            .receive(UartFrame {
-                data: 100,
-                data_bits: 8,
-                bit_time: Tick(100_000),
-                stop_bits: UartStopBits::One,
-                parity: UartParity::None,
-                inverted: false,
-            });
+        let (mut plant, inlet, flow, uart) = build_plant_with_ins();
+        inlet.receive(Scalar(20.0));
+        flow.receive(Scalar(0.0));
+        uart.receive(UartFrame {
+            data: 100,
+            data_bits: 8,
+            bit_time: Tick(100_000),
+            stop_bits: UartStopBits::One,
+            parity: UartParity::None,
+            inverted: false,
+        });
         assert_eq!(plant.model().heat_cmd(), 100);
         let before = plant.model().tout_c();
         for _ in 0..4_000 {
@@ -273,26 +319,17 @@ mod tests {
 
     #[test]
     fn heating_raises_outlet_toward_equilibrium() {
-        let (mut plant, ports, _) = build_plant();
-        ports
-            .in_port::<Scalar>("inlet_temp_c")
-            .unwrap()
-            .receive(Scalar(20.0));
-        ports
-            .in_port::<Scalar>("flow_lpm")
-            .unwrap()
-            .receive(Scalar(10.0));
-        ports
-            .in_port::<UartFrame>("uart_heat_rx")
-            .unwrap()
-            .receive(UartFrame {
-                data: 100,
-                data_bits: 8,
-                bit_time: Tick(100_000),
-                stop_bits: UartStopBits::One,
-                parity: UartParity::None,
-                inverted: false,
-            });
+        let (mut plant, inlet, flow, uart) = build_plant_with_ins();
+        inlet.receive(Scalar(20.0));
+        flow.receive(Scalar(10.0));
+        uart.receive(UartFrame {
+            data: 100,
+            data_bits: 8,
+            bit_time: Tick(100_000),
+            stop_bits: UartStopBits::One,
+            parity: UartParity::None,
+            inverted: false,
+        });
         // P=15000, Tout_eq = 20 + 15000/(60*10) = 45
         for _ in 0..4_000 {
             // 1 s of virtual time
@@ -329,18 +366,15 @@ mod tests {
 
     #[test]
     fn uart_heat_cmd_clips_above_100() {
-        let (plant, ports, _) = build_plant();
-        ports
-            .in_port::<UartFrame>("uart_heat_rx")
-            .unwrap()
-            .receive(UartFrame {
-                data: 200,
-                data_bits: 8,
-                bit_time: Tick(100_000),
-                stop_bits: UartStopBits::One,
-                parity: UartParity::None,
-                inverted: false,
-            });
+        let (plant, _inlet, _flow, uart) = build_plant_with_ins();
+        uart.receive(UartFrame {
+            data: 200,
+            data_bits: 8,
+            bit_time: Tick(100_000),
+            stop_bits: UartStopBits::One,
+            parity: UartParity::None,
+            inverted: false,
+        });
         assert_eq!(plant.model().heat_cmd(), 100);
     }
 }

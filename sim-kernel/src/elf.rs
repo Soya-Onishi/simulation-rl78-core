@@ -4,7 +4,7 @@
 //! bytes onto a [`MemoryBus`]; it does not talk to a translation engine.
 //! Architecture crates flush their own caches in [`Core::load_firmware`].
 
-use object::{read::elf::ProgramHeader, Endianness, Object};
+use object::{Endianness, Object, read::elf::ProgramHeader};
 
 use crate::{BusError, Cpu, FirmwareError, Machine, MemoryBus};
 

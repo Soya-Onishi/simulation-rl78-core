@@ -32,28 +32,12 @@ pub fn action_a2n(cluster_key: &str) -> String {
     format!("sim-cluster/{cluster_key}/action/a2n")
 }
 
-/// Service name for one directed UART edge (`edge_id` is already hashed).
+/// Service name for one directed data-plane edge (`edge_id` is already hashed).
+///
+/// Payload kind is carried by iceoryx `publish_subscribe::<T>()`, not the path.
 #[must_use]
-pub fn uart_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
-    format!("sim-cluster/{cluster_key}/uart/{edge_id}")
-}
-
-/// Service name for one directed analog edge (`edge_id` is already hashed).
-#[must_use]
-pub fn analog_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
-    format!("sim-cluster/{cluster_key}/analog/{edge_id}")
-}
-
-/// Service name for one directed pulse edge (`edge_id` is already hashed).
-#[must_use]
-pub fn pulse_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
-    format!("sim-cluster/{cluster_key}/pulse/{edge_id}")
-}
-
-/// Service name for one directed scalar edge (`edge_id` is already hashed).
-#[must_use]
-pub fn scalar_edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
-    format!("sim-cluster/{cluster_key}/scalar/{edge_id}")
+pub fn edge(cluster_key: &str, edge_id: crate::ipc::HashedId<u64>) -> String {
+    sim_kernel::edge_service_name(cluster_key, &edge_id.to_string())
 }
 
 /// Service name for one board probe point.
@@ -112,39 +96,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uart_edge_names_distinguish_similar_edges() {
+    fn edge_names_distinguish_similar_edges() {
         let a = edge_id("a", "tx", "b", "rx");
         let b = edge_id("a_tx", "", "b_rx", "");
-        // Distinct logical strings must not share a service name.
-        assert_ne!(uart_edge("k", a), uart_edge("k", b));
-        assert_eq!(uart_edge("k", a), uart_edge("k", a));
-    }
-
-    #[test]
-    fn analog_edge_names_distinguish_similar_edges() {
-        let a = edge_id("a", "dac0", "p", "vin");
-        let b = edge_id("a_dac0", "", "p_vin", "");
-        assert_ne!(analog_edge("k", a), analog_edge("k", b));
-        assert_eq!(analog_edge("k", a), analog_edge("k", a));
-        assert!(analog_edge("k", a).contains("/analog/"));
-    }
-
-    #[test]
-    fn pulse_edge_names_distinguish_similar_edges() {
-        let a = edge_id("plant", "flow_pulse", "board", "flow_pulse");
-        let b = edge_id("plant_flow", "", "board_flow", "");
-        assert_ne!(pulse_edge("k", a), pulse_edge("k", b));
-        assert_eq!(pulse_edge("k", a), pulse_edge("k", a));
-        assert!(pulse_edge("k", a).contains("/pulse/"));
-    }
-
-    #[test]
-    fn scalar_edge_names_distinguish_similar_edges() {
-        let a = edge_id("piping", "inlet_temp_c", "boiler", "inlet_temp_c");
-        let b = edge_id("piping_inlet", "", "boiler_inlet", "");
-        assert_ne!(scalar_edge("k", a), scalar_edge("k", b));
-        assert_eq!(scalar_edge("k", a), scalar_edge("k", a));
-        assert!(scalar_edge("k", a).contains("/scalar/"));
+        assert_ne!(edge("k", a), edge("k", b));
+        assert_eq!(edge("k", a), edge("k", a));
+        assert!(edge("k", a).contains("/edge/"));
     }
 
     #[test]

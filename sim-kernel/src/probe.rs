@@ -7,8 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::dataplane::{AnalogVoltage, DigitalLevel, UartFrame};
 use crate::virtual_time::virtual_time_ns;
-use crate::wiring::{AnalogVoltage, DigitalLevel, UartFrame};
 
 /// When a [`ProbeTap`] accepts a driven value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

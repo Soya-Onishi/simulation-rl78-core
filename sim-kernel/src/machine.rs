@@ -344,8 +344,7 @@ impl<C: Cpu> Entity for Machine<C> {
         let max_instructions = if ctx.step_once {
             1
         } else {
-            now
-                .saturating_add(budget_ns)
+            now.saturating_add(budget_ns)
                 .saturating_sub(self.last_insn_at)
                 .saturating_div(ns_per_insn)
                 .min(u64::from(u32::MAX)) as u32
@@ -372,7 +371,8 @@ impl<C: Cpu> Entity for Machine<C> {
         }
         let elapsed = ns_per_insn.saturating_mul(result.instructions);
         self.last_insn_at = last_before.saturating_add(elapsed);
-        let clock_delta = self.last_insn_at
+        let clock_delta = self
+            .last_insn_at
             .max(now.saturating_add(budget_ns))
             .saturating_sub(now);
         self.advance_clock(clock_delta);

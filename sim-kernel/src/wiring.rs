@@ -9,126 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use typenum::{Add1, B1, Unsigned};
 
-use iceoryx2_bb_derive_macros::ZeroCopySend;
-use iceoryx2_bb_elementary_traits::zero_copy_send::ZeroCopySend;
-
-use crate::Tick;
-
 pub use typenum::{U0, U1};
-
-/// Digital level used as a [`Wire`] payload.
-///
-/// Layout is shared with cluster probe IPC (`repr(u8)` + [`ZeroCopySend`]).
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum DigitalLevel {
-    #[default]
-    HiZ = 0,
-    High = 1,
-    Low = 2,
-}
-
-// `#[repr(u8)]` cannot combine with the ZeroCopySend derive's `#[repr(C)]`.
-unsafe impl ZeroCopySend for DigitalLevel {}
-
-/// Repeating digital pulse train parameters (hi/lo widths in virtual nanoseconds).
-///
-/// Used as a board-edge / cluster IPC payload so producers send waveform settings
-/// instead of toggling [`DigitalLevel`] on every edge. A receiver expands the
-/// train onto a GPIO [`SourcePort`]. If **either** width is `0`, the train is
-/// stopped and the expanded line stays [`DigitalLevel::Low`] ([`Pulse::STOPPED`]
-/// sets both to `0`).
-///
-/// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, ZeroCopySend)]
-pub struct Pulse {
-    pub hi_width_ns: u64,
-    pub lo_width_ns: u64,
-}
-
-impl Pulse {
-    /// Stopped train (receiver holds the line low).
-    pub const STOPPED: Self = Self {
-        hi_width_ns: 0,
-        lo_width_ns: 0,
-    };
-
-    /// True when the train should not toggle (line held low).
-    #[must_use]
-    pub const fn is_stopped(self) -> bool {
-        self.hi_width_ns == 0 || self.lo_width_ns == 0
-    }
-}
-
-/// Unitless / domain-defined `f64` sample on a board edge (e.g. ℃ or L/min).
-///
-/// The numeric meaning is fixed by the topology port name and plant docs, not by
-/// this type. Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, ZeroCopySend)]
-pub struct Scalar(pub f64);
-
-/// Analog voltage in microvolts, used as a [`Wire`] payload.
-///
-/// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, ZeroCopySend)]
-pub struct AnalogVoltage(pub i64);
-
-/// UART stop-bit count carried on a [`UartFrame`].
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum UartStopBits {
-    #[default]
-    One = 0,
-    Two = 1,
-}
-
-// `#[repr(u8)]` (stable IPC size) cannot combine with `#[repr(C)]` required by
-// the ZeroCopySend derive; implement the trait by hand.
-unsafe impl ZeroCopySend for UartStopBits {}
-
-/// UART parity carried on a [`UartFrame`].
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum UartParity {
-    #[default]
-    None = 0,
-    Even = 1,
-    Odd = 2,
-}
-
-unsafe impl ZeroCopySend for UartParity {}
-
-/// One UART character plus link parameters, used as a [`Wire`] payload.
-///
-/// Serial lines are not modeled as [`DigitalLevel`] bit streams. `bit_time` is
-/// the duration of one bit on the virtual clock (not a raw baud integer).
-/// Layout is shared with cluster IPC (`repr(C)` + [`ZeroCopySend`]).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, ZeroCopySend)]
-pub struct UartFrame {
-    pub data: u16,
-    pub data_bits: u8,
-    pub bit_time: Tick,
-    pub stop_bits: UartStopBits,
-    pub parity: UartParity,
-    pub inverted: bool,
-}
-
-impl Default for UartFrame {
-    fn default() -> Self {
-        Self {
-            data: 0,
-            data_bits: 8,
-            bit_time: Tick::ZERO,
-            stop_bits: UartStopBits::One,
-            parity: UartParity::None,
-            inverted: false,
-        }
-    }
-}
 
 type SinkFn<T> = Arc<dyn Fn(&[T], usize) + Send + Sync>;
 
@@ -325,6 +206,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AnalogVoltage, DigitalLevel, UartFrame};
 
     struct DummySource<T> {
         port: SourcePort<T>,

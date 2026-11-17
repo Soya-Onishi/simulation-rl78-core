@@ -471,8 +471,14 @@ mod tests {
     #[serial]
     fn concurrent_arbiter_thread_logs_stay_isolated() {
         ensure_process_logger();
-        let q1 = Arc::new(LogQueue::new(LogOrigin::Arbiter, crate::ipc::HashedId::ZERO));
-        let q2 = Arc::new(LogQueue::new(LogOrigin::Arbiter, crate::ipc::HashedId::ZERO));
+        let q1 = Arc::new(LogQueue::new(
+            LogOrigin::Arbiter,
+            crate::ipc::HashedId::ZERO,
+        ));
+        let q2 = Arc::new(LogQueue::new(
+            LogOrigin::Arbiter,
+            crate::ipc::HashedId::ZERO,
+        ));
         let a = Arc::clone(&q1);
         let b = Arc::clone(&q2);
         let t1 = thread::spawn(move || {
@@ -497,8 +503,16 @@ mod tests {
         });
         t1.join().unwrap();
         t2.join().unwrap();
-        let r1: Vec<_> = q1.take_all().into_iter().map(|r| r.text().to_string()).collect();
-        let r2: Vec<_> = q2.take_all().into_iter().map(|r| r.text().to_string()).collect();
+        let r1: Vec<_> = q1
+            .take_all()
+            .into_iter()
+            .map(|r| r.text().to_string())
+            .collect();
+        let r2: Vec<_> = q2
+            .take_all()
+            .into_iter()
+            .map(|r| r.text().to_string())
+            .collect();
         assert_eq!(r1, vec!["from-thread-1".to_string()]);
         assert_eq!(r2, vec!["from-thread-2".to_string()]);
     }

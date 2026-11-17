@@ -111,15 +111,8 @@ fn build_plant() -> (Plant<PipingModel>, BoardPorts, Vec<ProbePoint>) {
         "配管の相対水圧（1.0=基準）",
     )
     .expect("pressure");
-    let water_temp_c = Knob::new(
-        "water_temp_c",
-        20.0,
-        0.0,
-        100.0,
-        Some("C"),
-        "配管端の水温",
-    )
-    .expect("water_temp_c");
+    let water_temp_c = Knob::new("water_temp_c", 20.0, 0.0, 100.0, Some("C"), "配管端の水温")
+        .expect("water_temp_c");
     let faucet = Knob::new("faucet", 0.0, 0.0, 1.0, Some("norm"), "カラン開度").expect("faucet");
 
     let mut outlet_temp_c = InPort::new("outlet_temp_c").expect("outlet_temp_c");
@@ -150,13 +143,65 @@ fn build_plant() -> (Plant<PipingModel>, BoardPorts, Vec<ProbePoint>) {
 }
 
 #[cfg(test)]
+fn build_plant_with_ports() -> (
+    Plant<PipingModel>,
+    InPort<Scalar>,
+    OutPort<Scalar>,
+    OutPort<Scalar>,
+) {
+    let pressure = Knob::new(
+        "pressure",
+        1.0,
+        0.0,
+        2.0,
+        Some("norm"),
+        "配管の相対水圧（1.0=基準）",
+    )
+    .expect("pressure");
+    let water_temp_c = Knob::new("water_temp_c", 20.0, 0.0, 100.0, Some("C"), "配管端の水温")
+        .expect("water_temp_c");
+    let faucet = Knob::new("faucet", 0.0, 0.0, 1.0, Some("norm"), "カラン開度").expect("faucet");
+
+    let mut outlet_temp_c = InPort::new("outlet_temp_c").expect("outlet_temp_c");
+    let inlet_temp_c = OutPort::new("inlet_temp_c").expect("inlet_temp_c");
+    let flow_lpm = OutPort::new("flow_lpm").expect("flow_lpm");
+    let inlet_h = inlet_temp_c.clone();
+    let flow_h = flow_lpm.clone();
+
+    let model = PipingModel::attach(
+        pressure.value_handle(),
+        water_temp_c.value_handle(),
+        faucet.value_handle(),
+        &mut outlet_temp_c,
+        inlet_temp_c.clone(),
+        flow_lpm.clone(),
+    );
+    // Clone after attach so SourcePort shares the wired SolidWire.
+    let outlet_h = outlet_temp_c.clone();
+
+    let mut ports = BoardPorts::new();
+    ports.insert_in(outlet_temp_c).expect("outlet_temp_c");
+    ports.insert_out(inlet_temp_c).expect("inlet_temp_c");
+    ports.insert_out(flow_lpm).expect("flow_lpm");
+    let _ = ports;
+
+    let plant = Plant::with_devices(
+        model,
+        vec![Box::new(pressure), Box::new(water_temp_c), Box::new(faucet)],
+    )
+    .expect("devices");
+
+    (plant, outlet_h, inlet_h, flow_h)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sim_kernel::{ActionFailure, Entity, id_hash};
 
     #[test]
     fn flow_is_faucet_times_pressure_times_25() {
-        let (mut plant, ports, _) = build_plant();
+        let (mut plant, _outlet, inlet, flow) = build_plant_with_ports();
         plant
             .apply_action(
                 id_hash("faucet"),
@@ -174,20 +219,10 @@ mod tests {
             )
             .unwrap();
         plant.model_mut().step();
-        let flow = ports
-            .out_port::<Scalar>("flow_lpm")
-            .unwrap()
-            .pending()
-            .last()
-            .copied();
-        assert_eq!(flow, Some(Scalar(25.0)));
-        let inlet = ports
-            .out_port::<Scalar>("inlet_temp_c")
-            .unwrap()
-            .pending()
-            .last()
-            .copied();
-        assert_eq!(inlet, Some(Scalar(20.0)));
+        let flow_v = flow.pending().last().copied();
+        assert_eq!(flow_v, Some(Scalar(25.0)));
+        let inlet_v = inlet.pending().last().copied();
+        assert_eq!(inlet_v, Some(Scalar(20.0)));
     }
 
     #[test]
@@ -206,11 +241,8 @@ mod tests {
 
     #[test]
     fn outlet_temp_is_latched() {
-        let (plant, ports, _) = build_plant();
-        ports
-            .in_port::<Scalar>("outlet_temp_c")
-            .unwrap()
-            .receive(Scalar(42.0));
+        let (plant, outlet, _inlet, _flow) = build_plant_with_ports();
+        outlet.receive(Scalar(42.0));
         assert_eq!(plant.model().outlet_temp_c(), 42.0);
     }
 
@@ -227,7 +259,7 @@ mod tests {
 
     #[test]
     fn reset_restores_knob_defaults_and_outputs() {
-        let (mut plant, ports, _) = build_plant();
+        let (mut plant, _outlet, inlet, flow) = build_plant_with_ports();
         plant
             .apply_action(
                 id_hash("faucet"),
@@ -247,19 +279,9 @@ mod tests {
         plant.model_mut().step();
         plant.reset();
         plant.model_mut().step();
-        let flow = ports
-            .out_port::<Scalar>("flow_lpm")
-            .unwrap()
-            .pending()
-            .last()
-            .copied();
-        let inlet = ports
-            .out_port::<Scalar>("inlet_temp_c")
-            .unwrap()
-            .pending()
-            .last()
-            .copied();
-        assert_eq!(flow, Some(Scalar(0.0)));
-        assert_eq!(inlet, Some(Scalar(20.0)));
+        let flow_v = flow.pending().last().copied();
+        let inlet_v = inlet.pending().last().copied();
+        assert_eq!(flow_v, Some(Scalar(0.0)));
+        assert_eq!(inlet_v, Some(Scalar(20.0)));
     }
 }
