@@ -132,7 +132,10 @@ fn open_publisher<T: DataPlane>(
 }
 
 /// Board-edge port that can open iceoryx lanes.
-pub trait ExternPort {
+///
+/// [`std::any::Any`] enables [`crate::BoardPorts::receive`] to downcast
+/// `&dyn ExternPort` to [`crate::InPort<T>`] after trait upcasting.
+pub trait ExternPort: std::any::Any {
     /// `true` for [`crate::InPort`], `false` for [`crate::OutPort`].
     fn is_input(&self) -> bool;
     /// [`std::any::TypeId`] of the payload `T` on this port.

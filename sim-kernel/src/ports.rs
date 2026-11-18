@@ -36,6 +36,10 @@ pub enum PortError {
     InvalidName { name: String },
     /// Another port on the same [`BoardPorts`] already uses `name`.
     DuplicateName { name: String },
+    /// No port named `name` is registered on this board.
+    UnknownName { name: String },
+    /// `name` is not an [`InPort`] of the requested payload type.
+    ReceiveTypeMismatch { name: String },
 }
 
 impl fmt::Display for PortError {
@@ -48,6 +52,15 @@ impl fmt::Display for PortError {
                 write!(
                     f,
                     "board port name {name:?} is already in use on this board"
+                )
+            }
+            Self::UnknownName { name } => {
+                write!(f, "board port name {name:?} is not registered on this board")
+            }
+            Self::ReceiveTypeMismatch { name } => {
+                write!(
+                    f,
+                    "board port {name:?} is not an InPort of the requested type"
                 )
             }
         }
@@ -94,8 +107,9 @@ fn validate_port_name(name: String) -> Result<String, PortError> {
 /// [`SourcePort::drive`]s the bound in-board wire (topology direction `In`).
 ///
 /// Register with [`BoardPorts::insert_in`] so the endpoint name is unique on that
-/// board. [`Clone`] shares the same [`SourcePort`] (keep a clone before insert
-/// when tests or board logic need a typed handle after registration).
+/// board. After registration, inject values through [`BoardPorts::receive`].
+/// [`Clone`] shares the same [`SourcePort`] when board/plant wiring still needs a
+/// typed handle alongside the registered port.
 #[derive(Clone)]
 pub struct InPort<T> {
     id: PortId,
@@ -270,6 +284,27 @@ impl BoardPorts {
         self.ports.remove(name)
     }
 
+    /// Inject a value into a registered [`InPort`] by endpoint name.
+    ///
+    /// Upcasts `&dyn ExternPort` to [`std::any::Any`], then downcasts to
+    /// [`InPort<T>`].
+    pub fn receive<T: DataPlane>(&self, name: &str, value: T) -> Result<(), PortError> {
+        use std::any::Any;
+
+        let boxed = self.ports.get(name).ok_or_else(|| PortError::UnknownName {
+            name: name.to_string(),
+        })?;
+        let port: &dyn ExternPort = &**boxed;
+        let any: &dyn Any = port;
+        let in_port = any
+            .downcast_ref::<InPort<T>>()
+            .ok_or_else(|| PortError::ReceiveTypeMismatch {
+                name: name.to_string(),
+            })?;
+        in_port.receive(value);
+        Ok(())
+    }
+
     /// Clears outbound pending queues on every registered out-port (guest reset).
     pub fn clear_pending(&self) {
         for port in self.ports.values() {
@@ -426,5 +461,38 @@ mod tests {
         assert!(tx_handle.drain_pending().is_empty());
         assert!(ports.remove("uart0_tx").is_some());
         assert!(ports.remove("uart0_tx").is_none());
+    }
+
+    #[test]
+    fn board_ports_receive_downcasts_in_port() {
+        let mut ext = InPort::<DigitalLevel>::new("ext_rx").unwrap();
+        let sink = OutPort::<DigitalLevel>::new("ext_tap").unwrap();
+        let _w = Wire::new().source(ext.port_mut()).sink({
+            let sink = sink.clone();
+            move |values, changed| sink.on_input(values, changed)
+        });
+        let mut ports = BoardPorts::new();
+        ports.insert_in(ext).unwrap();
+        ports.receive("ext_rx", DigitalLevel::High).unwrap();
+        assert_eq!(sink.values(), vec![DigitalLevel::High]);
+    }
+
+    #[test]
+    fn board_ports_receive_rejects_unknown_and_type_mismatch() {
+        let mut ports = BoardPorts::new();
+        ports
+            .insert_in(InPort::<DigitalLevel>::new("ext_rx").unwrap())
+            .unwrap();
+        ports
+            .insert_out(OutPort::<DigitalLevel>::new("ext_tx").unwrap())
+            .unwrap();
+        assert!(matches!(
+            ports.receive("missing", DigitalLevel::High),
+            Err(PortError::UnknownName { .. })
+        ));
+        assert!(matches!(
+            ports.receive("ext_tx", DigitalLevel::High),
+            Err(PortError::ReceiveTypeMismatch { .. })
+        ));
     }
 }
