@@ -59,7 +59,7 @@ pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use knob::Knob;
 pub use machine::Machine;
 pub use plant::{Model, Plant};
-pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
+pub use ports::{BoardPorts, InPort, OutPort, PortError};
 pub use probe::{ProbePoint, ProbePolicy, ProbeSample, ProbeTap};
 pub use pulse::PulseExpander;
 pub use reset::Resettable;

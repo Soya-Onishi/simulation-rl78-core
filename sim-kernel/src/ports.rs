@@ -10,24 +10,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::SourcePort;
 use crate::dataplane::{DataPlane, ExternPort};
-
-/// Identifier assigned to an [`InPort`] or [`OutPort`].
-///
-/// IDs are unique for the lifetime of the process and are never reused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PortId(u32);
-
-impl PortId {
-    #[must_use]
-    pub fn as_u32(self) -> u32 {
-        self.0
-    }
-}
 
 /// Failure to construct or register a board-edge port.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,11 +66,6 @@ impl fmt::Display for PortError {
 
 impl std::error::Error for PortError {}
 
-fn next_id() -> PortId {
-    static NEXT: AtomicU32 = AtomicU32::new(1);
-    PortId(NEXT.fetch_add(1, Ordering::Relaxed))
-}
-
 /// Python 3 hard keywords (`keyword.iskeyword`). ASCII identifiers only.
 const PYTHON_KEYWORDS: &[&str] = &[
     "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
@@ -123,7 +104,6 @@ fn validate_port_name(name: String) -> Result<String, PortError> {
 /// board/plant wiring still needs a typed handle alongside the registered port.
 #[derive(Clone)]
 pub struct InPort<T> {
-    id: PortId,
     name: String,
     port: SourcePort<T>,
 }
@@ -131,15 +111,9 @@ pub struct InPort<T> {
 impl<T> InPort<T> {
     pub fn new(name: impl Into<String>) -> Result<Self, PortError> {
         Ok(Self {
-            id: next_id(),
             name: validate_port_name(name.into())?,
             port: SourcePort::new(),
         })
-    }
-
-    #[must_use]
-    pub fn id(&self) -> PortId {
-        self.id
     }
 
     #[must_use]
@@ -170,7 +144,6 @@ struct SinkSnapshot<T> {
 }
 
 struct OutPortInner<T> {
-    id: PortId,
     name: String,
     snapshot: Mutex<SinkSnapshot<T>>,
     pending: Mutex<Vec<T>>,
@@ -190,7 +163,6 @@ impl<T> OutPort<T> {
     pub fn new(name: impl Into<String>) -> Result<Self, PortError> {
         Ok(Self {
             inner: Arc::new(OutPortInner {
-                id: next_id(),
                 name: validate_port_name(name.into())?,
                 snapshot: Mutex::new(SinkSnapshot {
                     values: Vec::new(),
@@ -199,11 +171,6 @@ impl<T> OutPort<T> {
                 pending: Mutex::new(Vec::new()),
             }),
         })
-    }
-
-    #[must_use]
-    pub fn id(&self) -> PortId {
-        self.inner.id
     }
 
     #[must_use]
@@ -419,13 +386,6 @@ mod tests {
             .unwrap();
         b.insert_out(OutPort::<DigitalLevel>::new("uart0_tx").unwrap())
             .unwrap();
-    }
-
-    #[test]
-    fn ids_are_unique() {
-        let a = OutPort::<DigitalLevel>::new("id_left").unwrap();
-        let b = InPort::<DigitalLevel>::new("id_right").unwrap();
-        assert_ne!(a.id(), b.id());
     }
 
     #[test]
