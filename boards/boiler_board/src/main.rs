@@ -87,11 +87,7 @@ fn wire_adc_inlets(part: &R7F100Gxl, ports: &mut BoardPorts, probes: &mut Vec<Pr
 }
 
 /// `flow_pulse` ([`Pulse`]) → [`PulseExpander`] → P0.0.
-fn wire_flow_pulse(
-    part: &R7F100Gxl,
-    ctl: &EventCtl,
-    ports: &mut BoardPorts,
-) -> PulseExpander {
+fn wire_flow_pulse(part: &R7F100Gxl, ctl: &EventCtl, ports: &mut BoardPorts) -> PulseExpander {
     let mut expander = PulseExpander::new("flow_pulse", ctl.clone()).expect("flow_pulse");
     let pin = part.gpio_input(0);
     let _gpio = Wire::new()

@@ -57,7 +57,10 @@ impl fmt::Display for PortError {
                 )
             }
             Self::UnknownName { name } => {
-                write!(f, "board port name {name:?} is not registered on this board")
+                write!(
+                    f,
+                    "board port name {name:?} is not registered on this board"
+                )
             }
             Self::InPortTypeMismatch { name } => {
                 write!(
