@@ -39,7 +39,9 @@ pub enum PortError {
     /// No port named `name` is registered on this board.
     UnknownName { name: String },
     /// `name` is not an [`InPort`] of the requested payload type.
-    ReceiveTypeMismatch { name: String },
+    InPortTypeMismatch { name: String },
+    /// `name` is not an [`OutPort`] of the requested payload type.
+    OutPortTypeMismatch { name: String },
 }
 
 impl fmt::Display for PortError {
@@ -57,10 +59,16 @@ impl fmt::Display for PortError {
             Self::UnknownName { name } => {
                 write!(f, "board port name {name:?} is not registered on this board")
             }
-            Self::ReceiveTypeMismatch { name } => {
+            Self::InPortTypeMismatch { name } => {
                 write!(
                     f,
                     "board port {name:?} is not an InPort of the requested type"
+                )
+            }
+            Self::OutPortTypeMismatch { name } => {
+                write!(
+                    f,
+                    "board port {name:?} is not an OutPort of the requested type"
                 )
             }
         }
@@ -107,9 +115,9 @@ fn validate_port_name(name: String) -> Result<String, PortError> {
 /// [`SourcePort::drive`]s the bound in-board wire (topology direction `In`).
 ///
 /// Register with [`BoardPorts::insert_in`] so the endpoint name is unique on that
-/// board. After registration, inject values through [`BoardPorts::receive`].
-/// [`Clone`] shares the same [`SourcePort`] when board/plant wiring still needs a
-/// typed handle alongside the registered port.
+/// board. After registration, borrow via [`BoardPorts::inport`] or inject through
+/// [`BoardPorts::receive`]. [`Clone`] shares the same [`SourcePort`] when
+/// board/plant wiring still needs a typed handle alongside the registered port.
 #[derive(Clone)]
 pub struct InPort<T> {
     id: PortId,
@@ -284,11 +292,11 @@ impl BoardPorts {
         self.ports.remove(name)
     }
 
-    /// Inject a value into a registered [`InPort`] by endpoint name.
+    /// Borrow a registered [`InPort`] by endpoint name.
     ///
     /// Upcasts `&dyn ExternPort` to [`std::any::Any`], then downcasts to
     /// [`InPort<T>`].
-    pub fn receive<T: DataPlane>(&self, name: &str, value: T) -> Result<(), PortError> {
+    pub fn inport<T: DataPlane>(&self, name: &str) -> Result<&InPort<T>, PortError> {
         use std::any::Any;
 
         let boxed = self.ports.get(name).ok_or_else(|| PortError::UnknownName {
@@ -296,13 +304,34 @@ impl BoardPorts {
         })?;
         let port: &dyn ExternPort = &**boxed;
         let any: &dyn Any = port;
-        let in_port = any
-            .downcast_ref::<InPort<T>>()
-            .ok_or_else(|| PortError::ReceiveTypeMismatch {
+        any.downcast_ref::<InPort<T>>()
+            .ok_or_else(|| PortError::InPortTypeMismatch {
                 name: name.to_string(),
-            })?;
-        in_port.receive(value);
+            })
+    }
+
+    /// Inject a value into a registered [`InPort`] by endpoint name.
+    pub fn receive<T: DataPlane>(&self, name: &str, value: T) -> Result<(), PortError> {
+        self.inport::<T>(name)?.receive(value);
         Ok(())
+    }
+
+    /// Borrow a registered [`OutPort`] by endpoint name.
+    ///
+    /// Upcasts `&dyn ExternPort` to [`std::any::Any`], then downcasts to
+    /// [`OutPort<T>`].
+    pub fn outport<T: DataPlane>(&self, name: &str) -> Result<&OutPort<T>, PortError> {
+        use std::any::Any;
+
+        let boxed = self.ports.get(name).ok_or_else(|| PortError::UnknownName {
+            name: name.to_string(),
+        })?;
+        let port: &dyn ExternPort = &**boxed;
+        let any: &dyn Any = port;
+        any.downcast_ref::<OutPort<T>>()
+            .ok_or_else(|| PortError::OutPortTypeMismatch {
+                name: name.to_string(),
+            })
     }
 
     /// Clears outbound pending queues on every registered out-port (guest reset).
@@ -492,7 +521,34 @@ mod tests {
         ));
         assert!(matches!(
             ports.receive("ext_tx", DigitalLevel::High),
-            Err(PortError::ReceiveTypeMismatch { .. })
+            Err(PortError::InPortTypeMismatch { .. })
+        ));
+        assert!(matches!(
+            ports.inport::<DigitalLevel>("ext_tx"),
+            Err(PortError::InPortTypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn board_ports_outport_downcasts_out_port() {
+        let mut src = SourcePort::<DigitalLevel>::new();
+        let ext = OutPort::<DigitalLevel>::new("ext_tx").unwrap();
+        let _w = Wire::new().source(&mut src).sink({
+            let ext = ext.clone();
+            move |values, changed| ext.on_input(values, changed)
+        });
+        let mut ports = BoardPorts::new();
+        ports.insert_out(ext).unwrap();
+        src.drive(DigitalLevel::High);
+        let tx = ports.outport::<DigitalLevel>("ext_tx").unwrap();
+        assert_eq!(tx.pending(), vec![DigitalLevel::High]);
+        assert!(matches!(
+            ports.outport::<DigitalLevel>("missing"),
+            Err(PortError::UnknownName { .. })
+        ));
+        assert!(matches!(
+            ports.outport::<crate::AnalogVoltage>("ext_tx"),
+            Err(PortError::OutPortTypeMismatch { .. })
         ));
     }
 }

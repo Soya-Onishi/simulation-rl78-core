@@ -66,56 +66,6 @@ pub fn g23_machine() -> (Machine<R7F100Gxl>, BoardPorts, Vec<ProbePoint>) {
     (machine, ports, probes)
 }
 
-#[cfg(test)]
-fn g23_machine_dac() -> (
-    Machine<R7F100Gxl>,
-    BoardPorts,
-    Vec<ProbePoint>,
-    OutPort<sim_kernel::AnalogVoltage>,
-) {
-    let ctl = EventCtl::new();
-    let part = R7F100Gxl::new(ctl.clone());
-    let (mut ports, mut probes) = wire_board_uart0(&part.core);
-
-    let mut dac = LevelDac::new("dac0").expect("dac0");
-    let dac0 = OutPort::new("dac0").expect("dac0");
-    let dac0_handle = dac0.clone();
-    let tap = ProbeTap::new("dac0", sim_kernel::ProbePolicy::OnChange);
-    {
-        let analog = dac0.clone();
-        let _dac_tx = Wire::new()
-            .source(dac.source_mut())
-            .sink(move |values, changed| analog.on_input(values, changed))
-            .sink(tap.callback());
-    }
-    {
-        let gpio = part.gpio_output(1);
-        let mut src = gpio.lock().expect("p0.1");
-        let _dac_in = Wire::new().source(&mut src).sink(dac.callback());
-    }
-    ports.insert_out(dac0).expect("dac0");
-    probes.push(ProbePoint::Analog(tap));
-
-    let bus = part
-        .memory_map()
-        .expect("g23 memory map")
-        .policy(UnmappedPolicy::Log)
-        .build()
-        .unwrap();
-    let mut sw1 = HoldSwitch::new("sw1").expect("sw1");
-    let pin = part.gpio_input(0);
-    let _sw = Wire::new()
-        .source(sw1.source_mut())
-        .sink(move |values, changed| {
-            if let Some(&level) = values.get(changed) {
-                pin.drive(level);
-            }
-        });
-    let machine =
-        Machine::with_devices(part, bus, ctl, vec![Box::new(sw1), Box::new(dac)]).expect("devices");
-    (machine, ports, probes, dac0_handle)
-}
-
 /// Wire board-edge UART0 (`uart0_tx` / `uart0_rx`).
 ///
 /// Endpoint names match the cluster topology; this is board glue, not SoC wiring.
@@ -166,7 +116,10 @@ mod tests {
     #[serial]
     #[test]
     fn p01_level_dac_high_low_hiz() {
-        let (machine, _ports, probes, dac0) = g23_machine_dac();
+        let (machine, ports, probes) = g23_machine();
+        let dac0 = ports
+            .outport::<sim_kernel::AnalogVoltage>("dac0")
+            .expect("dac0");
         assert!(
             probes
                 .iter()
