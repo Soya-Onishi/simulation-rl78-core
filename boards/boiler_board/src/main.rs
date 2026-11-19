@@ -71,9 +71,7 @@ fn wire_adc_inlets(part: &R7F100Gxl, ports: &mut BoardPorts, probes: &mut Vec<Pr
         let pin = part.adc_input(channel);
         let tap = ProbeTap::new(
             name,
-            sim_kernel::ProbePolicy::MinInterval {
-                min_ns: 10_000_000,
-            },
+            sim_kernel::ProbePolicy::MinInterval { min_ns: 10_000_000 },
         );
         let _wire = Wire::new()
             .source(port.port_mut())
@@ -89,11 +87,7 @@ fn wire_adc_inlets(part: &R7F100Gxl, ports: &mut BoardPorts, probes: &mut Vec<Pr
 }
 
 /// `flow_pulse` ([`Pulse`]) → [`PulseExpander`] → P0.0.
-fn wire_flow_pulse(
-    part: &R7F100Gxl,
-    ctl: &EventCtl,
-    ports: &mut BoardPorts,
-) -> PulseExpander {
+fn wire_flow_pulse(part: &R7F100Gxl, ctl: &EventCtl, ports: &mut BoardPorts) -> PulseExpander {
     let mut expander = PulseExpander::new("flow_pulse", ctl.clone()).expect("flow_pulse");
     let pin = part.gpio_input(0);
     let _gpio = Wire::new()
@@ -133,7 +127,6 @@ fn wire_hold_switch(name: &str, pin: sim_kernel::SourcePort<DigitalLevel>) -> Ho
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
-    use sim_kernel::UartFrame;
 
     use super::*;
 
@@ -155,10 +148,11 @@ mod tests {
     #[test]
     fn g23_machine_exposes_board_edge_ports() {
         let (_machine, ports, probes) = g23_machine();
-        assert!(ports.out_port::<UartFrame>("uart0_tx").is_some());
-        assert!(ports.in_port::<AnalogVoltage>("adc_inlet").is_some());
-        assert!(ports.in_port::<AnalogVoltage>("adc_outlet").is_some());
-        assert!(ports.in_port::<Pulse>("flow_pulse").is_some());
+        let names = ports.port_names();
+        assert!(names.contains(&"uart0_tx"));
+        assert!(names.contains(&"adc_inlet"));
+        assert!(names.contains(&"adc_outlet"));
+        assert!(names.contains(&"flow_pulse"));
         assert!(
             probes
                 .iter()
@@ -203,9 +197,8 @@ mod tests {
         machine.reset();
         ports.clear_pending();
         ports
-            .in_port::<AnalogVoltage>("adc_inlet")
-            .expect("adc_inlet")
-            .receive(AnalogVoltage(2_500_000));
+            .receive("adc_inlet", AnalogVoltage(2_500_000))
+            .expect("adc_inlet");
 
         machine.bus_mut().write(0xFFF32, &[0x20]).unwrap();
         machine.bus_mut().write(0xFFF30, &[0x80]).unwrap();
@@ -222,12 +215,14 @@ mod tests {
     fn flow_pulse_receive_schedules_gpio_edges() {
         let (machine, ports, _probes) = g23_machine();
         ports
-            .in_port::<Pulse>("flow_pulse")
-            .expect("flow_pulse")
-            .receive(Pulse {
-                hi_width_ns: 1_000_000,
-                lo_width_ns: 1_000_000,
-            });
+            .receive(
+                "flow_pulse",
+                Pulse {
+                    hi_width_ns: 1_000_000,
+                    lo_width_ns: 1_000_000,
+                },
+            )
+            .expect("flow_pulse");
         assert!(
             machine.event_ctl().events().next_deadline().is_some(),
             "pulse expander should schedule at least one edge"

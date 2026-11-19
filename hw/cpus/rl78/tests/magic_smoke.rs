@@ -5,7 +5,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{magic_probe_guest_code, write_minimal_elf32};
-use rl78::{minimal_machine_with_probe, MinimalMachineConfig, ProbeSink};
+use rl78::{MinimalMachineConfig, ProbeSink, minimal_machine_with_probe};
 use sim_kernel::Core;
 
 #[derive(Clone, Default)]

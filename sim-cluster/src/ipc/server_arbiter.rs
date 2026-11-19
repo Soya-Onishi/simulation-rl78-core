@@ -197,9 +197,7 @@ pub fn open_pair() -> (ServerLink, ArbiterLink) {
             tx: a2s_tx.clone(),
             rx: Arc::clone(&s2a_demux),
         },
-        probe_forward: ArbiterProbeForward {
-            tx: a2s_tx.clone(),
-        },
+        probe_forward: ArbiterProbeForward { tx: a2s_tx.clone() },
         log_tx: a2s_tx,
     };
 
@@ -488,9 +486,6 @@ mod tests {
     fn dropping_server_link_makes_try_cmd_return_shutdown() {
         let (server, arbiter) = open_pair();
         drop(server);
-        assert_eq!(
-            arbiter.host.try_cmd().unwrap(),
-            Some(HostCommand::Shutdown)
-        );
+        assert_eq!(arbiter.host.try_cmd().unwrap(), Some(HostCommand::Shutdown));
     }
 }

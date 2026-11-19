@@ -5,9 +5,10 @@ use std::sync::{Arc, Mutex};
 use crate::action::{Device, DeviceError, id_hash};
 use crate::bus::MemoryBus;
 use crate::clock::Tick;
+use crate::dataplane::{DigitalLevel, Pulse};
 use crate::event::{EventCtl, EventCtx, EventId, SimEvent};
 use crate::reset::Resettable;
-use crate::wiring::{DigitalLevel, Pulse, SourcePort};
+use crate::wiring::SourcePort;
 
 struct PulseState {
     hi_ns: u64,

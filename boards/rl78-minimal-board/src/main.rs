@@ -117,12 +117,14 @@ mod tests {
     #[test]
     fn p01_level_dac_high_low_hiz() {
         let (machine, ports, probes) = g23_machine();
+        let dac0 = ports
+            .outport::<sim_kernel::AnalogVoltage>("dac0")
+            .expect("dac0");
         assert!(
             probes
                 .iter()
                 .any(|p| matches!(p, ProbePoint::Analog(tap) if tap.name() == "dac0"))
         );
-        let dac0 = ports.out_port::<sim_kernel::AnalogVoltage>("dac0").unwrap();
         machine
             .cpu()
             .core

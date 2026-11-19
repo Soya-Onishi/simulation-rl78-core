@@ -10,15 +10,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sim_kernel::{
-    ActionFailure, BoardPorts, Command, Entity, FirmwareError, ProbePoint, Response, SimConfig,
-    SimState, Simulator, StopReason, Tick,
+    ActionFailure, BoardPorts, Command, Entity, FirmwareError, ProbePoint, PumpError, Response,
+    SimConfig, SimState, Simulator, StopReason, Tick,
 };
 
 use crate::action::{
     ACTION_RECV_CAP, ActionPackError, ActionRequest, ActionResult, ActionStatus, ActionUpstream,
 };
 use crate::control::{ControlToArbiter, HostStopReason};
-use crate::data_plane::{DataPlaneError, bind_data_planes, open_data_planes};
+use crate::data_plane::{DataPlaneError, open_lanes};
 use crate::elf_source;
 use crate::inspect::InspectServer;
 use crate::ipc::{
@@ -68,6 +68,12 @@ pub enum BoardError {
     ElfSource(#[from] crate::elf_source::ElfSourceError),
     #[error("{0}")]
     Message(String),
+}
+
+impl From<PumpError> for BoardError {
+    fn from(value: PumpError) -> Self {
+        Self::DataPlane(DataPlaneError::from(value))
+    }
 }
 
 /// CLI parse failure (usage / missing args).
@@ -365,8 +371,8 @@ pub fn cluster_host_stop_reason(reason: &StopReason) -> Option<HostStopReason> {
 /// opens one publisher per point. Probe/action catalogs are listed out-of-band by
 /// the arbiter via [`list_catalog`] / `--list-catalog`, not over control IPC.
 ///
-/// Startup order: control open → [`open_data_planes`] → `build` → firmware/reset →
-/// [`bind_data_planes`] → loop `pump_rx` / guest poll / `pump_tx`.
+/// Startup order: control open → `build` → firmware/reset → [`open_lanes`] →
+/// loop RX `pump` / guest poll / TX `pump`.
 pub fn run_node<E: Entity>(
     opts: BoardOptions,
     build: impl FnOnce() -> (E, BoardPorts, Vec<ProbePoint>),
@@ -395,9 +401,8 @@ pub fn run_node<E: Entity>(
     let control = NodeControl::open(&iox_node, &opts.cluster_key, boards.clone())?;
     let actions = NodeActions::open(&iox_node, &opts.cluster_key, topo.boards.len())?;
     let _node_log = NodeLog::start(&opts.iox_root, &opts.cluster_key, board_hash, boards.len())?;
-    let plane_maps = open_data_planes(&iox_node, &opts.cluster_key, board_name, board, &topo)?;
 
-    let (entity, ports, probe_points) = build();
+    let (entity, mut ports, probe_points) = build();
     let mut probes = NodeProbeRuntime::open(
         &iox_node,
         &opts.cluster_key,
@@ -425,7 +430,15 @@ pub fn run_node<E: Entity>(
         None
     };
 
-    let mut data_planes = bind_data_planes(plane_maps, &ports)?;
+    let (mut rx_lanes, mut tx_lanes) = open_lanes(
+        &iox_node,
+        &opts.cluster_key,
+        board_name,
+        board,
+        &topo,
+        &mut ports,
+    )?;
+    drop(ports);
 
     // Process init above is the Booting phase; the control loop starts Stopped.
     let mut state = NodeState::Stopped;
@@ -455,8 +468,8 @@ pub fn run_node<E: Entity>(
                         vt.write_board_vt(opts.vt_slot, sim.entity().now().0);
                         last_allowed = None;
                         log::info!("simulator Reset");
-                        for plane in &mut data_planes {
-                            plane.discard_rx()?;
+                        for lane in &mut rx_lanes {
+                            lane.discard()?;
                         }
                         log::info!("discarded queued rx");
                     }
@@ -508,8 +521,8 @@ pub fn run_node<E: Entity>(
         probes.service_csv()?;
 
         if state == NodeState::Running {
-            for plane in &mut data_planes {
-                plane.pump_rx()?;
+            for lane in &mut rx_lanes {
+                lane.pump()?;
             }
 
             // Publish VT and refresh the allowed ceiling when the next quantum
@@ -564,8 +577,8 @@ pub fn run_node<E: Entity>(
                 None => {}
             }
 
-            for plane in &mut data_planes {
-                plane.pump_tx()?;
+            for lane in &mut tx_lanes {
+                lane.pump()?;
             }
             probes.ingest_and_emit();
         }

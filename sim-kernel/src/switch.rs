@@ -7,8 +7,9 @@ use crate::action::{
 };
 use crate::bus::MemoryBus;
 use crate::clock::{NS_PER_SEC, Tick};
+use crate::dataplane::DigitalLevel;
 use crate::reset::Resettable;
-use crate::wiring::{DigitalLevel, SourcePort};
+use crate::wiring::SourcePort;
 
 const HOLD_ID: &str = "hold";
 const MILLISECONDS: &str = "milliseconds";

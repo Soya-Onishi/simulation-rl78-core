@@ -1,514 +1,302 @@
-//! Board data-plane pumping: topology edges ↔ [`BoardPorts`].
+//! Open board-edge lanes from topology + [`BoardPorts`].
 //!
-//! Control IPC stays in [`crate::board_runtime`]; this module owns payload
-//! fan-in/fan-out. Payload kinds live in submodules (`uart`, `analog`, `pulse`,
-//! `scalar`, …); [`open_data_planes`] dispatches by [`PayloadKind`].
-//!
-//! [`open`](UartDataPlaneMap::open) builds edge↔endpoint mapping (and opens
-//! iceoryx ports). [`bind`](UartDataPlaneMap::bind) consumes that map with
-//! [`BoardPorts`] and yields a [`UartDataPlane`] whose [`pump_rx`] /
-//! [`pump_tx`] use pre-wired lanes with no name lookup.
+//! Pub/sub creation lives in [`sim_kernel::dataplane`]. This module only walks
+//! topology edges, builds [`OpenCtx`], and calls [`ExternPort::open`].
 
-mod analog;
-mod pulse;
-mod scalar;
-mod uart;
-
-pub use analog::{AnalogDataPlane, AnalogDataPlaneMap};
-pub use pulse::{PulseDataPlane, PulseDataPlaneMap};
-pub use scalar::{ScalarDataPlane, ScalarDataPlaneMap};
-pub use uart::{UartDataPlane, UartDataPlaneMap};
-
-use std::collections::HashSet;
+use std::any::TypeId;
+use std::collections::{HashMap, HashSet};
 
 use iceoryx2::prelude::Node;
 use iceoryx2::prelude::ipc;
-use sim_kernel::BoardPorts;
+use sim_kernel::{
+    AnalogVoltage, BoardPorts, DataPlane, DigitalLevel, EdgeSpec, ExternPort, Lane, OpenCtx,
+    OpenError, Pulse, PumpError, RxLane, Scalar, TxLane, UartFrame,
+};
 
-use crate::ipc::IpcError;
-use crate::topology::{BoardSpec, LogicalTopology, PayloadKind};
+use crate::ipc::{IpcError, edge as edge_service, edge_id};
+use crate::topology::{
+    BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
+};
 
-/// Failures from data-plane open / bind / pump.
+/// Failures from lane open / pump.
 #[derive(Debug, thiserror::Error)]
 pub enum DataPlaneError {
-    #[error("ipc error: {0}")]
-    Ipc(#[from] IpcError),
     #[error("{0}")]
     Message(String),
 }
 
-/// Opened iceoryx / topology mapping; consumed by [`DataPlaneMap::bind`].
-pub trait DataPlaneMap {
-    fn bind(self: Box<Self>, ports: &BoardPorts) -> Result<Box<dyn DataPlane>, DataPlaneError>;
+impl From<OpenError> for DataPlaneError {
+    fn from(value: OpenError) -> Self {
+        Self::Message(value.to_string())
+    }
 }
 
-/// Bound transport between iceoryx2 and board-edge ports (pump only).
-pub trait DataPlane {
-    fn pump_rx(&mut self) -> Result<(), DataPlaneError>;
-    fn pump_tx(&mut self) -> Result<(), DataPlaneError>;
-    /// Drop queued subscriber samples without driving the guest in-port.
-    fn discard_rx(&mut self) -> Result<(), DataPlaneError>;
+impl From<PumpError> for DataPlaneError {
+    fn from(value: PumpError) -> Self {
+        Self::Message(value.to_string())
+    }
 }
 
-pub fn open_data_planes(
+impl From<IpcError> for DataPlaneError {
+    fn from(value: IpcError) -> Self {
+        Self::Message(value.to_string())
+    }
+}
+
+fn ring_capacity(edge: &DirectedEdge) -> usize {
+    match edge.payload {
+        PayloadKind::Uart => LogicalTopology::uart_ring_len(edge).max(2) as usize,
+        PayloadKind::Pulse => Pulse::DEFAULT_RING_CAPACITY,
+        PayloadKind::Analog => AnalogVoltage::DEFAULT_RING_CAPACITY,
+        PayloadKind::Scalar => Scalar::DEFAULT_RING_CAPACITY,
+        PayloadKind::Digital => DigitalLevel::DEFAULT_RING_CAPACITY,
+    }
+}
+
+fn expected_payload_type_id(kind: PayloadKind) -> TypeId {
+    match kind {
+        PayloadKind::Uart => TypeId::of::<UartFrame>(),
+        PayloadKind::Analog => TypeId::of::<AnalogVoltage>(),
+        PayloadKind::Pulse => TypeId::of::<Pulse>(),
+        PayloadKind::Scalar => TypeId::of::<Scalar>(),
+        PayloadKind::Digital => TypeId::of::<DigitalLevel>(),
+    }
+}
+
+fn payload_kind_name(kind: PayloadKind) -> &'static str {
+    match kind {
+        PayloadKind::Uart => "uart",
+        PayloadKind::Analog => "analog",
+        PayloadKind::Pulse => "pulse",
+        PayloadKind::Scalar => "scalar",
+        PayloadKind::Digital => "digital",
+    }
+}
+
+/// Per-edge iceoryx services are SPSC; topology always yields 1/1 today.
+fn edge_qos() -> (usize, usize) {
+    (1, 1)
+}
+
+fn push_ordered(
+    order: &mut Vec<String>,
+    map: &mut HashMap<String, Vec<EdgeSpec>>,
+    ep: String,
+    spec: EdgeSpec,
+) {
+    if !map.contains_key(&ep) {
+        order.push(ep.clone());
+    }
+    map.entry(ep).or_default().push(spec);
+}
+
+/// Open iceoryx lanes for every board endpoint that has topology edges.
+///
+/// Consumes matching entries from `ports` via [`BoardPorts::remove`]. Leftover
+/// ports (no edges) remain in `ports` until the caller drops it.
+///
+/// Lane order follows first appearance of each endpoint in `topo.edges`.
+///
+/// Validates each opened endpoint against [`BoardSpec`]: name presence,
+/// [`EndpointDirection`] vs In/Out, and Rust payload `TypeId` vs
+/// [`EndpointSpec::payload`].
+pub fn open_lanes(
     node: &Node<ipc::Service>,
     cluster_key: &str,
     board_name: &str,
     board: &BoardSpec,
     topo: &LogicalTopology,
-) -> Result<Vec<Box<dyn DataPlaneMap>>, DataPlaneError> {
-    let mut kinds = HashSet::new();
+    ports: &mut BoardPorts,
+) -> Result<(Vec<RxLane>, Vec<TxLane>), DataPlaneError> {
+    let ep_by_name: HashMap<&str, &EndpointSpec> = board
+        .endpoints
+        .iter()
+        .map(|e| (e.name.as_str(), e))
+        .collect();
+
+    let mut rx_edges: HashMap<String, Vec<EdgeSpec>> = HashMap::new();
+    let mut tx_edges: HashMap<String, Vec<EdgeSpec>> = HashMap::new();
+    let mut rx_order = Vec::new();
+    let mut tx_order = Vec::new();
+    let (max_publishers, max_subscribers) = edge_qos();
+
     for edge in &topo.edges {
-        if edge.from.path == board_name || edge.to.path == board_name {
-            kinds.insert(edge.payload);
+        let id = edge_id(
+            &edge.from.path,
+            &edge.from.port,
+            &edge.to.path,
+            &edge.to.port,
+        );
+        let spec = EdgeSpec {
+            service_name: edge_service(cluster_key, id),
+            max_publishers,
+            max_subscribers,
+            ring_capacity: ring_capacity(edge),
+        };
+        if edge.to.path == board_name {
+            let ep = ep_by_name.get(edge.to.port.as_str()).ok_or_else(|| {
+                DataPlaneError::Message(format!(
+                    "board `{board_name}` has no endpoint `{}` for inbound edge",
+                    edge.to.port
+                ))
+            })?;
+            if ep.payload != edge.payload {
+                return Err(DataPlaneError::Message(format!(
+                    "board `{board_name}` endpoint `{}` payload {:?} != edge {:?}",
+                    ep.name, ep.payload, edge.payload
+                )));
+            }
+            push_ordered(
+                &mut rx_order,
+                &mut rx_edges,
+                edge.to.port.clone(),
+                spec.clone(),
+            );
         }
-    }
-    for ep in &board.endpoints {
-        kinds.insert(ep.payload);
+        if edge.from.path == board_name {
+            let ep = ep_by_name.get(edge.from.port.as_str()).ok_or_else(|| {
+                DataPlaneError::Message(format!(
+                    "board `{board_name}` has no endpoint `{}` for outbound edge",
+                    edge.from.port
+                ))
+            })?;
+            if ep.payload != edge.payload {
+                return Err(DataPlaneError::Message(format!(
+                    "board `{board_name}` endpoint `{}` payload {:?} != edge {:?}",
+                    ep.name, ep.payload, edge.payload
+                )));
+            }
+            push_ordered(&mut tx_order, &mut tx_edges, edge.from.port.clone(), spec);
+        }
     }
 
-    let mut maps: Vec<Box<dyn DataPlaneMap>> = Vec::new();
-    for kind in kinds {
-        match kind {
-            PayloadKind::Uart => {
-                let map =
-                    UartDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
-                maps.push(Box::new(map));
-            }
-            PayloadKind::Analog => {
-                let map =
-                    AnalogDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
-                maps.push(Box::new(map));
-            }
-            PayloadKind::Pulse => {
-                let map =
-                    PulseDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
-                maps.push(Box::new(map));
-            }
-            PayloadKind::Scalar => {
-                let map =
-                    ScalarDataPlaneMap::open(node, cluster_key, board_name, board, &topo.edges)?;
-                maps.push(Box::new(map));
-            }
-            PayloadKind::Digital => {
-                // Level-only digital IPC remains out of scope; use Pulse for trains.
-            }
+    let port_names: HashSet<&str> = ports.port_names().into_iter().collect();
+    for ep in &board.endpoints {
+        let needed = rx_edges.contains_key(&ep.name) || tx_edges.contains_key(&ep.name);
+        if needed && !port_names.contains(ep.name.as_str()) {
+            return Err(DataPlaneError::Message(format!(
+                "board `{board_name}` endpoint `{}` has edges but no BoardPorts entry",
+                ep.name
+            )));
         }
     }
-    Ok(maps)
+
+    let mut rx = Vec::new();
+    let mut tx = Vec::new();
+
+    for ep_name in rx_order {
+        let edges = rx_edges.remove(&ep_name).expect("rx order tracks map");
+        let ep = ep_by_name[&ep_name.as_str()];
+        let port = ports.remove(&ep_name).ok_or_else(|| {
+            DataPlaneError::Message(format!(
+                "missing InPort for topology endpoint `{ep_name}` on board `{board_name}`"
+            ))
+        })?;
+        open_rx(node, board_name, ep, port, edges, &mut rx)?;
+    }
+
+    for ep_name in tx_order {
+        let edges = tx_edges.remove(&ep_name).expect("tx order tracks map");
+        let ep = ep_by_name[&ep_name.as_str()];
+        let port = ports.remove(&ep_name).ok_or_else(|| {
+            DataPlaneError::Message(format!(
+                "missing OutPort for topology endpoint `{ep_name}` on board `{board_name}`"
+            ))
+        })?;
+        open_tx(node, board_name, ep, port, edges, &mut tx)?;
+    }
+
+    Ok((rx, tx))
 }
 
-/// Bind opened maps against board ports into pumpable planes.
-pub fn bind_data_planes(
-    maps: Vec<Box<dyn DataPlaneMap>>,
-    ports: &BoardPorts,
-) -> Result<Vec<Box<dyn DataPlane>>, DataPlaneError> {
-    maps.into_iter().map(|m| m.bind(ports)).collect()
+fn check_port(
+    board_name: &str,
+    ep: &EndpointSpec,
+    port: &dyn ExternPort,
+    expect_input: bool,
+) -> Result<(), DataPlaneError> {
+    if port.is_input() != expect_input {
+        let want = if expect_input { "InPort" } else { "OutPort" };
+        let got = if port.is_input() { "InPort" } else { "OutPort" };
+        return Err(DataPlaneError::Message(format!(
+            "endpoint `{}` on `{board_name}` expects {want} but BoardPorts has {got}",
+            ep.name
+        )));
+    }
+    if ep.direction == EndpointDirection::In && !expect_input {
+        return Err(DataPlaneError::Message(format!(
+            "endpoint `{}` on `{board_name}` is direction in but opened as TX",
+            ep.name
+        )));
+    }
+    if ep.direction == EndpointDirection::Out && expect_input {
+        return Err(DataPlaneError::Message(format!(
+            "endpoint `{}` on `{board_name}` is direction out but opened as RX",
+            ep.name
+        )));
+    }
+    let expected = expected_payload_type_id(ep.payload);
+    if port.payload_type_id() != expected {
+        return Err(DataPlaneError::Message(format!(
+            "endpoint `{}` on `{board_name}` expects payload {} but BoardPorts type differs",
+            ep.name,
+            payload_kind_name(ep.payload)
+        )));
+    }
+    Ok(())
+}
+
+fn open_rx(
+    node: &Node<ipc::Service>,
+    board_name: &str,
+    ep: &EndpointSpec,
+    port: Box<dyn ExternPort>,
+    edges: Vec<EdgeSpec>,
+    out: &mut Vec<RxLane>,
+) -> Result<(), DataPlaneError> {
+    check_port(board_name, ep, port.as_ref(), true)?;
+    match port.open(OpenCtx { node, edges })? {
+        Lane::Rx(lane) => {
+            out.push(lane);
+            Ok(())
+        }
+        Lane::Tx(_) => Err(DataPlaneError::Message(format!(
+            "endpoint `{}` on `{board_name}` is inbound but opened as Tx",
+            ep.name
+        ))),
+    }
+}
+
+fn open_tx(
+    node: &Node<ipc::Service>,
+    board_name: &str,
+    ep: &EndpointSpec,
+    port: Box<dyn ExternPort>,
+    edges: Vec<EdgeSpec>,
+    out: &mut Vec<TxLane>,
+) -> Result<(), DataPlaneError> {
+    check_port(board_name, ep, port.as_ref(), false)?;
+    match port.open(OpenCtx { node, edges })? {
+        Lane::Tx(lane) => {
+            out.push(lane);
+            Ok(())
+        }
+        Lane::Rx(_) => Err(DataPlaneError::Message(format!(
+            "endpoint `{}` on `{board_name}` is outbound but opened as Rx",
+            ep.name
+        ))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::time::Duration;
 
-    use sim_kernel::{AnalogVoltage, BoardPorts, InPort, OutPort, Pulse, Scalar, UartFrame, Wire};
+    use sim_kernel::{InPort, OutPort, Wire};
 
-    use super::*;
     use crate::ipc::{create_node, isolated_config, new_cluster_key};
-    use crate::topology::{
-        BoardSpec, DirectedEdge, EndpointDirection, EndpointSpec, LogicalTopology, PayloadKind,
-        PortRef,
-    };
-
-    fn uart_board(id: &str) -> BoardSpec {
-        BoardSpec {
-            id: id.into(),
-            kind: "rl78".into(),
-            elf: None,
-            endpoints: vec![
-                EndpointSpec {
-                    name: "uart0_tx".into(),
-                    direction: EndpointDirection::Out,
-                    payload: PayloadKind::Uart,
-                },
-                EndpointSpec {
-                    name: "uart0_rx".into(),
-                    direction: EndpointDirection::In,
-                    payload: PayloadKind::Uart,
-                },
-            ],
-        }
-    }
-
-    fn two_board_topo() -> LogicalTopology {
-        LogicalTopology {
-            boards: vec![uart_board("a"), uart_board("b")],
-            edges: vec![
-                DirectedEdge {
-                    from: PortRef {
-                        path: "a".into(),
-                        port: "uart0_tx".into(),
-                    },
-                    to: PortRef {
-                        path: "b".into(),
-                        port: "uart0_rx".into(),
-                    },
-                    route: vec![
-                        PortRef {
-                            path: "a".into(),
-                            port: "uart0_tx".into(),
-                        },
-                        PortRef {
-                            path: "b".into(),
-                            port: "uart0_rx".into(),
-                        },
-                    ],
-                    payload: PayloadKind::Uart,
-                    uart_ring_len: Some(8),
-                },
-                DirectedEdge {
-                    from: PortRef {
-                        path: "b".into(),
-                        port: "uart0_tx".into(),
-                    },
-                    to: PortRef {
-                        path: "a".into(),
-                        port: "uart0_rx".into(),
-                    },
-                    route: vec![
-                        PortRef {
-                            path: "b".into(),
-                            port: "uart0_tx".into(),
-                        },
-                        PortRef {
-                            path: "a".into(),
-                            port: "uart0_rx".into(),
-                        },
-                    ],
-                    payload: PayloadKind::Uart,
-                    uart_ring_len: Some(8),
-                },
-            ],
-            margin_ns: 1_000,
-            booting_timeout_ms: 1_000,
-        }
-    }
-
-    fn board_ports_with_rx_tap(tap_name: &str) -> (BoardPorts, OutPort<UartFrame>) {
-        let mut ports = BoardPorts::new();
-        ports
-            .insert_out(OutPort::<UartFrame>::new("uart0_tx").unwrap())
-            .unwrap();
-        let mut rx = InPort::<UartFrame>::new("uart0_rx").unwrap();
-        let tap = OutPort::<UartFrame>::new(tap_name).unwrap();
-        let _wire = Wire::new().source(rx.port_mut()).sink({
-            let tap = tap.clone();
-            move |values, changed| tap.on_input(values, changed)
-        });
-        ports.insert_in(rx).unwrap();
-        (ports, tap)
-    }
-
-    #[test]
-    fn uart_dataplane_discards_queued_rx_without_driving_the_guest() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = new_cluster_key();
-        let config = isolated_config(dir.path()).unwrap();
-        let topo = two_board_topo();
-        let board_a = &topo.boards[0];
-        let board_b = &topo.boards[1];
-
-        let na = create_node(&config, "dp-discard-a").unwrap();
-        let nb = create_node(&config, "dp-discard-b").unwrap();
-        let map_a = UartDataPlaneMap::open(&na, &key, "a", board_a, &topo.edges).unwrap();
-        let map_b = UartDataPlaneMap::open(&nb, &key, "b", board_b, &topo.edges).unwrap();
-
-        let frame = UartFrame {
-            data: 0x41,
-            data_bits: 8,
-            ..UartFrame::default()
-        };
-
-        {
-            let (ports_a, _tap_a) = board_ports_with_rx_tap("a_rx_tap");
-            let mut plane_a = map_a.bind(&ports_a).unwrap();
-            ports_a
-                .out_port::<UartFrame>("uart0_tx")
-                .unwrap()
-                .on_input(&[frame], 0);
-            plane_a.pump_tx().unwrap();
-        }
-
-        let (ports_b, tap_b) = board_ports_with_rx_tap("b_rx_tap");
-        let mut plane_b = map_b.bind(&ports_b).unwrap();
-        for _ in 0..50 {
-            plane_b.discard_rx().unwrap();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        plane_b.discard_rx().unwrap();
-        plane_b.pump_rx().unwrap();
-        assert!(
-            tap_b.pending().is_empty(),
-            "queued uart rx must be dropped before the guest sees it"
-        );
-    }
-
-    #[test]
-    fn uart_dataplane_tx_ipc_rx_round_trip() {
-        // TX on board A, then drop A and RX on board B. IPC retains the sample
-        // across the hand-off (names are per-BoardPorts, so both boards may use
-        // uart0_*).
-        let dir = tempfile::tempdir().unwrap();
-        let key = new_cluster_key();
-        let config = isolated_config(dir.path()).unwrap();
-        let topo = two_board_topo();
-        let board_a = &topo.boards[0];
-        let board_b = &topo.boards[1];
-
-        let na = create_node(&config, "dp-a").unwrap();
-        let nb = create_node(&config, "dp-b").unwrap();
-        let map_a = UartDataPlaneMap::open(&na, &key, "a", board_a, &topo.edges).unwrap();
-        let map_b = UartDataPlaneMap::open(&nb, &key, "b", board_b, &topo.edges).unwrap();
-
-        let frame = UartFrame {
-            data: 0x41,
-            data_bits: 8,
-            ..UartFrame::default()
-        };
-
-        {
-            let (ports_a, _tap_a) = board_ports_with_rx_tap("a_rx_tap");
-            let mut plane_a = map_a.bind(&ports_a).unwrap();
-            ports_a
-                .out_port::<UartFrame>("uart0_tx")
-                .unwrap()
-                .on_input(&[frame], 0);
-            plane_a.pump_tx().unwrap();
-        }
-
-        let (ports_b, tap_b) = board_ports_with_rx_tap("b_rx_tap");
-        let mut plane_b = map_b.bind(&ports_b).unwrap();
-
-        let mut got = None;
-        for _ in 0..100 {
-            plane_b.pump_rx().unwrap();
-            let pending = tap_b.pending();
-            if !pending.is_empty() {
-                got = pending.into_iter().next();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(got, Some(frame));
-    }
-
-    fn analog_board(id: &str, out_name: &str, in_name: &str) -> BoardSpec {
-        BoardSpec {
-            id: id.into(),
-            kind: "rl78".into(),
-            elf: None,
-            endpoints: vec![
-                EndpointSpec {
-                    name: out_name.into(),
-                    direction: EndpointDirection::Out,
-                    payload: PayloadKind::Analog,
-                },
-                EndpointSpec {
-                    name: in_name.into(),
-                    direction: EndpointDirection::In,
-                    payload: PayloadKind::Analog,
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn analog_dataplane_tx_ipc_rx_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = new_cluster_key();
-        let config = isolated_config(dir.path()).unwrap();
-        let topo = LogicalTopology {
-            boards: vec![
-                analog_board("a", "dac0", "ain"),
-                analog_board("p", "vout", "vin"),
-            ],
-            edges: vec![DirectedEdge {
-                from: PortRef {
-                    path: "a".into(),
-                    port: "dac0".into(),
-                },
-                to: PortRef {
-                    path: "p".into(),
-                    port: "vin".into(),
-                },
-                route: vec![
-                    PortRef {
-                        path: "a".into(),
-                        port: "dac0".into(),
-                    },
-                    PortRef {
-                        path: "p".into(),
-                        port: "vin".into(),
-                    },
-                ],
-                payload: PayloadKind::Analog,
-                uart_ring_len: None,
-            }],
-            margin_ns: 1_000,
-            booting_timeout_ms: 1_000,
-        };
-        let na = create_node(&config, "adp-a").unwrap();
-        let np = create_node(&config, "adp-p").unwrap();
-        let map_a = AnalogDataPlaneMap::open(&na, &key, "a", &topo.boards[0], &topo.edges).unwrap();
-        let map_p = AnalogDataPlaneMap::open(&np, &key, "p", &topo.boards[1], &topo.edges).unwrap();
-        let sample = AnalogVoltage(5_000_000);
-
-        {
-            let mut ports_a = BoardPorts::new();
-            ports_a
-                .insert_out(OutPort::<AnalogVoltage>::new("dac0").unwrap())
-                .unwrap();
-            ports_a
-                .insert_in(InPort::<AnalogVoltage>::new("ain").unwrap())
-                .unwrap();
-            let mut plane_a = map_a.bind(&ports_a).unwrap();
-            ports_a
-                .out_port::<AnalogVoltage>("dac0")
-                .unwrap()
-                .on_input(&[sample], 0);
-            plane_a.pump_tx().unwrap();
-        }
-
-        let mut ports_p = BoardPorts::new();
-        let mut vin = InPort::<AnalogVoltage>::new("vin").unwrap();
-        let tap = OutPort::<AnalogVoltage>::new("vin_tap").unwrap();
-        let _wire = Wire::new().source(vin.port_mut()).sink({
-            let tap = tap.clone();
-            move |values, changed| tap.on_input(values, changed)
-        });
-        ports_p.insert_in(vin).unwrap();
-        ports_p
-            .insert_out(OutPort::<AnalogVoltage>::new("vout").unwrap())
-            .unwrap();
-        let mut plane_p = map_p.bind(&ports_p).unwrap();
-        let mut got = None;
-        for _ in 0..100 {
-            plane_p.pump_rx().unwrap();
-            let pending = tap.pending();
-            if !pending.is_empty() {
-                got = pending.into_iter().next();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(got, Some(sample));
-    }
-
-    fn pulse_board(id: &str, out_name: &str, in_name: &str) -> BoardSpec {
-        BoardSpec {
-            id: id.into(),
-            kind: "plant".into(),
-            elf: None,
-            endpoints: vec![
-                EndpointSpec {
-                    name: out_name.into(),
-                    direction: EndpointDirection::Out,
-                    payload: PayloadKind::Pulse,
-                },
-                EndpointSpec {
-                    name: in_name.into(),
-                    direction: EndpointDirection::In,
-                    payload: PayloadKind::Pulse,
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn pulse_dataplane_tx_ipc_rx_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = new_cluster_key();
-        let config = isolated_config(dir.path()).unwrap();
-        let topo = LogicalTopology {
-            boards: vec![
-                pulse_board("plant", "flow_pulse", "unused_in"),
-                pulse_board("board", "unused_out", "flow_pulse"),
-            ],
-            edges: vec![DirectedEdge {
-                from: PortRef {
-                    path: "plant".into(),
-                    port: "flow_pulse".into(),
-                },
-                to: PortRef {
-                    path: "board".into(),
-                    port: "flow_pulse".into(),
-                },
-                route: vec![
-                    PortRef {
-                        path: "plant".into(),
-                        port: "flow_pulse".into(),
-                    },
-                    PortRef {
-                        path: "board".into(),
-                        port: "flow_pulse".into(),
-                    },
-                ],
-                payload: PayloadKind::Pulse,
-                uart_ring_len: None,
-            }],
-            margin_ns: 1_000,
-            booting_timeout_ms: 1_000,
-        };
-        let n_plant = create_node(&config, "pdp-plant").unwrap();
-        let n_board = create_node(&config, "pdp-board").unwrap();
-        let map_plant =
-            PulseDataPlaneMap::open(&n_plant, &key, "plant", &topo.boards[0], &topo.edges).unwrap();
-        let map_board =
-            PulseDataPlaneMap::open(&n_board, &key, "board", &topo.boards[1], &topo.edges).unwrap();
-        let sample = Pulse {
-            hi_width_ns: 1_000_000,
-            lo_width_ns: 1_000_000,
-        };
-
-        {
-            let mut ports_plant = BoardPorts::new();
-            ports_plant
-                .insert_out(OutPort::<Pulse>::new("flow_pulse").unwrap())
-                .unwrap();
-            ports_plant
-                .insert_in(InPort::<Pulse>::new("unused_in").unwrap())
-                .unwrap();
-            let mut plane_plant = map_plant.bind(&ports_plant).unwrap();
-            ports_plant
-                .out_port::<Pulse>("flow_pulse")
-                .unwrap()
-                .on_input(&[sample], 0);
-            plane_plant.pump_tx().unwrap();
-        }
-
-        let mut ports_board = BoardPorts::new();
-        let mut flow_in = InPort::<Pulse>::new("flow_pulse").unwrap();
-        let tap = OutPort::<Pulse>::new("flow_tap").unwrap();
-        let _wire = Wire::new().source(flow_in.port_mut()).sink({
-            let tap = tap.clone();
-            move |values, changed| tap.on_input(values, changed)
-        });
-        ports_board.insert_in(flow_in).unwrap();
-        ports_board
-            .insert_out(OutPort::<Pulse>::new("unused_out").unwrap())
-            .unwrap();
-        let mut plane_board = map_board.bind(&ports_board).unwrap();
-        let mut got = None;
-        for _ in 0..100 {
-            plane_board.pump_rx().unwrap();
-            let pending = tap.pending();
-            if !pending.is_empty() {
-                got = pending.into_iter().next();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(got, Some(sample));
-    }
+    use crate::topology::PortRef;
 
     fn scalar_board(id: &str, out_name: &str, in_name: &str) -> BoardSpec {
         BoardSpec {
@@ -531,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_dataplane_tx_ipc_rx_round_trip() {
+    fn scalar_open_lanes_tx_ipc_rx_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let key = new_cluster_key();
         let config = isolated_config(dir.path()).unwrap();
@@ -567,30 +355,9 @@ mod tests {
         };
         let n_piping = create_node(&config, "sdp-piping").unwrap();
         let n_boiler = create_node(&config, "sdp-boiler").unwrap();
-        let map_piping =
-            ScalarDataPlaneMap::open(&n_piping, &key, "piping", &topo.boards[0], &topo.edges)
-                .unwrap();
-        let map_boiler =
-            ScalarDataPlaneMap::open(&n_boiler, &key, "boiler", &topo.boards[1], &topo.edges)
-                .unwrap();
         let sample = Scalar(20.0);
 
-        {
-            let mut ports_piping = BoardPorts::new();
-            ports_piping
-                .insert_out(OutPort::<Scalar>::new("inlet_temp_c").unwrap())
-                .unwrap();
-            ports_piping
-                .insert_in(InPort::<Scalar>::new("outlet_temp_c").unwrap())
-                .unwrap();
-            let mut plane_piping = map_piping.bind(&ports_piping).unwrap();
-            ports_piping
-                .out_port::<Scalar>("inlet_temp_c")
-                .unwrap()
-                .on_input(&[sample], 0);
-            plane_piping.pump_tx().unwrap();
-        }
-
+        // Open RX first so the subscriber is connected before TX publishes.
         let mut ports_boiler = BoardPorts::new();
         let mut inlet = InPort::<Scalar>::new("inlet_temp_c").unwrap();
         let tap = OutPort::<Scalar>::new("inlet_tap").unwrap();
@@ -602,10 +369,40 @@ mod tests {
         ports_boiler
             .insert_out(OutPort::<Scalar>::new("outlet_temp_c").unwrap())
             .unwrap();
-        let mut plane_boiler = map_boiler.bind(&ports_boiler).unwrap();
+        let (mut rx_lanes, _tx_boiler) = open_lanes(
+            &n_boiler,
+            &key,
+            "boiler",
+            &topo.boards[1],
+            &topo,
+            &mut ports_boiler,
+        )
+        .unwrap();
+        assert_eq!(rx_lanes.len(), 1);
+
+        let mut ports_piping = BoardPorts::new();
+        let tx = OutPort::<Scalar>::new("inlet_temp_c").unwrap();
+        let drive = tx.clone();
+        ports_piping.insert_out(tx).unwrap();
+        ports_piping
+            .insert_in(InPort::<Scalar>::new("outlet_temp_c").unwrap())
+            .unwrap();
+        let (_rx_piping, mut tx_lanes) = open_lanes(
+            &n_piping,
+            &key,
+            "piping",
+            &topo.boards[0],
+            &topo,
+            &mut ports_piping,
+        )
+        .unwrap();
+        assert_eq!(tx_lanes.len(), 1);
+        drive.on_input(&[sample], 0);
+        tx_lanes[0].pump().unwrap();
+
         let mut got = None;
         for _ in 0..100 {
-            plane_boiler.pump_rx().unwrap();
+            rx_lanes[0].pump().unwrap();
             let pending = tap.pending();
             if !pending.is_empty() {
                 got = pending.into_iter().next();
@@ -614,5 +411,54 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(got, Some(sample));
+    }
+
+    #[test]
+    fn open_lanes_rejects_payload_type_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = new_cluster_key();
+        let config = isolated_config(dir.path()).unwrap();
+        let board = scalar_board("piping", "inlet_temp_c", "outlet_temp_c");
+        let topo = LogicalTopology {
+            boards: vec![board.clone(), scalar_board("boiler", "x", "inlet_temp_c")],
+            edges: vec![DirectedEdge {
+                from: PortRef {
+                    path: "piping".into(),
+                    port: "inlet_temp_c".into(),
+                },
+                to: PortRef {
+                    path: "boiler".into(),
+                    port: "inlet_temp_c".into(),
+                },
+                route: vec![
+                    PortRef {
+                        path: "piping".into(),
+                        port: "inlet_temp_c".into(),
+                    },
+                    PortRef {
+                        path: "boiler".into(),
+                        port: "inlet_temp_c".into(),
+                    },
+                ],
+                payload: PayloadKind::Scalar,
+                uart_ring_len: None,
+            }],
+            margin_ns: 1_000,
+            booting_timeout_ms: 1_000,
+        };
+        let node = create_node(&config, "mismatch").unwrap();
+        let mut ports = BoardPorts::new();
+        // Wrong payload type for Scalar endpoint.
+        ports
+            .insert_out(OutPort::<AnalogVoltage>::new("inlet_temp_c").unwrap())
+            .unwrap();
+        ports
+            .insert_in(InPort::<Scalar>::new("outlet_temp_c").unwrap())
+            .unwrap();
+        let err = match open_lanes(&node, &key, "piping", &board, &topo, &mut ports) {
+            Err(e) => e,
+            Ok(_) => panic!("expected payload type mismatch"),
+        };
+        assert!(err.to_string().contains("expects payload scalar"), "{err}");
     }
 }

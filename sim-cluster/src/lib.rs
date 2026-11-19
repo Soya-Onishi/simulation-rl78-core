@@ -1,11 +1,10 @@
 //! Multi-board cluster support: logical topology, singleton server, and
 //! arbiter/board helpers.
 //!
-//! Arbiter↔node IPC (iceoryx2 pub/sub) lives here so [`sim_kernel`] stays free
-//! of transport dependencies. Server↔arbiter uses in-process mpsc. Architecture
-//! crates and the single-board CLI are unchanged. Board/plant binaries use
-//! [`node!`] + [`board_runtime::run_node`] for the shared cluster participation
-//! loop (see `rl78-minimal-board` / `minimal-plant`).
+//! Arbiter↔node control/probe/action IPC (iceoryx2) lives here. Board-edge
+//! payload pub/sub is opened via [`sim_kernel::dataplane`]. Server↔arbiter uses
+//! in-process mpsc. Board/plant binaries use [`node!`] +
+//! [`board_runtime::run_node`] (see `rl78-minimal-board` / `minimal-plant`).
 
 pub mod action;
 pub mod arbiter;

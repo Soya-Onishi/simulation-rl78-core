@@ -111,15 +111,8 @@ fn build_plant() -> (Plant<PipingModel>, BoardPorts, Vec<ProbePoint>) {
         "配管の相対水圧（1.0=基準）",
     )
     .expect("pressure");
-    let water_temp_c = Knob::new(
-        "water_temp_c",
-        20.0,
-        0.0,
-        100.0,
-        Some("C"),
-        "配管端の水温",
-    )
-    .expect("water_temp_c");
+    let water_temp_c = Knob::new("water_temp_c", 20.0, 0.0, 100.0, Some("C"), "配管端の水温")
+        .expect("water_temp_c");
     let faucet = Knob::new("faucet", 0.0, 0.0, 1.0, Some("norm"), "カラン開度").expect("faucet");
 
     let mut outlet_temp_c = InPort::new("outlet_temp_c").expect("outlet_temp_c");
@@ -174,20 +167,20 @@ mod tests {
             )
             .unwrap();
         plant.model_mut().step();
-        let flow = ports
-            .out_port::<Scalar>("flow_lpm")
-            .unwrap()
+        let flow_v = ports
+            .outport::<Scalar>("flow_lpm")
+            .expect("flow_lpm")
             .pending()
             .last()
             .copied();
-        assert_eq!(flow, Some(Scalar(25.0)));
-        let inlet = ports
-            .out_port::<Scalar>("inlet_temp_c")
-            .unwrap()
+        assert_eq!(flow_v, Some(Scalar(25.0)));
+        let inlet_v = ports
+            .outport::<Scalar>("inlet_temp_c")
+            .expect("inlet_temp_c")
             .pending()
             .last()
             .copied();
-        assert_eq!(inlet, Some(Scalar(20.0)));
+        assert_eq!(inlet_v, Some(Scalar(20.0)));
     }
 
     #[test]
@@ -208,9 +201,8 @@ mod tests {
     fn outlet_temp_is_latched() {
         let (plant, ports, _) = build_plant();
         ports
-            .in_port::<Scalar>("outlet_temp_c")
-            .unwrap()
-            .receive(Scalar(42.0));
+            .receive("outlet_temp_c", Scalar(42.0))
+            .expect("outlet_temp_c");
         assert_eq!(plant.model().outlet_temp_c(), 42.0);
     }
 
@@ -247,19 +239,19 @@ mod tests {
         plant.model_mut().step();
         plant.reset();
         plant.model_mut().step();
-        let flow = ports
-            .out_port::<Scalar>("flow_lpm")
-            .unwrap()
+        let flow_v = ports
+            .outport::<Scalar>("flow_lpm")
+            .expect("flow_lpm")
             .pending()
             .last()
             .copied();
-        let inlet = ports
-            .out_port::<Scalar>("inlet_temp_c")
-            .unwrap()
+        let inlet_v = ports
+            .outport::<Scalar>("inlet_temp_c")
+            .expect("inlet_temp_c")
             .pending()
             .last()
             .copied();
-        assert_eq!(flow, Some(Scalar(0.0)));
-        assert_eq!(inlet, Some(Scalar(20.0)));
+        assert_eq!(flow_v, Some(Scalar(0.0)));
+        assert_eq!(inlet_v, Some(Scalar(20.0)));
     }
 }

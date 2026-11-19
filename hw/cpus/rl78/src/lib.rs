@@ -130,7 +130,7 @@ mod tests {
 
     fn uart0_tx_bytes(ports: &BoardPorts) -> Vec<u8> {
         ports
-            .out_port::<UartFrame>("uart0_tx")
+            .outport::<UartFrame>("uart0_tx")
             .expect("uart0_tx")
             .pending()
             .into_iter()
@@ -140,7 +140,7 @@ mod tests {
 
     fn uart0_tx_frames(ports: &BoardPorts) -> Vec<UartFrame> {
         ports
-            .out_port::<UartFrame>("uart0_tx")
+            .outport::<UartFrame>("uart0_tx")
             .expect("uart0_tx")
             .pending()
     }
@@ -432,10 +432,6 @@ mod tests {
         }
     }
 
-    fn uart0_rx(ports: &BoardPorts) -> &sim_kernel::InPort<UartFrame> {
-        ports.in_port::<UartFrame>("uart0_rx").expect("uart0_rx")
-    }
-
     fn enable_uart0_rx(bus: &mut MemoryBus, scr: u16) {
         bus.write(0xF011A, &scr.to_le_bytes()).unwrap();
         bus.write(0xF0122, &[0x02, 0x00]).unwrap();
@@ -488,7 +484,9 @@ mod tests {
         let ctl = EventCtl::new();
         let (part, mut bus, ports) = g23_uart(ctl);
         enable_uart0_rx(&mut bus, 0x4004);
-        uart0_rx(&ports).receive(matching_uart_frame(b'Z'));
+        ports
+            .receive("uart0_rx", matching_uart_frame(b'Z'))
+            .expect("uart0_rx");
         let mut sdr = [0u8; 2];
         bus.read(0xFFF12, &mut sdr).unwrap();
         assert_eq!(sdr[0], b'Z');
@@ -502,7 +500,9 @@ mod tests {
         let ctl = EventCtl::new();
         let (part, mut bus, ports) = g23_uart(ctl);
         enable_uart0_rx(&mut bus, 0x4204);
-        uart0_rx(&ports).receive(matching_uart_frame(b'A'));
+        ports
+            .receive("uart0_rx", matching_uart_frame(b'A'))
+            .expect("uart0_rx");
         let mut ssr = [0u8; 2];
         bus.read(0xF0102, &mut ssr).unwrap();
         assert_eq!(ssr[0] & 0x02, 0x02);
@@ -518,7 +518,7 @@ mod tests {
         enable_uart0_rx(&mut bus, 0x4004);
         let mut frame = matching_uart_frame(b'A');
         frame.bit_time = Tick(1_000);
-        uart0_rx(&ports).receive(frame);
+        ports.receive("uart0_rx", frame).expect("uart0_rx");
         let mut ssr = [0u8; 2];
         bus.read(0xF0102, &mut ssr).unwrap();
         assert_eq!(ssr[0] & 0x04, 0x04);
@@ -532,7 +532,9 @@ mod tests {
         let ctl = EventCtl::new();
         let (part, mut bus, ports) = g23_uart(ctl);
         enable_uart0_rx(&mut bus, 0x4A04);
-        uart0_rx(&ports).receive(matching_uart_frame(b'A'));
+        ports
+            .receive("uart0_rx", matching_uart_frame(b'A'))
+            .expect("uart0_rx");
         assert!(part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSRE0));
         assert!(!part.core.irq.lock().unwrap().is_flag_set(IrqId::INTSR0));
     }
@@ -552,12 +554,12 @@ mod tests {
         assert_eq!(frames, [matching_uart_frame(b'Q')]);
 
         enable_uart0_rx(&mut bus, 0x4004);
-        for frame in ports
-            .out_port::<UartFrame>("uart0_tx")
-            .unwrap()
-            .drain_pending()
-        {
-            uart0_rx(&ports).receive(frame);
+        let pending = ports
+            .outport::<UartFrame>("uart0_tx")
+            .expect("uart0_tx")
+            .drain_pending();
+        for frame in pending {
+            ports.receive("uart0_rx", frame).expect("uart0_rx");
         }
         let mut sdr = [0u8; 2];
         bus.read(0xFFF12, &mut sdr).unwrap();

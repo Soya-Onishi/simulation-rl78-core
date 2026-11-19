@@ -167,7 +167,11 @@ impl VtClock {
 
     fn slot(&self, index: usize) -> &AtomicU64 {
         // SAFETY: index < slot_count; mapping holds that many aligned u64s.
-        unsafe { &*Self::as_atomics(&self.mmap, self.slot_count).as_ptr().add(index) }
+        unsafe {
+            &*Self::as_atomics(&self.mmap, self.slot_count)
+                .as_ptr()
+                .add(index)
+        }
     }
 
     unsafe fn as_atomics(mmap: &MmapMut, slot_count: usize) -> &[AtomicU64] {

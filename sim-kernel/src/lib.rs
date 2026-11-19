@@ -14,6 +14,7 @@ mod bus;
 mod clock;
 mod command;
 mod cpu;
+pub mod dataplane;
 pub mod elf;
 mod entity;
 mod event;
@@ -48,13 +49,17 @@ pub use cpu::{
     Core, Cpu, FirmwareError, PendingStop, Quantum, RegId, TlibExit, map_tlib_exit,
     resolve_after_tlib_execute,
 };
+pub use dataplane::{
+    AnalogVoltage, DataPlane, DigitalLevel, EdgeSpec, ExternPort, Lane, OpenCtx, OpenError, Pulse,
+    PumpError, RxLane, Scalar, TxLane, UartFrame, UartParity, UartStopBits, edge_service_name,
+};
 pub use elf::{EM_RL78, ElfLoad, LoadError, load_elf, load_elf_into_machine};
 pub use entity::{AdvanceCtx, Entity, EntityPoll};
 pub use event::{EventCtl, EventCtx, EventId, EventQueue, SimEvent};
 pub use knob::Knob;
 pub use machine::Machine;
 pub use plant::{Model, Plant};
-pub use ports::{BoardPorts, InPort, OutPort, PortError, PortId};
+pub use ports::{BoardPorts, InPort, OutPort, PortError};
 pub use probe::{ProbePoint, ProbePolicy, ProbeSample, ProbeTap};
 pub use pulse::PulseExpander;
 pub use reset::Resettable;
@@ -65,10 +70,7 @@ pub use sim::{
 pub use stop::StopReason;
 pub use switch::{HoldSwitch, MAX_HOLD_MS};
 pub use virtual_time::{set_global_virtual_time_ns, virtual_time_ns};
-pub use wiring::{
-    AnalogVoltage, DigitalLevel, Pulse, Scalar, SolidWire, SourcePort, U0, U1, UartFrame,
-    UartParity, UartStopBits, Wire,
-};
+pub use wiring::{SolidWire, SourcePort, U0, U1, Wire};
 
 #[cfg(test)]
 mod sim_tests;

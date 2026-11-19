@@ -1191,11 +1191,7 @@ fn poll_simulation(sim: &mut Simulation) {
     poll_actions(sim);
     poll_probes(sim);
     ingest_csv_replies(sim);
-    if sim
-        .arbiter
-        .as_ref()
-        .is_some_and(JoinHandle::is_finished)
-    {
+    if sim.arbiter.as_ref().is_some_and(JoinHandle::is_finished) {
         let handle = sim.arbiter.take().expect("finished arbiter handle");
         match handle.join() {
             Ok(true) => {
