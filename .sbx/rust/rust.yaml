@@ -1,0 +1,59 @@
+# syntax=docker/sandbox-kit:3
+# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/sandbox-kit-spec/main/schema/kit.schema.json
+schemaVersion: "3"
+kind: mixin
+displayName: Rust toolchain
+description: >-
+  rustup-managed stable Rust toolchain with rust-analyzer, rustfmt, and
+  clippy, delivered as a portable overlay under /usr/local.
+sourceUrl: https://rustup.rs
+licenses: [MIT, Apache-2.0]
+version: "1.0.0"
+
+args:
+  toolchain:
+    default: "stable"
+    pattern: '^[A-Za-z0-9._-]+$'
+    description: rustup toolchain channel or version (default stable)
+    buildArg: RUST_TOOLCHAIN
+
+# Kit release version (1.0.0), not the rustup channel name — "stable" is
+# not a valid provide version token.
+provides:
+  - "rust-toolchain"
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          # cargo fetch / publish
+          - crates.io:443
+          - index.crates.io:443
+          - static.crates.io:443
+          # rustup toolchain and component downloads
+          - static.rust-lang.org:443
+          # many crates pull sources from GitHub
+          - github.com:443
+          - codeload.github.com:443
+          - objects.githubusercontent.com:443
+
+  # Accept one context version through runtime policy, or skip both.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        ## Rust toolchain
+
+        This sandbox includes a rustup-managed `stable` toolchain (override with
+        kit arg `toolchain`) plus `rust-analyzer`, `rustfmt`, and `clippy`.
+
+        - `rustc`, `cargo`, `rustup`, and `rust-analyzer` are on `PATH`
+          (`/usr/local/cargo/bin`).
+        - Toolchain files live under `RUSTUP_HOME=/usr/local/rustup` and
+          `CARGO_HOME=/usr/local/cargo` (agent-writable for registry caches).
+        - Prefer the workspace `rust-toolchain.toml` / `Cargo.toml` when present.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context

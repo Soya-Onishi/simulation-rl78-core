@@ -1,0 +1,174 @@
+# syntax=docker/sandbox-kit:3
+# The Cursor agent as a WORKLOAD, migrated from the built-in v2 cursor
+# kit: the template image as content, v2's entrypoint and environment in
+# the image config, the Cursor credential (API key or OAuth), scoped
+# egress, and the workspace pre-trust hook the interactive TUI needs.
+schemaVersion: "3"
+displayName: Cursor
+author: "Docker, Inc."
+description: >-
+  Cursor's agent CLI as a complete workload: the sandbox-templates base,
+  the Cursor credential (API key or OAuth), scoped egress, and the
+  workspace pre-trust and config seeds the agent needs.
+sourceUrl: https://cursor.com
+version: "2026.10.22"  # the cursor-agent build cursor.dockerfile pins and asserts
+
+kind: workload
+
+provides: ["cursor"]
+
+dockerfile: ./cursor.dockerfile
+
+capabilities:
+  # This workload is an agent sandbox: the host launches the agent rather
+  # than running the image's entrypoint as PID 1, and honors the identity
+  # the image config declares instead of assuming one.
+  - type: com.docker.sandbox/sbx@1
+
+  # Every domain the credential injects into, plus downloads.cursor.com
+  # (cursor-agent update; not covered by cursor.com), plus the template's apt mirrors
+  # (a workload owns its base).
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - api2.cursor.sh:443
+          - api3.cursor.sh:443
+          - repo42.cursor.sh:443
+          - cursor.com:443
+          - downloads.cursor.com:443
+          - archive.ubuntu.com:80
+          - security.ubuntu.com:80
+          - ports.ubuntu.com:80
+          - download.docker.com:443
+
+  # Declaring both apiKey and oauth means "whichever the host has bound".
+  # MIGRATION NOTE: v2's oauth.skipIfEnv is gone — the mode decision
+  # belongs to the host's binding. Cursor has no credentialFile: it runs
+  # with AGENT_CLI_CREDENTIAL_STORE=memory, and the access-token sentinel
+  # reaches the agent through the environment at run time.
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Cursor API access (API key or Cursor OAuth)
+    config:
+      service: cursor
+      phase: runtime
+      apiKey:
+        name: CURSOR_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api2.cursor.sh, header: Authorization, format: "Bearer %s"}
+          - {domain: api3.cursor.sh, header: Authorization, format: "Bearer %s"}
+          - {domain: repo42.cursor.sh, header: Authorization, format: "Bearer %s"}
+          - {domain: cursor.com, header: Authorization, format: "Bearer %s"}
+      oauth:
+        tokenEndpoint: {host: api2.cursor.sh, path: /auth/poll}
+        # The hosts where the OAuth bearer is substituted; inject above
+        # speaks only for the API-key presentation.
+        resourceHosts:
+          - api2.cursor.sh
+          - api3.cursor.sh
+          - repo42.cursor.sh
+          - cursor.com
+        # The refresh sentinel is never rendered into the container; the
+        # proxy still needs it to mask real refresh tokens in responses
+        # and to recognize sentinel-bearing refresh requests.
+        sentinels:
+          accessToken: cursor-oat-proxy-managed
+          refreshToken: cursor-ort-proxy-managed
+        # Cursor's token response spells both fields camelCase; without
+        # the refresh mapping a runtime would look for refresh_token,
+        # find nothing, and pass the real refresh token through unmasked.
+        responseFields:
+          accessToken: accessToken
+          refreshToken: refreshToken
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: mkdir -p /home/agent/.cursor && chown agent:agent /home/agent/.cursor
+          user: "0"
+          description: Ensure .cursor is owned by agent before seeds run
+        # Pre-trust the workspace so the interactive TUI skips its trust
+        # prompt: cursor-agent records trust per workspace slug, derived
+        # from WORKSPACE_DIR, so this cannot be a static file. --yolo
+        # bypasses tool approvals but NOT this gate, and --trust only
+        # works headless.
+        - command: |
+            [ -n "$WORKSPACE_DIR" ] || { echo "WORKSPACE_DIR unset; skipping Cursor workspace pre-trust" >&2; exit 0; }
+            ws="$WORKSPACE_DIR"
+            slug=$(printf '%s' "$ws" | sed 's#^/##; s#/#-#g')
+            dir="/home/agent/.cursor/projects/$slug"
+            mkdir -p "$dir"
+            esc=$(printf '%s' "$ws" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            [ -f "$dir/.workspace-trusted" ] || printf '{"trustedAt":"%s","workspacePath":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$esc" > "$dir/.workspace-trusted"
+          user: agent
+          env: [WORKSPACE_DIR]
+          description: Pre-trust the workspace for the interactive TUI
+      files:
+        # HTTP/1.1+SSE for agent connections, so traffic goes through the
+        # forward proxy. Seeded only when absent: the agent owns it after.
+        - path: /home/agent/.cursor/cli-config.json
+          content: '{"network": {"useHttp1ForAgent": true}}'
+          overwrite: false
+          description: Seed HTTP/1.1+SSE for agent connections
+
+  # Headless verb, so a host can drive a session without the TTY; --trust
+  # only works in this mode, covering what the TUI's pre-trust hook does.
+  # The entry is an argv tail appended to the entrypoint's launch command.
+  - type: com.docker.sandbox/agent-sessions@1
+    config:
+      prompt: ["-p", "--trust", "{{.Prompt}}"]
+
+  # Interactive verbs, for a host that puts a person at the terminal. Tails
+  # append to the entrypoint and run with a terminal attached. The bare
+  # command is the TUI, so newSession is omitted. `--resume` without a chat
+  # id is cursor-agent's session picker. There is no list: its help
+  # describes `ls` as resuming a chat, not as printing ids.
+  - type: com.docker.sandbox/agent-interactive-sessions@1
+    optional: true
+    config:
+      # `--` ends the options: a prompt starting with `-` stays a prompt.
+      prompt: ["--", "{{.Prompt}}"]
+      continue: ["--continue"]
+      resume: ["--resume", "{{.SessionID}}"]
+      sessionPicker: ["--resume"]
+
+  # cursor-agent speaks ACP itself (the hidden `acp` subcommand), taking
+  # the global options placed before it. --force, not the entrypoint's
+  # --yolo: the TUI treats the two as one, but the ACP server reads only
+  # force when deciding to auto-run tools. It keeps running after stdin
+  # closes and stops on SIGTERM, so acp-graceful (see the dockerfile)
+  # follows a stdin close with SIGTERM.
+  - type: com.docker.sandbox/acp@1
+    optional: true
+    description: Drive cursor sessions over the Agent Client Protocol
+    config:
+      agent: cursor
+      command: [acp-graceful, cursor-agent, --force, acp]
+
+  # Where cursor reads shared skills, so the host's store reaches it.
+  # The runtime also exposes selected agent-skill@1 bundles here, even
+  # when host sharing is off or the user has no host skills.
+  - type: com.docker.sandbox/agent-skills@1
+    optional: true
+    config:
+      path: /home/agent/.cursor/skills
+
+  # Accept one context version through runtime policy, or skip both.
+  # Accepting both conflicts; optionality does not express alternatives.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      filename: AGENTS.md
+      directory: /home/agent/workspace
+      content: |
+        # Cursor
+
+        This sandbox runs the Cursor agent CLI. Credentials are proxy-managed: an
+        API key or Cursor OAuth arrives as sentinels, and the workspace is
+        pre-trusted so the TUI skips its trust prompt.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context
