@@ -59,15 +59,18 @@ capabilities:
             {
               "mcpServers": {
                 "serena": {
-                  "command": "serena",
+                  "command": "uvx",
                   "args": [
+                    "--from",
+                    "git+https://github.com/oraios/serena",
+                    "serena", 
                     "start-mcp-server",
                     "--context",
-                    "ide-assistant"
+                    "ide"
                   ]
                 }
               }
-            }
+            } 
 
   # Accept one context version through runtime policy, or skip both.
   - type: com.docker.sandbox/agent-context@1
