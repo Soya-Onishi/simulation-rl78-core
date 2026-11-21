@@ -1,0 +1,55 @@
+# Sandbox-oriented Serena global config.
+# Seeded to /home/agent/.serena/serena_config.yml at sandbox create.
+# Do not commit host-specific projects lists or auth_secret values.
+
+language_backend: LSP
+line_ending: native
+
+gui_log_window: false
+
+# Disable the web dashboard inside the sandbox (no browser / tray there).
+web_dashboard: false
+web_dashboard_open_on_launch: false
+web_dashboard_interface:
+web_dashboard_listen_address: 127.0.0.1
+web_dashboard_trusted_hosts:
+  - 127.0.0.1
+  - localhost
+
+jetbrains_plugin_server_address: 127.0.0.1
+jetbrains_launch_command:
+
+log_level: 20
+trace_lsp_communication: false
+ls_specific_settings: {}
+ls_priorities:
+
+ignored_paths: []
+read_only_memory_patterns: []
+ignored_memory_patterns: []
+
+tool_timeout: 240
+excluded_tools: []
+included_optional_tools: []
+fixed_tools: []
+
+base_modes:
+  - interactive
+  - editing
+default_modes:
+
+default_max_tool_answer_chars: 150000
+token_count_estimator: CHAR_COUNT
+symbol_info_budget: 10
+
+project_serena_folder_location: "$projectDir/.serena"
+trusted_project_path_patterns: []
+
+# Start empty; Serena registers projects as they are activated in-sandbox.
+projects: []
+
+included_apis: []
+excluded_apis: []
+
+# Omit auth_secret so Serena generates one on first load inside the sandbox.
+agent_interface: tools

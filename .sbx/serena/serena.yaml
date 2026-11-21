@@ -29,21 +29,27 @@ provides:
 # Compose with .sbx/rust (rust-analyzer) and .sbx/cc (clangd) so Serena's
 # language servers are available. Those kits are not hard-required here
 # so this mixin can still build alone; agent-context documents the pairing.
+# No network-policy: Serena and its language servers are expected to run
+# fully inside the sandbox at runtime (binaries come from this kit, .sbx/rust,
+# and .sbx/cc). Kit image build traffic is outside sandbox policy.
 capabilities:
-  - type: com.docker.sandbox/network-policy@1
-    config:
-      runtime:
-        allow:
-          # Possible language-server / index fetches Serena may trigger
-          - pypi.org:443
-          - files.pythonhosted.org:443
-          - github.com:443
-          - api.github.com:443
-          - objects.githubusercontent.com:443
-          - release-assets.githubusercontent.com:443
-
   - type: com.docker.sandbox/lifecycle@1
     config:
+      # lifecycle@1 files support content/path only (not contentFile). The
+      # YAML is shipped under /opt/serena/share/ by the dockerfile and copied
+      # into the agent home at create.
+      install:
+        - command: |
+            set -eux
+            src=/opt/serena/share/serena_config.yml
+            dest=/home/agent/.serena/serena_config.yml
+            mkdir -p /home/agent/.serena
+            if [ ! -f "$dest" ]; then
+              cp "$src" "$dest"
+            fi
+            chown -R agent:agent /home/agent/.serena
+          user: "0"
+          description: Seed Serena config with web dashboard disabled
       files:
         # Seed only when absent so a user-edited MCP config is preserved.
         - path: /home/agent/.cursor/mcp.json
@@ -77,8 +83,8 @@ capabilities:
 
             serena start-mcp-server --context ide-assistant
 
-        Pair this kit with `.sbx/rust` (for `rust-analyzer`) and `.sbx/cc`
-        (for `clangd`) so language intelligence works for this repository.
+        Global config is seeded at `/home/agent/.serena/serena_config.yml`
+        with `web_dashboard: false` (and open-on-launch disabled). 
 
   - type: com.docker.sandbox/agent-context@2
     optional: true

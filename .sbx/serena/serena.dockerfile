@@ -37,6 +37,8 @@ RUN set -eux; \
 
 FROM scratch
 COPY --from=build /out /
+# On kit lifecycle install, this config is copied to $HOME/.serena
+COPY serena_config.yml /opt/serena/share/serena_config.yml
 ENV PATH=/opt/serena/bin \
     UV_PYTHON_INSTALL_DIR=/opt/serena/python \
     UV_TOOL_DIR=/opt/serena/tools \
