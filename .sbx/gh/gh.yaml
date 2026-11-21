@@ -1,0 +1,80 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+displayName: GitHub CLI
+description: gh from nixpkgs, pinned by commit, as a self-contained overlay
+sourceUrl: https://github.com/cli/cli
+licenses: [MIT]
+
+kind: mixin
+
+# The nixpkgs commit in the companion Dockerfile is the version authority:
+# gh's version follows from it, a bump is editing the pin, and this kit has
+# no version arg at all.
+provides: ["gh@2.103.2"]
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@2
+    config:
+      runtime:
+        allow:
+          # Git over HTTPS and release downloads. The boundary *can* read
+          # git-over-HTTPS — it terminates TLS, and a bounded entry for
+          # */git-upload-pack passes a clone while */git-receive-pack comes
+          # back 403 — so the reason this stays a bare host grant is scope,
+          # not inspectability: `gh` reaches release assets and arbitrary
+          # repository paths, and no path set narrows that usefully. A kit
+          # wanting one repository, or reads only, should bound it.
+          - github.com
+          # gh reaches most of the REST and GraphQL surface, so the bound
+          # worth stating here is the verb, not the path.
+          - hosts: [api.github.com]
+            methods: [GET, HEAD, POST, PATCH, PUT, DELETE]
+          - hosts: [uploads.github.com]
+            methods: [POST, PUT]
+        deny:
+          # Deletes under the repository tree — the repository itself
+          # among them — are the one thing the injected token should not
+          # reach. Deny wins, so this carves the verb back out of the
+          # entry above for these paths only.
+          - hosts: [api.github.com]
+            methods: [DELETE]
+            paths: [/repos/**]
+
+  - type: com.docker.sandbox/credential@1
+    description: GitHub API access for gh
+    optional: true
+    config:
+      service: github
+      phase: [runtime]
+      apiKey:
+        name: GH_TOKEN
+        proxyManaged: true
+        inject:
+          - {domain: api.github.com, header: Authorization, format: "Bearer %s"}
+          - {domain: uploads.github.com, header: Authorization, format: "Bearer %s"}
+          - {domain: github.com, header: Authorization, format: "Bearer %s"}
+
+  # Accept one context version through runtime policy, or skip both.
+  # Accepting both conflicts; optionality does not express alternatives.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        # GitHub CLI
+
+        `gh` is on PATH at `/usr/local/bin/gh`.
+
+        - Authentication is proxy-managed: `GH_TOKEN` is set to a sentinel and the
+          real credential is injected on requests to github.com, api.github.com,
+          and uploads.github.com. Never print or copy the token; it is not the
+          real value anyway.
+        - Do not run `gh auth login` — authentication already works.
+        - Prefer `gh` over raw git for GitHub operations: `gh pr create`,
+          `gh issue list`, `gh run watch`, `gh api` for anything without a
+          dedicated subcommand.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context
+
+dockerfile: gh.dockerfile

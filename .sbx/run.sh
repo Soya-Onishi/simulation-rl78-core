@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compose the local Cursor workload with rust / cc / serena mixins.
+# Compose the local Cursor workload with project mixins.
 # Kit Spec set (kind: set) cannot reference local paths, so this script
 # is the project-local equivalent of that composition.
 #
@@ -7,6 +7,9 @@
 #   .sbx/run.sh                  # workspace = current directory
 #   .sbx/run.sh .                # explicit workspace
 #   .sbx/run.sh --name my-dev .  # extra sbx run flags, then paths
+#
+# github-ssh requires a host SSH agent with a GitHub-accepted key loaded
+# (ssh-add -l). Create fails without one because ssh-agent@1 is required.
 set -euo pipefail
 
 SBX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,4 +18,6 @@ exec sbx run "${SBX_DIR}/cursor" \
   --kit "${SBX_DIR}/rust" \
   --kit "${SBX_DIR}/cc" \
   --kit "${SBX_DIR}/serena" \
+  --kit "${SBX_DIR}/gh" \
+  --kit "${SBX_DIR}/github-ssh" \
   "$@"
