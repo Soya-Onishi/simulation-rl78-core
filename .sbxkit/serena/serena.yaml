@@ -26,12 +26,12 @@ args:
 provides:
   - "serena@${{ kit.args.version }}"
 
-# Compose with .sbx/rust (rust-analyzer) and .sbx/cc (clangd) so Serena's
+# Compose with .sbxrun/rust (rust-analyzer) and .sbxrun/cc (clangd) so Serena's
 # language servers are available. Those kits are not hard-required here
 # so this mixin can still build alone; agent-context documents the pairing.
 # No network-policy: Serena and its language servers are expected to run
-# fully inside the sandbox at runtime (binaries come from this kit, .sbx/rust,
-# and .sbx/cc). Kit image build traffic is outside sandbox policy.
+# fully inside the sandbox at runtime (binaries come from this kit, .sbxrun/rust,
+# and .sbxrun/cc). Kit image build traffic is outside sandbox policy.
 capabilities:
   - type: com.docker.sandbox/lifecycle@1
     config:

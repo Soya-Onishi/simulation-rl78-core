@@ -4,7 +4,7 @@
 # is the project-local equivalent of that composition.
 #
 # Usage (from anywhere):
-#   .sbx/run.sh                  # workspace = current directory
+#   .sbxkit/run.sh                  # workspace = current directory
 #
 # github-ssh requires a host SSH agent with a GitHub-accepted key loaded
 # (ssh-add -l). Create fails without one because ssh-agent@1 is required.
