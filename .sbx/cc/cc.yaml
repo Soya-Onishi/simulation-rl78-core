@@ -4,14 +4,15 @@ schemaVersion: "3"
 kind: mixin
 displayName: C/C++ build tools
 description: >-
-  Declaration-only mixin that installs gcc/g++ (via build-essential),
-  cmake, ninja-build, and clangd with apt at sandbox create time.
+  Declaration-only mixin that installs cmake, ninja-build, and clangd with
+  apt at sandbox create time. The DHI cursor base already provides gcc,
+  make, and GNU binutils.
 sourceUrl: https://github.com/Soya-Onishi/simulation-rl78-core
 licenses: [MIT]
-version: "1.0.0"
+version: "1.1.0"
 
 # Apt package versions come from the composed workload's mirrors at create
-# time, so this kit does not claim versioned provides for gcc/cmake/etc.
+# time, so this kit does not claim versioned provides for cmake/etc.
 
 capabilities:
   # Install hooks need the distro mirrors; the cursor workload already
@@ -26,6 +27,13 @@ capabilities:
           - archive.ubuntu.com:443
           - security.ubuntu.com:443
           - ports.ubuntu.com:443
+          # cursor workload base may use Debian / DHI apt sources
+          - deb.debian.org:80
+          - security.debian.org:80
+          - deb.debian.org:443
+          - security.debian.org:443
+          - dhi.io:80
+          - dhi.io:443
 
   - type: com.docker.sandbox/lifecycle@1
     config:
@@ -39,12 +47,10 @@ capabilities:
             fi
             apt-get update
             apt-get install -y --no-install-recommends \
-              build-essential \
               cmake \
               ninja-build \
               clangd
             rm -rf /var/lib/apt/lists/*
-            gcc --version
             cmake --version
             ninja --version
             clangd --version
@@ -56,7 +62,7 @@ capabilities:
             - HTTPS_PROXY
             - no_proxy
             - NO_PROXY
-          description: Install gcc/g++, cmake, ninja-build, and clangd via apt
+          description: Install cmake, ninja-build, and clangd via apt
 
   # Accept one context version through runtime policy, or skip both.
   - type: com.docker.sandbox/agent-context@1
@@ -67,14 +73,13 @@ capabilities:
 
         At sandbox create, this kit installs via apt:
 
-        - `build-essential` (gcc, g++, make)
         - `cmake`
         - `ninja-build`
         - `clangd`
 
-        Use these for native builds (for example CMake + Ninja) and C/C++
-        language intelligence. Package versions follow the workload image's
-        apt repositories.
+        The DHI cursor base already includes `gcc`, `make`, and GNU binutils
+        (`readelf`, `nm`, `objdump`, …). Package versions follow the workload
+        image's apt repositories.
 
   - type: com.docker.sandbox/agent-context@2
     optional: true
