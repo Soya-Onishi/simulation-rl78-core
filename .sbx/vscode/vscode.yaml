@@ -1,0 +1,23 @@
+# syntax=docker/sandbox-kit:3
+# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/sandbox-kit-spec/main/schema/kit.schema.json
+schemaVersion: "3"
+kind: mixin
+displayName: VSCode Remote Setting
+licenses: [MIT]
+version: "0.0.1"
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: |
+            set -eux
+            src=/opt/vscode/share/settings.json
+            dest=/home/agent/.vscode-server/data/Machine/settings.json
+            mkdir -p /home/agent/.vscode-server/data/Machine/
+            if [ ! -f "$dest" ]; then
+              cp "$src" "$dest"
+            fi
+            chown -R agent:agent /home/agent/.vscode-server/
+          user: "0"
+          description: Setup vscode remote settings

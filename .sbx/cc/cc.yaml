@@ -35,6 +35,7 @@ capabilities:
           - dhi.io:80
           - dhi.io:443
 
+  # apt install libstdc++6 and /sbin/ldconfig is needed for vscode ssh remote access
   - type: com.docker.sandbox/lifecycle@1
     config:
       install:
@@ -49,7 +50,9 @@ capabilities:
             apt-get install -y --no-install-recommends \
               cmake \
               ninja-build \
-              clangd
+              clangd \
+              libstdc++6
+            /sbin/ldconfig
             rm -rf /var/lib/apt/lists/*
             cmake --version
             ninja --version
