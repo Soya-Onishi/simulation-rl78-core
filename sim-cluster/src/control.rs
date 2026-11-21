@@ -34,19 +34,6 @@ impl HostStopReason {
         }
     }
 
-    /// Parse wire / CLI labels (`breakpoint`, `external`, `external_stop`, …).
-    #[must_use]
-    pub fn from_label(label: &str) -> Option<Self> {
-        match label {
-            "breakpoint" => Some(Self::Breakpoint),
-            "external_stop" | "external" => Some(Self::ExternalStop),
-            "step" => Some(Self::Step),
-            "unmapped" => Some(Self::Unmapped),
-            "until" => Some(Self::Until),
-            _ => None,
-        }
-    }
-
     #[must_use]
     pub fn from_wire(value: u8) -> Option<Self> {
         match value {

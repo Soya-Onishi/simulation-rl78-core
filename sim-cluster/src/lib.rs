@@ -25,7 +25,6 @@ pub mod inspect;
 pub mod ipc;
 pub mod lifecycle;
 pub mod log_msg;
-pub mod node;
 pub mod probe;
 pub mod probe_hub;
 mod probe_log;
@@ -54,7 +53,6 @@ pub use control::{ControlToArbiter, ControlToNode, HostStopReason};
 pub use elf_source::ElfSourceError;
 pub use lifecycle::{NodeEffect, NodeState, PeerEffect, PeerState};
 pub use log_msg::{ClusterLog, LogConsole, LogLevel, LogOrigin};
-pub use node::notify_host_stop;
 pub use probe::{
     MAX_PROBES_PER_BOARD, NodeProbeRuntime, PROBE_NAME_CAP, ProbeAdvertisement, ProbeError,
     ProbePublishers, ProbeWireKind,
