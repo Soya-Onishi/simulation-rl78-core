@@ -1,0 +1,108 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+displayName: GitHub over SSH
+description: >-
+  Lets git fetch from and push to GitHub over SSH and sign commits through
+  the same SSH agent the runtime exposes. The
+  agent logs in to github.com as git and signs git signatures; it signs
+  nothing else.
+
+kind: mixin
+provides: ["github-ssh@1.0.0"]
+version: "1.0.0"
+
+capabilities:
+  # Every GitHub SSH login is the account `git` on github.com; the user is
+  # identified by the key, so naming the account costs nothing and rules
+  # out a login as anyone else. Logins are signed only for sessions the
+  # client binds to GitHub's host key, which OpenSSH's ssh does.
+  - type: com.docker.sandbox/ssh-agent@1
+    description: Push to GitHub over SSH and sign commits with the user's key
+    config:
+      phase: runtime
+      unrestricted: false
+      sign: [git]
+      authenticate: [git@github.com]
+
+  # The agent grants a signature, not a connection: the SSH port has to be
+  # reachable too. How the runtime carries SSH to its boundary is its own
+  # business; the grant is the host and port.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - github.com:22
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      files:
+        # Published keys from https://api.github.com/meta, staged separately
+        # so an existing known_hosts never suppresses the GitHub entries.
+        - path: /home/agent/.ssh/github-ssh-known-hosts
+          mode: "0644"
+          description: GitHub's published SSH host keys
+          content: |
+            github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+            github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+            github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+      startup:
+        # Fill only missing XDG defaults; ~/.gitconfig still takes precedence.
+        - command: |
+            set -eu
+            config="${XDG_CONFIG_HOME:-$HOME/.config}/git/config"
+            mkdir -p "$(dirname "$config")"
+            set_default() {
+              if git config --file "$config" --get "$1" >/dev/null; then
+                return
+              else
+                status=$?
+                [ "$status" -eq 1 ] || return "$status"
+              fi
+              git config --file "$config" "$1" "$2"
+            }
+            set_default gpg.format ssh
+            set_default gpg.ssh.defaultKeyCommand 'ssh-add -L'
+            set_default commit.gpgsign true
+            set_default tag.gpgsign true
+          env: [XDG_CONFIG_HOME]
+          description: Merge missing signing defaults without replacing user settings
+        - command: |
+            set -eu
+            mkdir -p "$HOME/.ssh"
+            touch "$HOME/.ssh/known_hosts"
+            while IFS= read -r key; do
+              if grep -qxF "$key" "$HOME/.ssh/known_hosts"; then
+                continue
+              else
+                status=$?
+                [ "$status" -eq 1 ] || exit "$status"
+              fi
+              printf '\n%s\n' "$key" >> "$HOME/.ssh/known_hosts"
+            done < /home/agent/.ssh/github-ssh-known-hosts
+          description: Merge GitHub host keys while preserving existing entries
+
+  # Accept one context version through runtime policy, or skip both.
+  # Accepting both conflicts; optionality does not express alternatives.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        # GitHub over SSH
+
+        git can fetch from and push to GitHub over SSH (`git@github.com:owner/repo`)
+        with the user's key, through the agent at `$SSH_AUTH_SOCK`. Commits and
+        tags you make are signed through the same agent; Git may select a
+        different key from the one GitHub accepts for authentication.
+
+        - The agent logs in to github.com as `git` and makes git signatures. It
+          refuses every other server, account, and kind of signature, so `ssh` to
+          another host fails by design: do not work around it.
+        - GitHub's host keys are in `~/.ssh/known_hosts`. If ssh reports a changed
+          host key, stop and tell the user; never remove the entry or disable
+          host key checking.
+        - The key belongs to the user. Push only what the user asked for, and say
+          which commits you made.
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context

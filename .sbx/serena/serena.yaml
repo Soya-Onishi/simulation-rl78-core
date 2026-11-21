@@ -1,0 +1,91 @@
+# syntax=docker/sandbox-kit:3
+# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/sandbox-kit-spec/main/schema/kit.schema.json
+schemaVersion: "3"
+kind: mixin
+displayName: Serena MCP server
+description: >-
+  Serena coding-agent MCP server installed with uv --managed-python as a
+  portable overlay, plus a Cursor MCP seed so the agent can launch it
+  inside the sandbox.
+sourceUrl: https://github.com/oraios/serena
+licenses: [MIT]
+version: "${{ kit.args.version }}"
+
+args:
+  version:
+    default: "2.1.0"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$'
+    description: PyPI serena-agent release to install
+    buildArg: SERENA_VERSION
+  pythonVersion:
+    default: "3.12"
+    pattern: '^[0-9]+\.[0-9]+$'
+    description: Managed CPython minor version for the Serena tool env
+    buildArg: SERENA_PYTHON_VERSION
+
+provides:
+  - "serena@${{ kit.args.version }}"
+
+# Compose with .sbx/rust (rust-analyzer) and .sbx/cc (clangd) so Serena's
+# language servers are available. Those kits are not hard-required here
+# so this mixin can still build alone; agent-context documents the pairing.
+# No network-policy: Serena and its language servers are expected to run
+# fully inside the sandbox at runtime (binaries come from this kit, .sbx/rust,
+# and .sbx/cc). Kit image build traffic is outside sandbox policy.
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      # lifecycle@1 files support content/path only (not contentFile). The
+      # YAML is shipped under /opt/serena/share/ by the dockerfile and copied
+      # into the agent home at create.
+      install:
+        - command: |
+            set -eux
+            src=/opt/serena/share/serena_config.yml
+            dest=/home/agent/.serena/serena_config.yml
+            mkdir -p /home/agent/.serena
+            if [ ! -f "$dest" ]; then
+              cp "$src" "$dest"
+            fi
+            chown -R agent:agent /home/agent/.serena
+          user: "0"
+          description: Seed Serena config with web dashboard disabled
+      files:
+        # Seed only when absent so a user-edited MCP config is preserved.
+        - path: /home/agent/.cursor/mcp.json
+          overwrite: false
+          description: Register in-sandbox Serena as a Cursor MCP server
+          content: |
+            {
+              "mcpServers": {
+                "serena": {
+                  "command": "serena",
+                  "args": [
+                    "start-mcp-server",
+                    "--context",
+                    "ide-assistant"
+                  ]
+                }
+              }
+            }
+
+  # Accept one context version through runtime policy, or skip both.
+  - type: com.docker.sandbox/agent-context@1
+    optional: true
+    config: &agent-context
+      content: |
+        ## Serena MCP server
+
+        Serena is installed inside this sandbox (`serena` on `PATH` under
+        `/opt/serena/bin`) with a managed CPython from uv. Cursor is seeded
+        with `/home/agent/.cursor/mcp.json` (created only if missing) that
+        launches:
+
+            serena start-mcp-server --context ide-assistant
+
+        Global config is seeded at `/home/agent/.serena/serena_config.yml`
+        with `web_dashboard: false` (and open-on-launch disabled). 
+
+  - type: com.docker.sandbox/agent-context@2
+    optional: true
+    config: *agent-context
