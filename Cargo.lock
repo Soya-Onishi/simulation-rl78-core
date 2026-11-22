@@ -1489,6 +1489,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sim-orch-contract"
+version = "0.1.0"
+dependencies = [
+ "iceoryx2",
+ "serde",
+ "serde_json",
+ "sim-kernel",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
