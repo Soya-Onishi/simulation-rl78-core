@@ -11,7 +11,7 @@
 #[cfg(not(target_endian = "little"))]
 compile_error!("sim-orch-contract host_ctrl requires little-endian targets");
 
-use std::mem::size_of;
+use std::mem::{offset_of, size_of};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// File name under the cluster iceoryx root (replaces `vt_clock`).
@@ -148,8 +148,16 @@ impl<'a> HostCtrlAtoms<'a> {
     pub unsafe fn from_mapping(base: *mut u8, layout: HostCtrlLayout) -> Self {
         debug_assert_eq!(base.align_offset(8), 0);
         // SAFETY: caller guarantees alignment, size, and exclusive atomic protocol.
-        let ceiling = unsafe { &*base.add(16).cast::<AtomicU64>() };
-        let stop = unsafe { &*base.add(24).cast::<AtomicU64>() };
+        let ceiling = unsafe {
+            &*base
+                .add(offset_of!(HostCtrlHeader, ceiling_ns))
+                .cast::<AtomicU64>()
+        };
+        let stop = unsafe {
+            &*base
+                .add(offset_of!(HostCtrlHeader, stop_generation))
+                .cast::<AtomicU64>()
+        };
         let boards = unsafe {
             std::slice::from_raw_parts(
                 base.add(HostCtrlLayout::BOARDS_OFFSET).cast::<AtomicU64>(),
