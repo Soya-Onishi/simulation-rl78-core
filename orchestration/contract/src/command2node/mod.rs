@@ -34,8 +34,8 @@ pub enum NodeCommand {
         payload: [u8; INSPECT_CAP],
     },
     Action {
-        device: u64,
-        action: u64,
+        device: HashedId<u64>,
+        action: HashedId<u64>,
         param_count: u8,
         params: [f64; MAX_ACTION_PARAMS],
     },

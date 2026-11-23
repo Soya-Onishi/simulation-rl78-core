@@ -30,8 +30,8 @@ pub enum NodeCommandDto {
         payload: Vec<u8>,
     },
     Action {
-        device: u64,
-        action: u64,
+        device: HashedId<u64>,
+        action: HashedId<u64>,
         params: Vec<f64>,
     },
     /// Add probe ids (same semantics as wire [`NodeCommand::ProbeSubscribe`]).
@@ -142,5 +142,33 @@ mod tests {
             .collect::<Vec<_>>();
         let dto = NodeCommandDto::ProbeSubscribe { probe_ids: ids };
         assert_eq!(dto.to_wire(), Err(NodeCommandDtoError::TooManyProbes));
+    }
+
+    #[test]
+    fn action_ids_serde_as_hex() {
+        let dto = NodeCommandDto::Action {
+            device: HashedId::new(0xabcdu64),
+            action: HashedId::new(0x10u64),
+            params: vec![1.5],
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["device"], "000000000000abcd");
+        assert_eq!(v["action"], "0000000000000010");
+        let back: NodeCommandDto = serde_json::from_value(v).unwrap();
+        let wire = back.to_wire().unwrap();
+        match wire {
+            NodeCommand::Action {
+                device,
+                action,
+                param_count,
+                params,
+            } => {
+                assert_eq!(device, HashedId::new(0xabcd));
+                assert_eq!(action, HashedId::new(0x10));
+                assert_eq!(param_count, 1);
+                assert_eq!(params[0], 1.5);
+            }
+            _ => panic!("expected Action"),
+        }
     }
 }
