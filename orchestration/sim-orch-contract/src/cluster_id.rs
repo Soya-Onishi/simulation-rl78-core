@@ -1,10 +1,10 @@
 //! Simulation cluster identity: process id + epoch nanos (not a name hash).
 //!
-//! REST / serde wire form is a JSON object `{ "id", "nano" }` (#144); `nano` is
-//! a JSON number narrowed to `u64` on the wire (epoch nanos fit). Iceoryx
-//! service path segments use [`Display`] (`"{id}-{nano}"`) so the
-//! identity stays structured in payloads ([`EndpointWire`](crate::EndpointWire))
-//! rather than a free-form `str`.
+//! REST / serde wire form is a JSON object `{ "id", "nano" }` (#144); both
+//! fields are decimal strings so full `u32` / `u128` range is preserved without
+//! JSON number limits. Iceoryx service path segments use [`Display`]
+//! (`"{id}-{nano}"`) so the identity stays structured in payloads
+//! ([`EndpointWire`](crate::EndpointWire)) rather than a free-form `str`.
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize, Serializer};
 /// Unique id for one simulation cluster instance on a host.
 ///
 /// Layout keeps `nano` naturally aligned; `_pad` is always zero and skipped by
-/// serde (public JSON is only `id` + `nano`).
+/// serde (public JSON is only `id` + `nano` as decimal strings).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ZeroCopySend)]
 pub struct ClusterId {
@@ -71,14 +71,9 @@ impl fmt::Display for ClusterId {
 
 impl Serialize for ClusterId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // JSON numbers are not full u128; epoch nanos fit in u64. Keep the
-        // in-memory field as u128 for path_key / iceoryx layout.
-        let nano = u64::try_from(self.nano).map_err(|_| {
-            serde::ser::Error::custom("cluster nano exceeds u64 (JSON wire limit)")
-        })?;
         let mut state = serializer.serialize_struct("ClusterId", 2)?;
-        state.serialize_field("id", &self.id)?;
-        state.serialize_field("nano", &nano)?;
+        state.serialize_field("id", &self.id.to_string())?;
+        state.serialize_field("nano", &self.nano.to_string())?;
         state.end()
     }
 }
@@ -98,7 +93,7 @@ impl<'de> Deserialize<'de> for ClusterId {
             type Value = ClusterId;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("ClusterId object with id and nano")
+                f.write_str("ClusterId object with string id and nano")
             }
 
             fn visit_map<V: MapAccess<'de>>(self, mut map: V) -> Result<ClusterId, V::Error> {
@@ -110,14 +105,17 @@ impl<'de> Deserialize<'de> for ClusterId {
                             if id.is_some() {
                                 return Err(de::Error::duplicate_field("id"));
                             }
-                            id = Some(map.next_value()?);
+                            let s: String = map.next_value()?;
+                            let parsed = s.parse::<u32>().map_err(de::Error::custom)?;
+                            id = Some(parsed);
                         }
                         Field::Nano => {
                             if nano.is_some() {
                                 return Err(de::Error::duplicate_field("nano"));
                             }
-                            let n: u64 = map.next_value()?;
-                            nano = Some(u128::from(n));
+                            let s: String = map.next_value()?;
+                            let parsed = s.parse::<u128>().map_err(de::Error::custom)?;
+                            nano = Some(parsed);
                         }
                     }
                 }
@@ -139,10 +137,28 @@ mod tests {
     fn json_object_wire() {
         let c = ClusterId::new(7, 99);
         let v = serde_json::to_value(c).unwrap();
-        assert_eq!(v, serde_json::json!({"id": 7, "nano": 99}));
+        assert_eq!(v, serde_json::json!({"id": "7", "nano": "99"}));
         let back: ClusterId = serde_json::from_value(v).unwrap();
         assert_eq!(back, c);
         assert_eq!(back.path_key(), "7-99");
+    }
+
+    #[test]
+    fn json_preserves_full_u128_nano() {
+        let nano = u128::MAX;
+        let c = ClusterId::new(1, nano);
+        let v = serde_json::to_value(c).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"id": "1", "nano": u128::MAX.to_string()})
+        );
+        let back: ClusterId = serde_json::from_value(v).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn rejects_numeric_wire_fields() {
+        assert!(serde_json::from_str::<ClusterId>(r#"{"id":7,"nano":99}"#).is_err());
     }
 
     #[test]

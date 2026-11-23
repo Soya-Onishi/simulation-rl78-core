@@ -60,21 +60,27 @@ impl EndpointWire {
 
 /// Cross-host frame built by the Endpoint transfer thread.
 ///
-/// Aggregates one or more [`EndpointWire`] samples. Not an iceoryx
-/// `ZeroCopySend` type (`Vec`); used only on the host-to-host path.
+/// Carries the sender-side virtual time and zero or more [`EndpointWire`]
+/// samples. `payloads` may be empty for a periodic VT tick or a stop interrupt
+/// with no queued endpoint data. Not an iceoryx `ZeroCopySend` type (`Vec`);
+/// used only on the host-to-host path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EndpointDatagram {
     /// `0` = no stop hint; non-zero = remote should apply local SHM stop.
     /// Does **not** carry or synchronize `stop_generation` across hosts.
     pub stop_flag: u8,
+    /// Virtual time at send (ns). Present even when `payloads` is empty.
+    pub virtual_time_ns: u64,
+    /// Aggregated endpoint samples; empty is valid (VT tick or stop interrupt).
     pub payloads: Vec<EndpointWire>,
 }
 
 impl EndpointDatagram {
     #[must_use]
-    pub fn new(stop_flag: u8, payloads: Vec<EndpointWire>) -> Self {
+    pub fn new(stop_flag: u8, virtual_time_ns: u64, payloads: Vec<EndpointWire>) -> Self {
         Self {
             stop_flag,
+            virtual_time_ns,
             payloads,
         }
     }
@@ -111,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn datagram_aggregates_wires_with_stop_flag_only() {
+    fn datagram_carries_vt_and_optional_payloads() {
         let w = EndpointWire::new(
             ClusterId::new(1, 2),
             HashedId::new(3),
@@ -121,9 +127,21 @@ mod tests {
                 lo_width_ns: 10,
             }),
         );
-        let d = EndpointDatagram::new(1, vec![w]);
+        let d = EndpointDatagram::new(1, 1_000, vec![w]);
         assert!(d.has_stop_mark());
+        assert_eq!(d.virtual_time_ns, 1_000);
         assert_eq!(d.payloads.len(), 1);
         assert_eq!(d.payloads[0].src.get(), 4);
+    }
+
+    #[test]
+    fn datagram_allows_empty_payloads() {
+        let vt_tick = EndpointDatagram::new(0, 42, Vec::new());
+        assert!(!vt_tick.has_stop_mark());
+        assert!(vt_tick.payloads.is_empty());
+
+        let stop = EndpointDatagram::new(1, 42, Vec::new());
+        assert!(stop.has_stop_mark());
+        assert!(stop.payloads.is_empty());
     }
 }

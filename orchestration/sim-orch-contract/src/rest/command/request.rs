@@ -51,7 +51,7 @@ mod tests {
         };
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"op\":\"ensure_session\""));
-        assert!(s.contains("\"cluster_id\":{\"id\":1,\"nano\":2}"));
+        assert!(s.contains("\"cluster_id\":{\"id\":\"1\",\"nano\":\"2\"}"));
         let back: OrchestratorRequest = serde_json::from_str(&s).unwrap();
         assert_eq!(back, req);
     }
