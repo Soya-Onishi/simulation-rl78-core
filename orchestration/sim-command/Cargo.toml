@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 axum = "0.8"
 contract = { path = "../contract" }
+host-ctrl = { path = "../host-ctrl" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]

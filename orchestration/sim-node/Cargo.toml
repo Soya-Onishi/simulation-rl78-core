@@ -1,0 +1,11 @@
+[package]
+name = "sim-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Node process runtime (IPC / Probe / Simulation threads; issue #141 / #147)"
+publish = false
+
+[dependencies]
+contract = { path = "../contract" }
+host-ctrl = { path = "../host-ctrl" }
