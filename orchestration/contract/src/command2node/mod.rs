@@ -1,4 +1,4 @@
-//! Command ↔ Node iceoryx Request-Response shapes (#141).
+//! Command → Node iceoryx Request-Response shapes (#141).
 //!
 //! Fixed-capacity `repr(C)` + [`ZeroCopySend`] samples (same pattern as
 //! `sim-cluster` action IPC). REST / JSON uses

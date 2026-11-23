@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::HashedId;
-use crate::node_cmd::NodeCommand;
+use crate::command2node::NodeCommand;
 
 /// `POST` [`super::paths::start`] body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +99,7 @@ pub struct ProbeInterestBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node_cmd::MAX_NODE_PROBE_IDS;
+    use crate::command2node::MAX_NODE_PROBE_IDS;
 
     #[test]
     fn start_body_omits_none_until_ns() {

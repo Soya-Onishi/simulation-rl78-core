@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::ClusterId;
-use crate::node_cmd::{INSPECT_CAP, NodeCommandError, NodeCommandResult};
+use crate::command2node::{INSPECT_CAP, NodeCommandError, NodeCommandResult};
 
 /// Node process lifecycle as observed by the Build thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
