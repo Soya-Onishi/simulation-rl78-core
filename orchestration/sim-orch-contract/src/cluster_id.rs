@@ -7,6 +7,7 @@
 //! ([`EndpointWire`](crate::EndpointWire)) rather than a free-form `str`.
 
 use std::fmt;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use iceoryx2::prelude::ZeroCopySend;
@@ -66,6 +67,29 @@ impl fmt::Debug for ClusterId {
 impl fmt::Display for ClusterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{}", self.id, self.nano)
+    }
+}
+
+/// Failed parse of a [`ClusterId`] path segment (`"{id}-{nano}"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParseClusterIdError;
+
+impl fmt::Display for ParseClusterIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid ClusterId path segment (expected {id}-{nano})")
+    }
+}
+
+impl std::error::Error for ParseClusterIdError {}
+
+impl FromStr for ClusterId {
+    type Err = ParseClusterIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (id, nano) = s.split_once('-').ok_or(ParseClusterIdError)?;
+        let id = id.parse::<u32>().map_err(|_| ParseClusterIdError)?;
+        let nano = nano.parse::<u128>().map_err(|_| ParseClusterIdError)?;
+        Ok(Self::new(id, nano))
     }
 }
 
@@ -182,5 +206,14 @@ mod tests {
         assert!(!key.contains('/'));
         assert!(!key.contains('\0'));
         assert_eq!(key, format!("{}-{}", u32::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn path_segment_round_trip() {
+        let c = ClusterId::new(7, 99);
+        assert_eq!(c.to_string().parse::<ClusterId>().unwrap(), c);
+        assert!("7".parse::<ClusterId>().is_err());
+        assert!("7-".parse::<ClusterId>().is_err());
+        assert!("x-99".parse::<ClusterId>().is_err());
     }
 }

@@ -14,7 +14,7 @@ pub mod probe_wire;
 pub mod rest;
 pub mod shm;
 
-pub use cluster_id::ClusterId;
+pub use cluster_id::{ClusterId, ParseClusterIdError};
 pub use endpoint::{EndpointDatagram, EndpointPayload, EndpointWire};
 pub use hashed_id::{HashedId, Hexable};
 pub use names::{
@@ -26,11 +26,11 @@ pub use node_cmd::{
 pub use probe_log::{DigitalProbeData, ProbeLogRecord};
 pub use probe_wire::{DigitalLiveValue, ProbeLiveSample};
 pub use rest::{
-    COMMAND_API_PREFIX, CommandHostStatus, NodeCommandDto, NodeCommandDtoError,
+    API_PREFIX, CommandHostStatus, NodeCommandBody, NodeCommandDto, NodeCommandDtoError,
     NodeCommandErrorDto, NodeCommandResultDto, NodeProcessStatus, OrchestratorReply,
-    OrchestratorRequest, PATH_BUILD_ENSURE, PATH_BUILD_RESTART, PATH_BUILD_STATUS,
-    PATH_BUILD_TERMINATE, PATH_NODE_COMMAND, PATH_PROBE_INTEREST, PATH_RESET, PATH_SESSION,
-    PATH_START, PATH_STATUS, PATH_STOP, RestErrorBody, RestErrorCode, build_status_url,
+    ProbeInterestBody, RestErrorBody, RestErrorCode, StartBody, build_ensure, build_restart,
+    build_status, build_terminate, node_command, probe_interest, reset, sessions, start, status,
+    stop,
 };
 pub use shm::{
     HOST_CTRL_FILE, HOST_CTRL_MAGIC, HOST_CTRL_VERSION, HostCtrlAtoms, HostCtrlHeader,

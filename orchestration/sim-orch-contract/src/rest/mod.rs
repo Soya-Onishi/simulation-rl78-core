@@ -9,10 +9,9 @@ pub mod error;
 pub mod node_dto;
 
 pub use command::{
-    COMMAND_API_PREFIX, CommandHostStatus, NodeProcessStatus, OrchestratorReply,
-    OrchestratorRequest, PATH_BUILD_ENSURE, PATH_BUILD_RESTART, PATH_BUILD_STATUS,
-    PATH_BUILD_TERMINATE, PATH_NODE_COMMAND, PATH_PROBE_INTEREST, PATH_RESET, PATH_SESSION,
-    PATH_START, PATH_STATUS, PATH_STOP, build_status_url,
+    API_PREFIX, CommandHostStatus, NodeCommandBody, NodeProcessStatus, OrchestratorReply,
+    ProbeInterestBody, StartBody, build_ensure, build_restart, build_status, build_terminate,
+    node_command, probe_interest, reset, sessions, start, status, stop,
 };
 pub use error::{RestErrorBody, RestErrorCode};
 pub use node_dto::{

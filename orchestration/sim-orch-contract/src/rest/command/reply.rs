@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::hashed_id::HashedId;
+use crate::cluster_id::ClusterId;
 use crate::rest::node_dto::NodeCommandResultDto;
 
 /// Node process lifecycle as observed by the Build thread.
@@ -15,7 +15,7 @@ pub enum NodeProcessStatus {
     Unknown { detail: String },
 }
 
-/// Coarse host / command status (`GET` [`super::paths::PATH_STATUS`] or embedded in replies).
+/// Coarse host / command status (`GET` [`super::paths::status`] or embedded in replies).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CommandHostStatus {
@@ -30,11 +30,10 @@ pub enum CommandHostStatus {
 #[serde(tag = "ok", rename_all = "snake_case")]
 pub enum OrchestratorReply {
     Ack,
+    /// `POST` [`super::paths::sessions`] — Command-assigned identity.
+    SessionCreated { cluster_id: ClusterId },
     Status(CommandHostStatus),
     Node(NodeCommandResultDto),
-    /// `GET` [`super::paths::PATH_BUILD_STATUS`] body (`node_key` matches the path param).
-    BuildStatus {
-        node_key: HashedId<u64>,
-        status: NodeProcessStatus,
-    },
+    /// `GET` [`super::paths::build_status`] (`node_key` is the path param).
+    BuildStatus { status: NodeProcessStatus },
 }

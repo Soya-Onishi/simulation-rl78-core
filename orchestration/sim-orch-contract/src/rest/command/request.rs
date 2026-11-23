@@ -1,43 +1,31 @@
 //! Orchestrator → Command request bodies.
+//!
+//! Resource ids (`cluster_id`, `node_key`) are path params — see [`super::paths`].
 
 use serde::{Deserialize, Serialize};
 
-use crate::cluster_id::ClusterId;
 use crate::hashed_id::HashedId;
 use crate::rest::node_dto::NodeCommandDto;
 
-/// JSON body for Orchestrator → Command `POST` routes.
-///
-/// Pairing with paths is documented on each variant. `GET` routes take no body
-/// (see [`super::paths::PATH_STATUS`], [`super::paths::PATH_BUILD_STATUS`]).
+/// `POST` [`super::paths::start`] body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartBody {
+    /// `None` / omitted = run without a virtual-time ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ns: Option<u64>,
+}
+
+/// `POST` [`super::paths::node_command`] body.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum OrchestratorRequest {
-    /// `POST` [`super::paths::PATH_SESSION`]
-    EnsureSession { cluster_id: ClusterId },
-    /// `POST` [`super::paths::PATH_START`]
-    Start { until_ns: Option<u64> },
-    /// `POST` [`super::paths::PATH_STOP`]
-    Stop,
-    /// `POST` [`super::paths::PATH_RESET`]
-    Reset,
-    /// `POST` [`super::paths::PATH_NODE_COMMAND`] — Command fans out via iceoryx RR.
-    NodeCommand {
-        node_key: HashedId<u64>,
-        command: NodeCommandDto,
-    },
-    /// `POST` [`super::paths::PATH_PROBE_INTEREST`] — **add** probe ids for aggregation
-    /// toward Orchestrator (same add semantics as wire `NodeCommand::ProbeSubscribe`).
-    ProbeInterest {
-        node_key: HashedId<u64>,
-        probe_ids: Vec<HashedId<u64>>,
-    },
-    /// `POST` [`super::paths::PATH_BUILD_ENSURE`] — Build thread stub (spawn / ensure alive).
-    BuildEnsure { node_key: HashedId<u64> },
-    /// `POST` [`super::paths::PATH_BUILD_RESTART`]
-    BuildRestart { node_key: HashedId<u64> },
-    /// `POST` [`super::paths::PATH_BUILD_TERMINATE`]
-    BuildTerminate { node_key: HashedId<u64> },
+pub struct NodeCommandBody {
+    pub command: NodeCommandDto,
+}
+
+/// `POST` [`super::paths::probe_interest`] body — **add** probe ids for aggregation
+/// toward Orchestrator (same add semantics as wire `NodeCommand::ProbeSubscribe`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeInterestBody {
+    pub probe_ids: Vec<HashedId<u64>>,
 }
 
 #[cfg(test)]
@@ -45,14 +33,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_json_round_trip() {
-        let req = OrchestratorRequest::EnsureSession {
-            cluster_id: ClusterId::new(1, 2),
+    fn start_body_omits_none_until_ns() {
+        let body = StartBody { until_ns: None };
+        assert_eq!(serde_json::to_value(&body).unwrap(), serde_json::json!({}));
+        let back: StartBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(back.until_ns, None);
+    }
+
+    #[test]
+    fn probe_interest_round_trip() {
+        let body = ProbeInterestBody {
+            probe_ids: vec![HashedId::new(1), HashedId::new(2)],
         };
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(s.contains("\"op\":\"ensure_session\""));
-        assert!(s.contains("\"cluster_id\":{\"id\":\"1\",\"nano\":\"2\"}"));
-        let back: OrchestratorRequest = serde_json::from_str(&s).unwrap();
-        assert_eq!(back, req);
+        let s = serde_json::to_string(&body).unwrap();
+        let back: ProbeInterestBody = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, body);
     }
 }
