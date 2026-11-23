@@ -1,14 +1,14 @@
 //! Axum router for Orchestrator → Command REST.
 //!
-//! Routes are registered against [`sim_orch_contract`] `ROUTE` templates so a
-//! missing path param fails at compile/review time rather than as an ambiguous
-//! contract. Clients use the matching `url(...)` helpers.
+//! Routes are registered against [`contract`] `ROUTE` templates so a missing
+//! path param fails at compile/review time rather than as an ambiguous contract.
+//! Clients use the matching `url(...)` helpers.
 
 use axum::extract::{Json, Path};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
-use sim_orch_contract::{
+use contract::{
     build_ensure, build_restart, build_status, build_terminate, node_command, probe_interest,
     reset, sessions, start, status, stop, ClusterId, HashedId, NodeCommandBody, OrchestratorReply,
     ProbeInterestBody, RestErrorBody, RestErrorCode, StartBody,

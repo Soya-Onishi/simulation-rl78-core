@@ -6,7 +6,7 @@ and [#139](https://github.com/Soya-Onishi/simulation-rl78-core/issues/139)).
 
 | Path | Role |
 |------|------|
-| `sim-orch-contract` | Wire / SHM / REST / iceoryx service contracts (no runtime loops) |
+| `contract` | Wire / SHM / REST / iceoryx service contracts (no runtime loops) |
 | `sim-command` | Command host: Orchestrator REST router (stub handlers) + future 4-thread runtime |
 
 Runtime crates (`sim-node`, `sim-orchestrator`, …) land here as the migration

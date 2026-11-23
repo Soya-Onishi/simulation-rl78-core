@@ -210,6 +210,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "contract"
+version = "0.1.0"
+dependencies = [
+ "iceoryx2",
+ "serde",
+ "serde_json",
+ "sim-kernel",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1479,7 +1489,7 @@ name = "sim-command"
 version = "0.1.0"
 dependencies = [
  "axum",
- "sim-orch-contract",
+ "contract",
  "tokio",
  "tower",
 ]
@@ -1496,16 +1506,6 @@ dependencies = [
  "object",
  "typenum",
  "xxhash-rust",
-]
-
-[[package]]
-name = "sim-orch-contract"
-version = "0.1.0"
-dependencies = [
- "iceoryx2",
- "serde",
- "serde_json",
- "sim-kernel",
 ]
 
 [[package]]

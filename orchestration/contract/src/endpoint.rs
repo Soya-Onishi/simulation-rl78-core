@@ -12,8 +12,7 @@
 use iceoryx2::prelude::ZeroCopySend;
 use sim_kernel::{AnalogVoltage, DigitalLevel, Pulse, Scalar, UartFrame};
 
-use crate::cluster_id::ClusterId;
-use crate::hashed_id::HashedId;
+use crate::id::{ClusterId, HashedId};
 
 /// Unified payload kinds carried on the per-node endpoint subscriber.
 #[repr(C)]

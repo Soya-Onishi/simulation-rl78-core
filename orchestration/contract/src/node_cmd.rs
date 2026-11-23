@@ -1,12 +1,13 @@
 //! Command ↔ Node iceoryx Request-Response shapes (#141).
 //!
 //! Fixed-capacity `repr(C)` + [`ZeroCopySend`] samples (same pattern as
-//! `sim-cluster` action IPC). REST / JSON uses [`crate::rest::NodeCommandDto`].
+//! `sim-cluster` action IPC). REST / JSON uses
+//! [`crate::orchestrator2command::NodeCommandDto`].
 
 use iceoryx2::prelude::ZeroCopySend;
 use sim_kernel::MAX_ACTION_PARAMS;
 
-use crate::hashed_id::HashedId;
+use crate::id::HashedId;
 
 /// Max opaque inspect request / result bytes on the RR sample.
 pub const INSPECT_CAP: usize = 1024;

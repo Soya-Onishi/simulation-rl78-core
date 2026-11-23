@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cluster_id::ClusterId;
-use crate::rest::node_dto::NodeCommandResultDto;
+use crate::id::ClusterId;
+use crate::node_cmd::{INSPECT_CAP, NodeCommandError, NodeCommandResult};
 
 /// Node process lifecycle as observed by the Build thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,54 @@ pub enum CommandHostStatus {
     Running,
     Stopping,
     Fault { message: String },
+}
+
+/// JSON form of a node command result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NodeCommandResultDto {
+    Success,
+    InspectResult { payload: Vec<u8> },
+    Error { code: NodeCommandErrorDto },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeCommandErrorDto {
+    Unavailable,
+    ImplFault,
+    NotFoundDevice,
+    NotFoundAction,
+    BadParam,
+    Busy,
+}
+
+impl From<NodeCommandError> for NodeCommandErrorDto {
+    fn from(value: NodeCommandError) -> Self {
+        match value {
+            NodeCommandError::Unavailable => Self::Unavailable,
+            NodeCommandError::ImplFault => Self::ImplFault,
+            NodeCommandError::NotFoundDevice => Self::NotFoundDevice,
+            NodeCommandError::NotFoundAction => Self::NotFoundAction,
+            NodeCommandError::BadParam => Self::BadParam,
+            NodeCommandError::Busy => Self::Busy,
+        }
+    }
+}
+
+impl From<NodeCommandResult> for NodeCommandResultDto {
+    fn from(value: NodeCommandResult) -> Self {
+        match value {
+            NodeCommandResult::Success => Self::Success,
+            NodeCommandResult::InspectResult { len, payload } => {
+                let n = usize::from(len).min(INSPECT_CAP);
+                Self::InspectResult {
+                    payload: payload[..n].to_vec(),
+                }
+            }
+            NodeCommandResult::Error(e) => Self::Error { code: e.into() },
+        }
+    }
 }
 
 /// Successful Command reply body.

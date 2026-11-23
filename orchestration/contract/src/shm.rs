@@ -9,7 +9,7 @@
 //! same host must not carry a stop mark (#141).
 
 #[cfg(not(target_endian = "little"))]
-compile_error!("sim-orch-contract host_ctrl requires little-endian targets");
+compile_error!("contract host_ctrl requires little-endian targets");
 
 use std::mem::{offset_of, size_of};
 use std::sync::atomic::{AtomicU64, Ordering};

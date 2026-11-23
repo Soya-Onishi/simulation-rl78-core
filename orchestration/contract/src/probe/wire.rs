@@ -1,16 +1,16 @@
 //! Live probe iceoryx samples on `sim-cluster/{cluster}/probe` (#141).
 //!
 //! One tagged publisher replaces today's per-probe typed services. Disk JSON
-//! spill uses [`crate::probe_log`]; this module is the ZeroCopy hot path only.
+//! spill uses [`crate::probe::log`]; this module is the ZeroCopy hot path only.
 //!
-//! Digital live values carry the same fields as [`crate::probe_log::DigitalProbeData`]
+//! Digital live values carry the same fields as [`crate::probe::DigitalProbeData`]
 //! (including PWM `ratio` / `length`) so ProbeTap → mpsc → live/log stay aligned.
 
 use iceoryx2::prelude::ZeroCopySend;
 use sim_kernel::{AnalogVoltage, DigitalLevel, UartFrame};
 
-use crate::hashed_id::HashedId;
-use crate::probe_log::DigitalProbeData;
+use crate::id::HashedId;
+use crate::probe::log::DigitalProbeData;
 
 /// Digital probe value on the live / mpsc path (#141 `data` shape).
 ///

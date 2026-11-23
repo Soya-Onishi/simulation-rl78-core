@@ -3,8 +3,7 @@
 //! Cluster identity is [`ClusterId`] (`Display` = `"{id}-{nano}"` path segment).
 //! Node keys are [`HashedId<u64>`] (16 lowercase hex digits).
 
-use crate::cluster_id::ClusterId;
-use crate::hashed_id::HashedId;
+use crate::id::{ClusterId, HashedId};
 
 /// Probe publisher path suffix under the cluster key.
 pub const PROBE_SERVICE_SUFFIX: &str = "probe";

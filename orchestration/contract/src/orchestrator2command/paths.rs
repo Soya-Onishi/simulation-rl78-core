@@ -7,8 +7,7 @@
 //! Resource identity lives in the URI (same practice as `/api/simulation/{id}/…`).
 //! `url` is always derived from `ROUTE` by filling placeholders, so the two cannot drift.
 
-use crate::cluster_id::ClusterId;
-use crate::hashed_id::HashedId;
+use crate::id::{ClusterId, HashedId};
 
 /// Build a path under the Command API prefix (`/v1/command`).
 macro_rules! command_path {
