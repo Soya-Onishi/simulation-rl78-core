@@ -1,4 +1,4 @@
-//! Live probe iceoryx samples on `sim-cluster/{cluster.path_key}/probe` (#141).
+//! Live probe iceoryx samples on `sim-cluster/{cluster}/probe` (#141).
 //!
 //! One tagged publisher replaces today's per-probe typed services. Disk JSON
 //! spill uses [`crate::probe_log`]; this module is the ZeroCopy hot path only.

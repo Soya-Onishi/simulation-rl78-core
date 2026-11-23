@@ -2,7 +2,7 @@
 //!
 //! REST / serde wire form is a JSON object `{ "id", "nano" }` (#144); `nano` is
 //! a JSON number narrowed to `u64` on the wire (epoch nanos fit). Iceoryx
-//! service path segments use [`ClusterId::path_key`] (`"{id}-{nano}"`) so the
+//! service path segments use [`Display`] (`"{id}-{nano}"`) so the
 //! identity stays structured in payloads ([`EndpointWire`](crate::EndpointWire))
 //! rather than a free-form `str`.
 
@@ -47,10 +47,10 @@ impl ClusterId {
         Self::new(std::process::id(), nano)
     }
 
-    /// Deterministic iceoryx / filesystem path segment (`"{id}-{nano}"`).
+    /// Owned form of the [`Display`] path segment (`"{id}-{nano}"`).
     #[must_use]
     pub fn path_key(self) -> String {
-        format!("{}-{}", self.id, self.nano)
+        self.to_string()
     }
 }
 
@@ -65,7 +65,7 @@ impl fmt::Debug for ClusterId {
 
 impl fmt::Display for ClusterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.path_key())
+        write!(f, "{}-{}", self.id, self.nano)
     }
 }
 
