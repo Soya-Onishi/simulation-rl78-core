@@ -5,7 +5,7 @@
 //! - `url(...)`: concrete path for clients ([`ClusterId`] / [`HashedId`] [`Display`])
 //!
 //! Resource identity lives in the URI (same practice as `/api/simulation/{id}/…`).
-//! `ROUTE` and `url` are generated from one literal tail so they cannot drift.
+//! `url` is always derived from `ROUTE` by filling placeholders, so the two cannot drift.
 
 use crate::cluster_id::ClusterId;
 use crate::hashed_id::HashedId;
@@ -37,15 +37,13 @@ pub mod sessions {
 macro_rules! session_route {
     ($name:ident, $tail:literal) => {
         pub mod $name {
-            use super::{API_PREFIX, ClusterId};
+            use super::ClusterId;
 
             pub const ROUTE: &str = command_path!("/sessions/{cluster_id}", $tail);
 
             #[must_use]
             pub fn url(cluster_id: ClusterId) -> String {
-                let mut path = format!("{API_PREFIX}/sessions/{cluster_id}");
-                path.push_str($tail);
-                path
+                ROUTE.replace("{cluster_id}", &cluster_id.to_string())
             }
         }
     };
@@ -60,16 +58,16 @@ session_route!(status, "/status");
 macro_rules! node_route {
     ($name:ident, $tail:literal) => {
         pub mod $name {
-            use super::{API_PREFIX, ClusterId, HashedId};
+            use super::{ClusterId, HashedId};
 
             pub const ROUTE: &str =
                 command_path!("/sessions/{cluster_id}/nodes/{node_key}", $tail);
 
             #[must_use]
             pub fn url(cluster_id: ClusterId, node_key: HashedId<u64>) -> String {
-                let mut path = format!("{API_PREFIX}/sessions/{cluster_id}/nodes/{node_key}");
-                path.push_str($tail);
-                path
+                ROUTE
+                    .replace("{cluster_id}", &cluster_id.to_string())
+                    .replace("{node_key}", &node_key.to_string())
             }
         }
     };
@@ -101,16 +99,21 @@ mod tests {
     }
 
     #[test]
-    fn url_matches_route_after_placeholder_fill() {
+    fn url_is_route_with_placeholders_filled() {
         let c = ClusterId::new(1, 2);
         let n = "deadbeefcafebabe".parse::<HashedId<u64>>().unwrap();
 
-        let filled_session = start::ROUTE.replace("{cluster_id}", &c.to_string());
-        assert_eq!(start::url(c), filled_session);
-
-        let filled_node = build_status::ROUTE
-            .replace("{cluster_id}", &c.to_string())
-            .replace("{node_key}", &n.to_string());
-        assert_eq!(build_status::url(c, n), filled_node);
+        assert_eq!(start::url(c), "/v1/command/sessions/1-2/start");
+        assert_eq!(stop::url(c), "/v1/command/sessions/1-2/stop");
+        assert_eq!(reset::url(c), "/v1/command/sessions/1-2/reset");
+        assert_eq!(status::url(c), "/v1/command/sessions/1-2/status");
+        assert_eq!(
+            build_status::url(c, n),
+            "/v1/command/sessions/1-2/nodes/deadbeefcafebabe/build/status"
+        );
+        assert_eq!(
+            node_command::url(c, n),
+            "/v1/command/sessions/1-2/nodes/deadbeefcafebabe/command"
+        );
     }
 }
