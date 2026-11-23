@@ -9,6 +9,8 @@ members = [
     "plants/boiler-plant",
     "sim-kernel",
     "sim-cluster",
+    "orchestration/contract",
+    "orchestration/sim-command",
 ]
 resolver = "3"
 
