@@ -54,7 +54,14 @@ impl HostCtrl {
     ///
     /// Removes any previous file first, then creates exclusively (`create_new`)
     /// so a stale mapping from a dead session cannot be truncated underfoot.
-    pub fn create(iox_root: &Path, board_count: u32) -> io::Result<Self> {
+    ///
+    /// `has_remote_hosts` sets the initial [`HostCtrlHeader::min_remote_vt_ns`]
+    /// (`u64::MAX` with no remotes, `0` when remotes exist).
+    pub fn create(
+        iox_root: &Path,
+        board_count: u32,
+        has_remote_hosts: bool,
+    ) -> io::Result<Self> {
         let layout = HostCtrlLayout::new(board_count).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -74,8 +81,8 @@ impl HostCtrl {
         // SAFETY: exclusive new file of `bytes`; we initialize the header below.
         let mut mmap = unsafe { MmapOptions::new().len(bytes).map_mut(&file)? };
         // New file is zero-filled by the OS after set_len (board VT slots stay 0);
-        // write the versioned header (magic/ceiling/stop_generation) only.
-        Self::write_fresh_header(&mut mmap, layout)?;
+        // write the versioned header (magic/min_remote_vt/stop_generation) only.
+        Self::write_fresh_header(&mut mmap, layout, has_remote_hosts)?;
         Ok(Self { mmap, layout })
     }
 
@@ -128,13 +135,16 @@ impl HostCtrl {
         unsafe { HostCtrlAtoms::from_mapping(self.mmap.as_ptr() as *mut u8, self.layout) }
     }
 
+    /// Minimum virtual time (ns) observed from remote hosts.
     #[must_use]
-    pub fn ceiling_ns(&self) -> u64 {
-        self.atoms().ceiling_ns.load(Ordering::Acquire)
+    pub fn min_remote_vt_ns(&self) -> u64 {
+        self.atoms().min_remote_vt_ns.load(Ordering::Acquire)
     }
 
-    pub fn set_ceiling_ns(&self, ceiling_ns: u64) {
-        self.atoms().ceiling_ns.store(ceiling_ns, Ordering::Release);
+    pub fn set_min_remote_vt_ns(&self, min_remote_vt_ns: u64) {
+        self.atoms()
+            .min_remote_vt_ns
+            .store(min_remote_vt_ns, Ordering::Release);
     }
 
     /// Read board VT for topology index `board_index` (`0..N`).
@@ -172,14 +182,18 @@ impl HostCtrl {
         self.atoms().stop_generation.load(Ordering::Acquire)
     }
 
-    fn write_fresh_header(mmap: &mut MmapMut, layout: HostCtrlLayout) -> io::Result<()> {
+    fn write_fresh_header(
+        mmap: &mut MmapMut,
+        layout: HostCtrlLayout,
+        has_remote_hosts: bool,
+    ) -> io::Result<()> {
         if mmap.len() < layout.total_bytes() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "host_ctrl mapping shorter than layout",
             ));
         }
-        let header = layout.fresh_header();
+        let header = layout.fresh_header(has_remote_hosts);
         // SAFETY: mapping is exclusively owned and large enough for the header.
         unsafe {
             let dst = mmap.as_mut_ptr().cast::<HostCtrlHeader>();
@@ -236,42 +250,52 @@ mod tests {
     #[test]
     fn create_open_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let created = HostCtrl::create(dir.path(), 2).unwrap();
+        let created = HostCtrl::create(dir.path(), 2, false).unwrap();
         assert_eq!(created.board_count(), 2);
-        assert_eq!(created.ceiling_ns(), u64::MAX);
+        assert_eq!(created.min_remote_vt_ns(), u64::MAX);
         assert_eq!(created.stop_generation(), 0);
         assert_eq!(created.board_vt(0).unwrap(), 0);
         assert_eq!(created.board_vt(1).unwrap(), 0);
 
         created.set_board_vt(0, 100).unwrap();
         created.set_board_vt(1, 40).unwrap();
-        created.set_ceiling_ns(500);
+        created.set_min_remote_vt_ns(500);
         assert_eq!(created.bump_stop(), 1);
 
         let opened = HostCtrl::open(dir.path(), 2).unwrap();
         assert_eq!(opened.board_vt(0).unwrap(), 100);
         assert_eq!(opened.board_vt(1).unwrap(), 40);
-        assert_eq!(opened.ceiling_ns(), 500);
+        assert_eq!(opened.min_remote_vt_ns(), 500);
         assert_eq!(opened.stop_generation(), 1);
+    }
+
+    #[test]
+    fn create_initial_min_remote_depends_on_remotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = HostCtrl::create(dir.path(), 1, false).unwrap();
+        assert_eq!(local.min_remote_vt_ns(), u64::MAX);
+        drop(local);
+        let with_remotes = HostCtrl::create(dir.path(), 1, true).unwrap();
+        assert_eq!(with_remotes.min_remote_vt_ns(), 0);
     }
 
     #[test]
     fn create_replaces_stale_file() {
         let dir = tempfile::tempdir().unwrap();
-        let first = HostCtrl::create(dir.path(), 1).unwrap();
+        let first = HostCtrl::create(dir.path(), 1, false).unwrap();
         first.set_board_vt(0, 99).unwrap();
         drop(first);
-        let second = HostCtrl::create(dir.path(), 2).unwrap();
+        let second = HostCtrl::create(dir.path(), 2, false).unwrap();
         assert_eq!(second.board_count(), 2);
         assert_eq!(second.board_vt(0).unwrap(), 0);
-        assert_eq!(second.ceiling_ns(), u64::MAX);
+        assert_eq!(second.min_remote_vt_ns(), u64::MAX);
         assert_eq!(second.stop_generation(), 0);
     }
 
     #[test]
     fn open_rejects_size_mismatch() {
         let dir = tempfile::tempdir().unwrap();
-        let _ = HostCtrl::create(dir.path(), 1).unwrap();
+        let _ = HostCtrl::create(dir.path(), 1, false).unwrap();
         match HostCtrl::open(dir.path(), 2) {
             Err(err) => assert_eq!(err.kind(), io::ErrorKind::InvalidData),
             Ok(_) => panic!("expected size mismatch"),
@@ -281,7 +305,7 @@ mod tests {
     #[test]
     fn bump_stop_saturates_at_max() {
         let dir = tempfile::tempdir().unwrap();
-        let ctrl = HostCtrl::create(dir.path(), 1).unwrap();
+        let ctrl = HostCtrl::create(dir.path(), 1, false).unwrap();
         ctrl.atoms()
             .stop_generation
             .store(STOP_GEN_SATURATED - 1, Ordering::Release);
@@ -293,7 +317,7 @@ mod tests {
     #[test]
     fn lease_unlinks_on_drop() {
         let dir = tempfile::tempdir().unwrap();
-        let _ctrl = HostCtrl::create(dir.path(), 1).unwrap();
+        let _ctrl = HostCtrl::create(dir.path(), 1, false).unwrap();
         {
             let _lease = HostCtrlLease::new(dir.path());
             assert!(host_ctrl_path(dir.path()).is_file());
@@ -304,7 +328,7 @@ mod tests {
     #[test]
     fn board_index_out_of_range() {
         let dir = tempfile::tempdir().unwrap();
-        let ctrl = HostCtrl::create(dir.path(), 1).unwrap();
+        let ctrl = HostCtrl::create(dir.path(), 1, false).unwrap();
         assert_eq!(
             ctrl.board_vt(1).unwrap_err().kind(),
             io::ErrorKind::InvalidInput

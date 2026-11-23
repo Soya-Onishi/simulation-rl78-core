@@ -24,5 +24,5 @@ until it can be removed.
 
 ## Phase 2 progress
 
-- **2-a (#151)**: `sim-node` crate + `host-ctrl` mapping (create/open/ceiling/board_vt/bump_stop).
+- **2-a (#151)**: `sim-node` crate + `host-ctrl` mapping (create/open/min_remote_vt/board_vt/bump_stop).
 - **Later slices**: 4/3 thread skeletons, REST dispatch, Command↔Node RR, Build dummy process.
