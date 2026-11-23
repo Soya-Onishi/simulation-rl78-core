@@ -10,6 +10,7 @@ members = [
     "sim-kernel",
     "sim-cluster",
     "orchestration/sim-orch-contract",
+    "orchestration/sim-command",
 ]
 resolver = "3"
 

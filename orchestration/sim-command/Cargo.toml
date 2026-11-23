@@ -1,0 +1,15 @@
+[package]
+name = "sim-command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Command host runtime (Orchestrator REST façade; Build/Probe/Endpoint threads)"
+publish = false
+
+[dependencies]
+axum = "0.8"
+sim-orch-contract = { path = "../sim-orch-contract" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

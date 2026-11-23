@@ -1,6 +1,6 @@
 //! Shared contracts for the orchestration split (#141 / #139).
 //!
-//! Runtime loops live in future `sim-node` / `sim-command` / `sim-orchestrator`
+//! Runtime loops live in `sim-command` / future `sim-node` / `sim-orchestrator`
 //! crates. This crate defines layouts, names, and message shapes so
 //! implementations share one protocol (no throwaway bridges).
 
@@ -23,8 +23,10 @@ pub use probe_log::{DigitalProbeData, ProbeLogRecord};
 pub use probe_wire::ProbeLiveSample;
 pub use rest::{
     COMMAND_API_PREFIX, CommandHostStatus, NodeCommandDto, NodeCommandDtoError,
-    NodeCommandErrorDto, NodeCommandResultDto, NodeProcessStatus, OrchToCommand,
-    OrchToCommandReply, RestErrorBody, RestErrorCode,
+    NodeCommandErrorDto, NodeCommandResultDto, NodeProcessStatus, OrchestratorReply,
+    OrchestratorRequest, PATH_BUILD_ENSURE, PATH_BUILD_RESTART, PATH_BUILD_STATUS,
+    PATH_BUILD_TERMINATE, PATH_NODE_COMMAND, PATH_PROBE_INTEREST, PATH_RESET, PATH_SESSION,
+    PATH_START, PATH_STATUS, PATH_STOP, RestErrorBody, RestErrorCode, build_status_url,
 };
 pub use shm::{
     HOST_CTRL_FILE, HOST_CTRL_MAGIC, HOST_CTRL_VERSION, HostCtrlAtoms, HostCtrlHeader,

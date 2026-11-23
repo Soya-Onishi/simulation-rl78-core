@@ -1475,6 +1475,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sim-command"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "sim-orch-contract",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "sim-kernel"
 version = "0.1.0"
 dependencies = [
