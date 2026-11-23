@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::hashed_id::HashedId;
 use crate::rest::node_dto::NodeCommandResultDto;
 
 /// Node process lifecycle as observed by the Build thread.
@@ -33,7 +34,7 @@ pub enum OrchestratorReply {
     Node(NodeCommandResultDto),
     /// `GET` [`super::paths::PATH_BUILD_STATUS`] body (`node_key` matches the path param).
     BuildStatus {
-        node_key: String,
+        node_key: HashedId<u64>,
         status: NodeProcessStatus,
     },
 }

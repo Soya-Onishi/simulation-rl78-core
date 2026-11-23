@@ -44,7 +44,7 @@ pub const PATH_BUILD_STATUS: &str = command_path!("/build/status/{node_key}");
 ///
 /// `node_key` is the opaque hex id (`HashedId`); it is not percent-encoded.
 #[must_use]
-pub fn build_status_url(node_key: &str) -> String {
+pub fn build_status_url(node_key: crate::hashed_id::HashedId<u64>) -> String {
     format!("{COMMAND_API_PREFIX}/build/status/{node_key}")
 }
 
@@ -78,7 +78,7 @@ mod tests {
     fn build_status_template_and_url() {
         assert!(PATH_BUILD_STATUS.contains("{node_key}"));
         assert_eq!(
-            build_status_url("deadbeefcafebabe"),
+            build_status_url("deadbeefcafebabe".parse().unwrap()),
             "/v1/command/build/status/deadbeefcafebabe"
         );
     }

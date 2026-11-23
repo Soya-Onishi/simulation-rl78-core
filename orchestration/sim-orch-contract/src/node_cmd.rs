@@ -6,6 +6,8 @@
 use iceoryx2::prelude::ZeroCopySend;
 use sim_kernel::MAX_ACTION_PARAMS;
 
+use crate::hashed_id::HashedId;
+
 /// Max opaque inspect request / result bytes on the RR sample.
 pub const INSPECT_CAP: usize = 1024;
 
@@ -39,7 +41,7 @@ pub enum NodeCommand {
     /// Add probe ids to the Node Probe thread subscription set.
     ProbeSubscribe {
         count: u8,
-        probe_ids: [u64; MAX_NODE_PROBE_IDS],
+        probe_ids: [HashedId<u64>; MAX_NODE_PROBE_IDS],
     },
 }
 
@@ -60,11 +62,11 @@ impl NodeCommand {
 
     /// Build a probe subscribe command; returns `None` if too many ids.
     #[must_use]
-    pub fn probe_subscribe(ids: &[u64]) -> Option<Self> {
+    pub fn probe_subscribe(ids: &[HashedId<u64>]) -> Option<Self> {
         if ids.len() > MAX_NODE_PROBE_IDS {
             return None;
         }
-        let mut probe_ids = [0u64; MAX_NODE_PROBE_IDS];
+        let mut probe_ids = [HashedId::ZERO; MAX_NODE_PROBE_IDS];
         probe_ids[..ids.len()].copy_from_slice(ids);
         Some(Self::ProbeSubscribe {
             count: ids.len() as u8,
@@ -127,9 +129,9 @@ mod tests {
 
     #[test]
     fn probe_subscribe_caps() {
-        let ids: Vec<u64> = (0..MAX_NODE_PROBE_IDS as u64).collect();
+        let ids: Vec<_> = (0..MAX_NODE_PROBE_IDS as u64).map(HashedId::new).collect();
         assert!(NodeCommand::probe_subscribe(&ids).is_some());
-        let too_many: Vec<u64> = (0..=MAX_NODE_PROBE_IDS as u64).collect();
+        let too_many: Vec<_> = (0..=MAX_NODE_PROBE_IDS as u64).map(HashedId::new).collect();
         assert!(NodeCommand::probe_subscribe(&too_many).is_none());
     }
 }

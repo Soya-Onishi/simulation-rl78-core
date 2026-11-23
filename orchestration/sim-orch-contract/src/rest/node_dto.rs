@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::hashed_id::HashedId;
 use crate::node_cmd::{INSPECT_CAP, NodeCommand, NodeCommandError, NodeCommandResult};
 
 /// JSON form of a node command (variable-length fields).
@@ -25,7 +26,7 @@ pub enum NodeCommandDto {
     },
     /// Add probe ids (same semantics as wire [`NodeCommand::ProbeSubscribe`]).
     ProbeSubscribe {
-        probe_ids: Vec<u64>,
+        probe_ids: Vec<HashedId<u64>>,
     },
 }
 
@@ -128,14 +129,14 @@ mod tests {
     #[test]
     fn dto_to_wire_probe_subscribe() {
         let dto = NodeCommandDto::ProbeSubscribe {
-            probe_ids: vec![1, 2],
+            probe_ids: vec![HashedId::new(1), HashedId::new(2)],
         };
         let wire = dto.to_wire().unwrap();
         match wire {
             NodeCommand::ProbeSubscribe { count, probe_ids } => {
                 assert_eq!(count, 2);
-                assert_eq!(probe_ids[0], 1);
-                assert_eq!(probe_ids[1], 2);
+                assert_eq!(probe_ids[0], HashedId::new(1));
+                assert_eq!(probe_ids[1], HashedId::new(2));
             }
             _ => panic!("expected ProbeSubscribe"),
         }
@@ -143,7 +144,9 @@ mod tests {
 
     #[test]
     fn dto_rejects_too_many_probes() {
-        let ids = (0..=MAX_NODE_PROBE_IDS as u64).collect::<Vec<_>>();
+        let ids = (0..=MAX_NODE_PROBE_IDS as u64)
+            .map(HashedId::new)
+            .collect::<Vec<_>>();
         let dto = NodeCommandDto::ProbeSubscribe { probe_ids: ids };
         assert_eq!(dto.to_wire(), Err(NodeCommandDtoError::TooManyProbes));
     }

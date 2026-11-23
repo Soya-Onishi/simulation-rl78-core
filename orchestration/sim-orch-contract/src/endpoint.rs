@@ -1,14 +1,19 @@
-//! Same-host endpoint dataplane wire: one tagged sample on one subscriber.
+//! Endpoint dataplane samples and cross-host aggregation frames.
 //!
-//! Reuses [`sim_kernel`] dataplane payload types (`UartFrame`, `AnalogVoltage`,
-//! `DigitalLevel`, `Pulse`, `Scalar`) so the fan-in path stays `repr(C)` +
-//! [`ZeroCopySend`] without serde on the hot path.
+//! - **Same-host (iceoryx):** publish [`EndpointWire`] only. Stop sync is SHM
+//!   (`stop_generation`); samples never carry a stop mark.
+//! - **Cross-host:** Command Endpoint threads exchange [`EndpointDatagram`],
+//!   which may set [`EndpointDatagram::stop_flag`]. `stop_generation` is **not**
+//!   shared across hosts.
 //!
-//! Cross-host transfers may set [`EndpointWire::stop_flag`]; same-host iceoryx
-//! samples must leave it clear and rely on SHM stop generation instead.
+//! Reuses [`sim_kernel`] dataplane payload types so the fan-in path stays
+//! `repr(C)` + [`ZeroCopySend`] without serde on the hot path.
 
 use iceoryx2::prelude::ZeroCopySend;
 use sim_kernel::{AnalogVoltage, DigitalLevel, Pulse, Scalar, UartFrame};
+
+use crate::cluster_id::ClusterId;
+use crate::hashed_id::HashedId;
 
 /// Unified payload kinds carried on the per-node endpoint subscriber.
 #[repr(C)]
@@ -21,51 +26,61 @@ pub enum EndpointPayload {
     Scalar(Scalar),
 }
 
-/// One endpoint sample published to a node's fan-in subscriber.
+/// One endpoint sample (iceoryx fan-in and datagram element).
 ///
-/// Layout: `{ src, stop_flag, stop_generation, payload }`. `stop_flag == 0`
-/// means no cross-host stop mark; non-zero means `stop_generation` is meaningful.
+/// `cluster_id` + `board_id` are required because the host Endpoint thread is
+/// shared across simulation clusters and cannot route on OutPort id alone.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, ZeroCopySend)]
 pub struct EndpointWire {
-    /// Hashed id of the source OutPort.
-    pub src: u64,
-    /// `0` = no stop mark (required on same-host); non-zero = cross-host stop.
-    pub stop_flag: u8,
-    pub _pad: [u8; 7],
-    /// Stop generation when `stop_flag != 0`; otherwise ignored (prefer `0`).
-    pub stop_generation: u64,
+    pub cluster_id: ClusterId,
+    /// Source board within the cluster.
+    pub board_id: HashedId<u64>,
+    /// Source OutPort hashed id.
+    pub src: HashedId<u64>,
     pub payload: EndpointPayload,
 }
 
 impl EndpointWire {
-    /// Same-host constructor (no stop mark).
     #[must_use]
-    pub fn same_host(src: u64, payload: EndpointPayload) -> Self {
+    pub fn new(
+        cluster_id: ClusterId,
+        board_id: HashedId<u64>,
+        src: HashedId<u64>,
+        payload: EndpointPayload,
+    ) -> Self {
         Self {
+            cluster_id,
+            board_id,
             src,
-            stop_flag: 0,
-            _pad: [0; 7],
-            stop_generation: 0,
             payload,
         }
     }
+}
 
-    /// Cross-host constructor with stop mark.
+/// Cross-host frame built by the Endpoint transfer thread.
+///
+/// Aggregates one or more [`EndpointWire`] samples. Not an iceoryx
+/// `ZeroCopySend` type (`Vec`); used only on the host-to-host path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EndpointDatagram {
+    /// `0` = no stop hint; non-zero = remote should apply local SHM stop.
+    /// Does **not** carry or synchronize `stop_generation` across hosts.
+    pub stop_flag: u8,
+    pub payloads: Vec<EndpointWire>,
+}
+
+impl EndpointDatagram {
     #[must_use]
-    pub fn cross_host_stop(src: u64, stop_generation: u64, payload: EndpointPayload) -> Self {
+    pub fn new(stop_flag: u8, payloads: Vec<EndpointWire>) -> Self {
         Self {
-            src,
-            stop_flag: 1,
-            _pad: [0; 7],
-            stop_generation,
-            payload,
+            stop_flag,
+            payloads,
         }
     }
 
-    /// True when a cross-host stop mark is present.
     #[must_use]
-    pub fn has_stop_mark(self) -> bool {
+    pub fn has_stop_mark(&self) -> bool {
         self.stop_flag != 0
     }
 }
@@ -73,26 +88,42 @@ impl EndpointWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::{align_of, size_of};
+    use std::mem::{align_of, offset_of, size_of};
 
     #[test]
-    fn same_host_has_no_stop() {
-        let w = EndpointWire::same_host(1, EndpointPayload::Digital(DigitalLevel::High));
-        assert!(!w.has_stop_mark());
-        assert_eq!(w.src, 1);
+    fn wire_has_routing_ids_no_stop_fields() {
+        let w = EndpointWire::new(
+            ClusterId::new(1, 2),
+            HashedId::new(0x11),
+            HashedId::new(0x22),
+            EndpointPayload::Digital(DigitalLevel::High),
+        );
+        assert_eq!(w.cluster_id.id, 1);
+        assert_eq!(w.board_id.get(), 0x11);
+        assert_eq!(w.src.get(), 0x22);
+        assert!(align_of::<EndpointWire>() >= 8);
+        assert_eq!(offset_of!(EndpointWire, cluster_id), 0);
+        assert!(offset_of!(EndpointWire, board_id) >= size_of::<ClusterId>());
+        assert!(offset_of!(EndpointWire, src) > offset_of!(EndpointWire, board_id));
+        assert!(offset_of!(EndpointWire, payload) > offset_of!(EndpointWire, src));
+        // Stop marks are not part of this layout (see EndpointDatagram).
+        assert!(size_of::<EndpointWire>() > 0);
     }
 
     #[test]
-    fn wire_is_copy_aligned() {
-        assert!(align_of::<EndpointWire>() >= 8);
-        assert!(size_of::<EndpointWire>() > 0);
-        let _ = EndpointWire::cross_host_stop(
-            9,
-            3,
+    fn datagram_aggregates_wires_with_stop_flag_only() {
+        let w = EndpointWire::new(
+            ClusterId::new(1, 2),
+            HashedId::new(3),
+            HashedId::new(4),
             EndpointPayload::Pulse(Pulse {
                 hi_width_ns: 10,
                 lo_width_ns: 10,
             }),
         );
+        let d = EndpointDatagram::new(1, vec![w]);
+        assert!(d.has_stop_mark());
+        assert_eq!(d.payloads.len(), 1);
+        assert_eq!(d.payloads[0].src.get(), 4);
     }
 }

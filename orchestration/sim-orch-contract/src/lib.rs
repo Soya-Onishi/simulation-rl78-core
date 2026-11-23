@@ -4,7 +4,9 @@
 //! crates. This crate defines layouts, names, and message shapes so
 //! implementations share one protocol (no throwaway bridges).
 
+pub mod cluster_id;
 pub mod endpoint;
+pub mod hashed_id;
 pub mod names;
 pub mod node_cmd;
 pub mod probe_log;
@@ -12,7 +14,9 @@ pub mod probe_wire;
 pub mod rest;
 pub mod shm;
 
-pub use endpoint::{EndpointPayload, EndpointWire};
+pub use cluster_id::ClusterId;
+pub use endpoint::{EndpointDatagram, EndpointPayload, EndpointWire};
+pub use hashed_id::{HashedId, Hexable};
 pub use names::{
     PROBE_SERVICE_SUFFIX, node_command_rr_path, node_endpoint_rx_path, probe_service_path,
 };
@@ -20,7 +24,7 @@ pub use node_cmd::{
     INSPECT_CAP, MAX_NODE_PROBE_IDS, NodeCommand, NodeCommandError, NodeCommandResult,
 };
 pub use probe_log::{DigitalProbeData, ProbeLogRecord};
-pub use probe_wire::ProbeLiveSample;
+pub use probe_wire::{DigitalLiveValue, ProbeLiveSample};
 pub use rest::{
     COMMAND_API_PREFIX, CommandHostStatus, NodeCommandDto, NodeCommandDtoError,
     NodeCommandErrorDto, NodeCommandResultDto, NodeProcessStatus, OrchestratorReply,

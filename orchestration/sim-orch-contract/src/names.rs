@@ -1,26 +1,21 @@
 //! iceoryx service path helpers (same-host Command ↔ Node / dataplane / probe).
 //!
-//! Callers must pass already-validated hex cluster / node keys (no `/` or NUL).
-//! Runtime owns hashing ([`HashedId`](sim_cluster style)); this module only
-//! formats paths.
+//! Cluster identity is [`ClusterId`] (path segment via [`ClusterId::path_key`]).
+//! Node keys are [`HashedId<u64>`] (16 lowercase hex digits).
+
+use crate::cluster_id::ClusterId;
+use crate::hashed_id::HashedId;
 
 /// Probe publisher path suffix under the cluster key.
 pub const PROBE_SERVICE_SUFFIX: &str = "probe";
 
-/// `HashedId<u64>` public wire form: exactly 16 lowercase hex digits.
-fn key_ok(key: &str) -> bool {
-    key.len() == 16 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// Build `sim-cluster/{cluster_key}/probe` as specified in #141.
-///
-/// Returns `None` if `cluster_key` is not non-empty ASCII hex.
+/// Build `sim-cluster/{cluster.path_key}/probe` as specified in #141.
 #[must_use]
-pub fn probe_service_path(cluster_key: &str) -> Option<String> {
-    if !key_ok(cluster_key) {
-        return None;
-    }
-    Some(format!("sim-cluster/{cluster_key}/{PROBE_SERVICE_SUFFIX}"))
+pub fn probe_service_path(cluster: ClusterId) -> String {
+    format!(
+        "sim-cluster/{}/{PROBE_SERVICE_SUFFIX}",
+        cluster.path_key()
+    )
 }
 
 /// Node inbound endpoint fan-in service: one subscriber per node.
@@ -28,22 +23,17 @@ pub fn probe_service_path(cluster_key: &str) -> Option<String> {
 /// Publishers: every other node on the host plus the Command Endpoint thread
 /// (`max_publishers = host_node_count + 1`).
 #[must_use]
-pub fn node_endpoint_rx_path(cluster_key: &str, node_key: &str) -> Option<String> {
-    if !key_ok(cluster_key) || !key_ok(node_key) {
-        return None;
-    }
-    Some(format!(
-        "sim-cluster/{cluster_key}/node/{node_key}/endpoint/rx"
-    ))
+pub fn node_endpoint_rx_path(cluster: ClusterId, node: HashedId<u64>) -> String {
+    format!(
+        "sim-cluster/{}/node/{node}/endpoint/rx",
+        cluster.path_key()
+    )
 }
 
 /// Command ↔ Node request-response service stem.
 #[must_use]
-pub fn node_command_rr_path(cluster_key: &str, node_key: &str) -> Option<String> {
-    if !key_ok(cluster_key) || !key_ok(node_key) {
-        return None;
-    }
-    Some(format!("sim-cluster/{cluster_key}/node/{node_key}/cmd"))
+pub fn node_command_rr_path(cluster: ClusterId, node: HashedId<u64>) -> String {
+    format!("sim-cluster/{}/node/{node}/cmd", cluster.path_key())
 }
 
 #[cfg(test)]
@@ -51,14 +41,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn probe_path() {
+    fn probe_path_uses_cluster_path_key() {
+        let c = ClusterId::new(0x11, 0x22);
         assert_eq!(
-            probe_service_path("00000000deadbeef").as_deref(),
-            Some("sim-cluster/00000000deadbeef/probe")
+            probe_service_path(c),
+            "sim-cluster/17-34/probe"
         );
-        assert!(probe_service_path("deadbeef").is_none());
-        assert!(probe_service_path("00000000DEADBEEF").is_none());
-        assert!(probe_service_path("bad/key").is_none());
-        assert!(probe_service_path("").is_none());
+    }
+
+    #[test]
+    fn node_paths_include_hashed_node() {
+        let c = ClusterId::new(1, 2);
+        let n = HashedId::new(0xdead_beef);
+        assert_eq!(
+            node_endpoint_rx_path(c, n),
+            "sim-cluster/1-2/node/00000000deadbeef/endpoint/rx"
+        );
+        assert_eq!(
+            node_command_rr_path(c, n),
+            "sim-cluster/1-2/node/00000000deadbeef/cmd"
+        );
     }
 }
