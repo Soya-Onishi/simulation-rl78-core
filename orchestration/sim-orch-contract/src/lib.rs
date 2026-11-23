@@ -28,5 +28,5 @@ pub use rest::{
 };
 pub use shm::{
     HOST_CTRL_FILE, HOST_CTRL_MAGIC, HOST_CTRL_VERSION, HostCtrlAtoms, HostCtrlHeader,
-    HostCtrlLayout, STOP_GEN_SATURATED, bump_stop_generation, saturating_bump_stop_gen,
+    HostCtrlLayout, STOP_GEN_SATURATED,
 };

@@ -35,7 +35,7 @@ pub const STOP_GEN_SATURATED: u64 = u64::MAX;
 /// After the header, `board_count` native `u64` board virtual-time slots follow
 /// at [`HostCtrlLayout::BOARDS_OFFSET`] (8-byte aligned). Concurrent readers and
 /// writers must access `ceiling_ns`, `stop_generation`, and board VT slots via
-/// [`AtomicU64`] (see [`bump_stop_generation`]); do not tear with plain loads
+/// [`AtomicU64`] (see [`HostCtrlAtoms::bump_stop`]); do not tear with plain loads
 /// across processes.
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug)]
@@ -104,7 +104,7 @@ impl HostCtrlLayout {
 
 /// Pure saturating bump for stop generation (single-threaded / after a load).
 #[must_use]
-pub const fn saturating_bump_stop_gen(current: u64) -> u64 {
+const fn saturating_bump_stop_gen(current: u64) -> u64 {
     match current.checked_add(1) {
         Some(n) => n,
         None => STOP_GEN_SATURATED,
@@ -113,8 +113,9 @@ pub const fn saturating_bump_stop_gen(current: u64) -> u64 {
 
 /// Atomically bump `stop_generation`, saturating at [`STOP_GEN_SATURATED`].
 ///
-/// Returns the value stored after the bump.
-pub fn bump_stop_generation(slot: &AtomicU64) -> u64 {
+/// Returns the value stored after the bump. Callers should use
+/// [`HostCtrlAtoms::bump_stop`] rather than this helper directly.
+fn bump_stop_generation(slot: &AtomicU64) -> u64 {
     let mut prev = slot.load(Ordering::Acquire);
     loop {
         let next = saturating_bump_stop_gen(prev);
