@@ -73,6 +73,8 @@ impl HostCtrl {
         file.set_len(bytes as u64)?;
         // SAFETY: exclusive new file of `bytes`; we initialize the header below.
         let mut mmap = unsafe { MmapOptions::new().len(bytes).map_mut(&file)? };
+        // New file is zero-filled by the OS after set_len (board VT slots stay 0);
+        // write the versioned header (magic/ceiling/stop_generation) only.
         Self::write_fresh_header(&mut mmap, layout)?;
         Ok(Self { mmap, layout })
     }
