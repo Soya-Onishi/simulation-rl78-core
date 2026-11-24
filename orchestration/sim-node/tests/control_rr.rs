@@ -6,10 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use contract::{
-    ClusterId, HashedId, HostCtrl, MAX_NODE_PROBE_IDS, NodeCommand, NodeCommandClient,
+    ClusterId, HashedId, HostCtrl, IoxNode, MAX_NODE_PROBE_IDS, NodeCommand, NodeCommandClient,
     NodeCommandDto, NodeCommandError, NodeCommandResult, create_iox_node, isolated_config,
 };
-use iceoryx2::prelude::*;
 use sim_node::{NodeConfig, NodeRuntime, SimState};
 use tempfile::TempDir;
 
@@ -32,7 +31,7 @@ fn node_key() -> HashedId<u64> {
 
 struct Fixture {
     client: NodeCommandClient,
-    _iox: Node<ipc::Service>,
+    _iox: IoxNode,
     runtime: NodeRuntime,
     host_ctrl: HostCtrl,
     _dir: TempDir,
@@ -73,7 +72,7 @@ impl Fixture {
     }
 }
 
-fn client(dir: &TempDir, cluster: ClusterId) -> (Node<ipc::Service>, NodeCommandClient) {
+fn client(dir: &TempDir, cluster: ClusterId) -> (IoxNode, NodeCommandClient) {
     let cfg = isolated_config(dir.path()).unwrap();
     let iox = create_iox_node(&cfg, "test-command").unwrap();
     let client = NodeCommandClient::create(&iox, cluster, node_key()).unwrap();
@@ -114,6 +113,16 @@ fn bump_stop_emergency_stops_running_simulation() {
     f.host_ctrl.bump_stop();
     f.wait_for_state(SimState::Stopped);
 
+    assert_eq!(f.request(NodeCommand::Start), NodeCommandResult::Success);
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(f.runtime.state(), SimState::Running);
+}
+
+#[test]
+fn start_right_after_bump_stop_keeps_running() {
+    let f = Fixture::new();
+    assert_eq!(f.request(NodeCommand::Start), NodeCommandResult::Success);
+    f.host_ctrl.bump_stop();
     assert_eq!(f.request(NodeCommand::Start), NodeCommandResult::Success);
     thread::sleep(Duration::from_millis(20));
     assert_eq!(f.runtime.state(), SimState::Running);

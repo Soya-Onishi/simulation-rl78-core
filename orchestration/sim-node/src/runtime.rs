@@ -3,6 +3,10 @@
 //! The IPC thread owns the Command ↔ Node RR server and forwards each request
 //! over an mpsc channel with a one-shot reply channel: `ProbeSubscribe` to the
 //! Probe thread, everything else to the Simulation thread.
+//!
+//! Shutdown: only the IPC thread watches the shutdown flag. When it exits it
+//! drops both senders, so the Simulation and Probe threads end on disconnect
+//! after any in-flight request has been answered.
 
 use std::fmt;
 use std::io;
@@ -85,15 +89,13 @@ impl NodeRuntime {
         let (probe_tx, probe_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 
-        let shutdown = runtime.shutdown.clone();
         let state = runtime.state.clone();
         runtime.spawn_thread("sim-node-simulation", move || {
-            simulation_loop(&host_ctrl, &sim_rx, &state, &shutdown);
+            simulation_loop(&host_ctrl, &sim_rx, &state);
             Ok(())
         })?;
-        let shutdown = runtime.shutdown.clone();
         runtime.spawn_thread("sim-node-probe", move || {
-            probe_loop(&probe_rx, &shutdown);
+            probe_loop(&probe_rx);
             Ok(())
         })?;
         let shutdown = runtime.shutdown.clone();
@@ -133,13 +135,12 @@ impl NodeRuntime {
         name: &str,
         body: impl FnOnce() -> Result<(), NodeRuntimeError> + Send + 'static,
     ) -> Result<(), NodeRuntimeError> {
-        let shutdown = self.shutdown.clone();
+        let on_exit = ShutdownOnExit(self.shutdown.clone());
         let handle = thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                let result = body();
-                shutdown.store(true, Ordering::Release);
-                result
+                let _on_exit = on_exit;
+                body()
             })
             .map_err(|e| NodeRuntimeError::Thread(format!("spawn {name}: {e}")))?;
         self.threads.push(handle);
@@ -164,6 +165,15 @@ impl Drop for NodeRuntime {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         let _ = self.join_threads();
+    }
+}
+
+/// Raises the shutdown flag when a thread exits, including by panic.
+struct ShutdownOnExit(Arc<AtomicBool>);
+
+impl Drop for ShutdownOnExit {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
     }
 }
 
@@ -227,15 +237,17 @@ fn route(
         .unwrap_or(NodeCommandResult::Error(NodeCommandError::ImplFault))
 }
 
-fn simulation_loop(
-    host_ctrl: &HostCtrl,
-    rx: &Receiver<Routed>,
-    state: &AtomicU8,
-    shutdown: &AtomicBool,
-) {
+fn simulation_loop(host_ctrl: &HostCtrl, rx: &Receiver<Routed>, state: &AtomicU8) {
     let mut sim = Simulation::new(host_ctrl.stop_generation());
-    while !shutdown.load(Ordering::Acquire) {
-        match rx.recv_timeout(STOP_POLL_PERIOD) {
+    loop {
+        let received = rx.recv_timeout(STOP_POLL_PERIOD);
+        // Consume bumps made before this command so a Start sent after an
+        // emergency stop is not undone by that older stop.
+        if sim.observe_stop_generation(host_ctrl.stop_generation()) {
+            state.store(sim.state() as u8, Ordering::Release);
+            log::info!("emergency stop: host_ctrl stop_generation advanced");
+        }
+        match received {
             Ok(Routed { command, reply }) => {
                 let result = sim.apply(command);
                 state.store(sim.state() as u8, Ordering::Release);
@@ -244,16 +256,12 @@ fn simulation_loop(
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if sim.observe_stop_generation(host_ctrl.stop_generation()) {
-            state.store(sim.state() as u8, Ordering::Release);
-            log::info!("emergency stop: host_ctrl stop_generation advanced");
-        }
     }
 }
 
-fn probe_loop(rx: &Receiver<Routed>, shutdown: &AtomicBool) {
+fn probe_loop(rx: &Receiver<Routed>) {
     let mut subscriptions = ProbeSubscriptions::default();
-    while !shutdown.load(Ordering::Acquire) {
+    loop {
         match rx.recv_timeout(PROBE_PERIOD) {
             Ok(Routed { command, reply }) => {
                 let result = match command {

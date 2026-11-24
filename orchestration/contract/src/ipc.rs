@@ -7,10 +7,14 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use iceoryx2::config::Config;
 use iceoryx2::prelude::*;
 use iceoryx2_bb_system_types::path::Path as IoxPath;
+
+/// iceoryx node type used by every orchestration process.
+pub type IoxNode = Node<ipc::Service>;
 
 /// iceoryx setup / port / transport failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,23 +57,26 @@ pub fn isolated_config(iox_root: &Path) -> Result<Config, IpcError> {
 }
 
 /// Create an iceoryx node with signal handling disabled (the process owns its lifecycle).
-pub fn create_iox_node(config: &Config, name: &str) -> Result<Node<ipc::Service>, IpcError> {
+pub fn create_iox_node(config: &Config, name: &str) -> Result<IoxNode, IpcError> {
     build_iox_node(config, name, SignalHandlingMode::Disabled)
 }
 
-/// Create an iceoryx node that installs SIGINT / SIGTERM handlers, so
-/// [`Node::wait`] fails once the process is asked to terminate.
-///
-/// Use one per process, from the thread that owns the process lifecycle.
-pub fn create_signal_iox_node(config: &Config, name: &str) -> Result<Node<ipc::Service>, IpcError> {
-    build_iox_node(config, name, SignalHandlingMode::HandleTerminationRequests)
+/// Create an iceoryx node whose [`Node::wait`] fails once SIGINT / SIGTERM
+/// was received. The process-wide handlers are installed before returning.
+pub fn create_signal_iox_node(config: &Config, name: &str) -> Result<IoxNode, IpcError> {
+    let node = build_iox_node(config, name, SignalHandlingMode::HandleTerminationRequests)?;
+    // iceoryx installs the handlers on first use; until then SIGTERM still
+    // has its default (fatal) action.
+    node.wait(Duration::ZERO)
+        .map_err(|e| IpcError::new(format!("iceoryx node {name}: {e}")))?;
+    Ok(node)
 }
 
 fn build_iox_node(
     config: &Config,
     name: &str,
     signals: SignalHandlingMode,
-) -> Result<Node<ipc::Service>, IpcError> {
+) -> Result<IoxNode, IpcError> {
     let node_name =
         NodeName::new(name).map_err(|e| IpcError::new(format!("node name {name}: {e:?}")))?;
     NodeBuilder::new()

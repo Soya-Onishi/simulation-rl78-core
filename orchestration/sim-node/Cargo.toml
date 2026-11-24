@@ -11,5 +11,4 @@ contract = { path = "../contract" }
 log = "0.4"
 
 [dev-dependencies]
-iceoryx2 = "0.9.3"
 tempfile = "3"

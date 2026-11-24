@@ -32,6 +32,7 @@ fn main() -> ExitCode {
 }
 
 fn run(config: NodeConfig) -> Result<(), String> {
+    // Before spawning, so SIGTERM is already captured once the RR server is up.
     let signals = isolated_config(&config.iox_root)
         .and_then(|cfg| create_signal_iox_node(&cfg, &format!("sim-node-{}-main", config.node_key)))
         .map_err(|e| e.to_string())?;

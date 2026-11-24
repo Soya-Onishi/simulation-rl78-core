@@ -22,7 +22,7 @@ pub use command2node::{
 };
 pub use endpoint::{EndpointDatagram, EndpointPayload, EndpointWire};
 pub use id::{ClusterId, HashedId, Hexable, ParseClusterIdError};
-pub use ipc::{IpcError, create_iox_node, create_signal_iox_node, isolated_config};
+pub use ipc::{IoxNode, IpcError, create_iox_node, create_signal_iox_node, isolated_config};
 pub use names::{
     PROBE_SERVICE_SUFFIX, node_command_rr_path, node_endpoint_rx_path, probe_service_path,
 };

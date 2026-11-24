@@ -2,7 +2,8 @@
 //!
 //! Both sides open the service through [`open_node_command_service`] so the
 //! QoS (one Node server, one Command client, one request in flight) cannot
-//! drift between processes.
+//! drift between processes. Fire-and-forget is disabled so the server skips
+//! requests whose client already gave up (timed out).
 
 use std::fmt;
 use std::thread;
@@ -15,7 +16,7 @@ use iceoryx2::service::port_factory::request_response::PortFactory;
 
 use super::{NodeCommand, NodeCommandResult};
 use crate::id::{ClusterId, HashedId};
-use crate::ipc::IpcError;
+use crate::ipc::{IoxNode, IpcError};
 use crate::names::node_command_rr_path;
 
 pub type NodeCommandService = PortFactory<ipc::Service, NodeCommand, (), NodeCommandResult, ()>;
@@ -27,7 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Open (or create) the RR service at [`node_command_rr_path`].
 pub fn open_node_command_service(
-    node: &Node<ipc::Service>,
+    node: &IoxNode,
     cluster: ClusterId,
     node_key: HashedId<u64>,
 ) -> Result<NodeCommandService, IpcError> {
@@ -42,13 +43,14 @@ pub fn open_node_command_service(
         .max_clients(1)
         .max_active_requests_per_client(1)
         .max_response_buffer_size(1)
+        .enable_fire_and_forget_requests(false)
         .open_or_create()
         .map_err(|e| IpcError::new(format!("open {name}: {e:?}")))
 }
 
 /// Node side: the single server port for this node's control service.
 pub fn create_node_command_server(
-    node: &Node<ipc::Service>,
+    node: &IoxNode,
     cluster: ClusterId,
     node_key: HashedId<u64>,
 ) -> Result<NodeCommandServer, IpcError> {
@@ -90,7 +92,7 @@ pub struct NodeCommandClient {
 
 impl NodeCommandClient {
     pub fn create(
-        node: &Node<ipc::Service>,
+        node: &IoxNode,
         cluster: ClusterId,
         node_key: HashedId<u64>,
     ) -> Result<Self, IpcError> {
@@ -151,6 +153,10 @@ impl NodeCommandClient {
 mod tests {
     use super::*;
     use crate::ipc::{create_iox_node, isolated_config};
+    use iceoryx2::config::Config;
+    use tempfile::TempDir;
+
+    const KEY: HashedId<u64> = HashedId::new(3);
 
     /// Service shared memory is keyed by name only; keep concurrent tests apart.
     fn unique_cluster(test: u32) -> ClusterId {
@@ -161,12 +167,51 @@ mod tests {
         ClusterId::new(std::process::id() ^ (test << 24), nanos)
     }
 
-    #[test]
-    fn request_without_server_reports_no_server() {
+    /// What the test server does with the first request it receives.
+    enum Serve {
+        ReplySuccess,
+        Drop,
+        HoldThenDrop(Duration),
+    }
+
+    fn serve_one(
+        cfg: Config,
+        cluster: ClusterId,
+        start_after: Duration,
+        serve: Serve,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            thread::sleep(start_after);
+            let node = create_iox_node(&cfg, "rr-test-server").unwrap();
+            let server = create_node_command_server(&node, cluster, KEY).unwrap();
+            let request = loop {
+                if let Some(request) = server.receive().unwrap() {
+                    break request;
+                }
+                thread::sleep(POLL_INTERVAL);
+            };
+            match serve {
+                Serve::ReplySuccess => request.send_copy(NodeCommandResult::Success).unwrap(),
+                Serve::Drop => drop(request),
+                Serve::HoldThenDrop(hold) => {
+                    thread::sleep(hold);
+                    drop(request);
+                }
+            }
+        })
+    }
+
+    fn client(cluster: ClusterId) -> (TempDir, Config, IoxNode, NodeCommandClient) {
         let dir = tempfile::tempdir().unwrap();
         let cfg = isolated_config(dir.path()).unwrap();
         let node = create_iox_node(&cfg, "rr-test-client").unwrap();
-        let client = NodeCommandClient::create(&node, unique_cluster(1), HashedId::new(3)).unwrap();
+        let client = NodeCommandClient::create(&node, cluster, KEY).unwrap();
+        (dir, cfg, node, client)
+    }
+
+    #[test]
+    fn request_without_server_reports_no_server() {
+        let (_dir, _cfg, _node, client) = client(unique_cluster(1));
         assert_eq!(
             client.request(NodeCommand::Start, Duration::from_millis(20)),
             Err(NodeRequestError::NoServer)
@@ -175,30 +220,53 @@ mod tests {
 
     #[test]
     fn request_round_trips_through_server() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = isolated_config(dir.path()).unwrap();
         let cluster = unique_cluster(2);
-        let key = HashedId::new(3);
-
-        let server_cfg = cfg.clone();
-        let server = thread::spawn(move || {
-            let node = create_iox_node(&server_cfg, "rr-test-server").unwrap();
-            let server = create_node_command_server(&node, cluster, key).unwrap();
-            loop {
-                if let Some(request) = server.receive().unwrap() {
-                    assert_eq!(*request.payload(), NodeCommand::Stop);
-                    request.send_copy(NodeCommandResult::Success).unwrap();
-                    return;
-                }
-                thread::sleep(POLL_INTERVAL);
-            }
-        });
-
-        let node = create_iox_node(&cfg, "rr-test-client").unwrap();
-        let client = NodeCommandClient::create(&node, cluster, key).unwrap();
+        let (_dir, cfg, _node, client) = client(cluster);
+        let server = serve_one(cfg, cluster, Duration::ZERO, Serve::ReplySuccess);
         assert_eq!(
             client.request(NodeCommand::Stop, Duration::from_secs(5)),
             Ok(NodeCommandResult::Success)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn request_waits_for_late_server() {
+        let cluster = unique_cluster(3);
+        let (_dir, cfg, _node, client) = client(cluster);
+        let server = serve_one(cfg, cluster, Duration::from_millis(30), Serve::ReplySuccess);
+        assert_eq!(
+            client.request(NodeCommand::Start, Duration::from_secs(5)),
+            Ok(NodeCommandResult::Success)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn request_times_out_while_server_holds_request() {
+        let cluster = unique_cluster(4);
+        let (_dir, cfg, _node, client) = client(cluster);
+        let server = serve_one(
+            cfg,
+            cluster,
+            Duration::ZERO,
+            Serve::HoldThenDrop(Duration::from_millis(500)),
+        );
+        assert_eq!(
+            client.request(NodeCommand::Start, Duration::from_millis(200)),
+            Err(NodeRequestError::Timeout)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn request_reports_dropped_request_as_disconnected() {
+        let cluster = unique_cluster(5);
+        let (_dir, cfg, _node, client) = client(cluster);
+        let server = serve_one(cfg, cluster, Duration::ZERO, Serve::Drop);
+        assert_eq!(
+            client.request(NodeCommand::Start, Duration::from_secs(5)),
+            Err(NodeRequestError::Disconnected)
         );
         server.join().unwrap();
     }
