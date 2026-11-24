@@ -4,14 +4,14 @@
 //! path param fails at compile/review time rather than as an ambiguous contract.
 //! Clients use the matching `url(...)` helpers.
 
+use axum::Router;
 use axum::extract::{Json, Path};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::Router;
 use contract::{
-    build_ensure, build_restart, build_status, build_terminate, node_command, probe_interest,
-    reset, sessions, start, status, stop, ClusterId, HashedId, NodeCommandBody, OrchestratorReply,
-    ProbeInterestBody, RestErrorBody, RestErrorCode, StartBody,
+    ClusterId, HashedId, NodeCommandBody, OrchestratorReply, ProbeInterestBody, RestErrorBody,
+    RestErrorCode, StartBody, build_ensure, build_restart, build_status, build_terminate,
+    node_command, probe_interest, reset, sessions, start, status, stop,
 };
 
 type ApiError = (StatusCode, Json<RestErrorBody>);

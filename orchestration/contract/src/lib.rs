@@ -29,6 +29,6 @@ pub use orchestrator2command::{
 };
 pub use probe::{DigitalLiveValue, DigitalProbeData, ProbeLiveSample, ProbeLogRecord};
 pub use shm::{
-    HOST_CTRL_FILE, HOST_CTRL_MAGIC, HOST_CTRL_VERSION, HostCtrlAtoms, HostCtrlHeader,
-    HostCtrlLayout, STOP_GEN_SATURATED,
+    HOST_CTRL_FILE, HOST_CTRL_MAGIC, HOST_CTRL_VERSION, HostCtrl, HostCtrlAtoms, HostCtrlHeader,
+    HostCtrlLayout, HostCtrlLease, STOP_GEN_SATURATED, host_ctrl_path,
 };

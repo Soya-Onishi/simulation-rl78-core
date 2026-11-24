@@ -1,12 +1,8 @@
-//! Host control shared-memory layout (VT ceiling, board VT, stop generation).
+//! `host_ctrl` bytes-in-memory layout.
 //!
-//! Replaces the legacy `vt_clock` file (ceiling + board VT only). Layout is
-//! versioned and `repr(C)` with explicit padding. Mapping (mmap) lives in
-//! runtime crates; this module is the bytes-in-memory contract on little-endian
-//! hosts (the only supported target class for this project).
-//!
-//! Same-host stop sync uses this SHM only. Endpoint iceoryx payloads on the
-//! same host must not carry a stop mark (#141).
+//! Versioned and `repr(C)` with explicit padding, on little-endian hosts (the
+//! only supported target class for this project). The file mapping itself is
+//! in [`super::mapping`].
 
 #[cfg(not(target_endian = "little"))]
 compile_error!("contract host_ctrl requires little-endian targets");
@@ -34,7 +30,7 @@ pub const STOP_GEN_SATURATED: u64 = u64::MAX;
 ///
 /// After the header, `board_count` native `u64` board virtual-time slots follow
 /// at [`HostCtrlLayout::BOARDS_OFFSET`] (8-byte aligned). Concurrent readers and
-/// writers must access `ceiling_ns`, `stop_generation`, and board VT slots via
+/// writers must access `min_remote_vt_ns`, `stop_generation`, and board VT slots via
 /// [`AtomicU64`] (see [`HostCtrlAtoms::bump_stop`]); do not tear with plain loads
 /// across processes.
 #[repr(C, align(8))]
@@ -48,8 +44,11 @@ pub struct HostCtrlHeader {
     pub board_count: u32,
     /// Padding to 8-byte alignment before `u64` fields (not part of the API).
     pad0: u32,
-    /// Arbiter hard ceiling in nanoseconds (`u64::MAX` = unlimited).
-    pub ceiling_ns: u64,
+    /// Minimum virtual time (ns) observed from remote hosts.
+    ///
+    /// Initialized to `u64::MAX` when the session has no remote hosts, or `0`
+    /// when remotes exist (until the Endpoint thread writes a real minimum).
+    pub min_remote_vt_ns: u64,
     /// Cluster-wide stop generation.
     pub stop_generation: u64,
 }
@@ -89,14 +88,17 @@ impl HostCtrlLayout {
     }
 
     /// Initial header for a newly created mapping.
+    ///
+    /// `has_remote_hosts` selects the initial [`HostCtrlHeader::min_remote_vt_ns`]:
+    /// `u64::MAX` when there are no remotes, `0` when remotes exist.
     #[must_use]
-    pub fn fresh_header(self) -> HostCtrlHeader {
+    pub fn fresh_header(self, has_remote_hosts: bool) -> HostCtrlHeader {
         HostCtrlHeader {
             magic: HOST_CTRL_MAGIC,
             version: HOST_CTRL_VERSION,
             board_count: self.board_count,
             pad0: 0,
-            ceiling_ns: u64::MAX,
+            min_remote_vt_ns: if has_remote_hosts { 0 } else { u64::MAX },
             stop_generation: 0,
         }
     }
@@ -128,11 +130,11 @@ fn bump_stop_generation(slot: &AtomicU64) -> u64 {
 
 /// Atomic view of the concurrently updated `u64` slots in a mapped `host_ctrl`.
 ///
-/// Plain [`HostCtrlHeader`] is for create/init and layout docs. Runtime code
-/// that shares the mapping across processes must use this view (or equivalent
-/// `AtomicU64` accesses at the documented offsets).
+/// Plain [`HostCtrlHeader`] is for create/init and layout docs. Code that
+/// shares the mapping across processes obtains this view from
+/// [`super::HostCtrl::atoms`].
 pub struct HostCtrlAtoms<'a> {
-    pub ceiling_ns: &'a AtomicU64,
+    pub min_remote_vt_ns: &'a AtomicU64,
     pub stop_generation: &'a AtomicU64,
     pub board_vt: &'a [AtomicU64],
 }
@@ -146,12 +148,12 @@ impl<'a> HostCtrlAtoms<'a> {
     /// - The header at `base` must already contain a matching `board_count`.
     /// - No concurrent non-atomic writers to these slots.
     #[must_use]
-    pub unsafe fn from_mapping(base: *mut u8, layout: HostCtrlLayout) -> Self {
+    pub(crate) unsafe fn from_mapping(base: *mut u8, layout: HostCtrlLayout) -> Self {
         debug_assert_eq!(base.align_offset(8), 0);
         // SAFETY: caller guarantees alignment, size, and exclusive atomic protocol.
-        let ceiling = unsafe {
+        let min_remote_vt = unsafe {
             &*base
-                .add(offset_of!(HostCtrlHeader, ceiling_ns))
+                .add(offset_of!(HostCtrlHeader, min_remote_vt_ns))
                 .cast::<AtomicU64>()
         };
         let stop = unsafe {
@@ -166,7 +168,7 @@ impl<'a> HostCtrlAtoms<'a> {
             )
         };
         Self {
-            ceiling_ns: ceiling,
+            min_remote_vt_ns: min_remote_vt,
             stop_generation: stop,
             board_vt: boards,
         }
@@ -192,7 +194,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(HostCtrlHeader, version), 4);
         assert_eq!(std::mem::offset_of!(HostCtrlHeader, board_count), 8);
         assert_eq!(std::mem::offset_of!(HostCtrlHeader, pad0), 12);
-        assert_eq!(std::mem::offset_of!(HostCtrlHeader, ceiling_ns), 16);
+        assert_eq!(std::mem::offset_of!(HostCtrlHeader, min_remote_vt_ns), 16);
         assert_eq!(std::mem::offset_of!(HostCtrlHeader, stop_generation), 24);
         assert_eq!(HostCtrlLayout::BOARDS_OFFSET % 8, 0);
     }
@@ -205,6 +207,13 @@ mod tests {
         assert_eq!(layout.board_vt_byte_offset(2), Some(48));
         assert_eq!(layout.board_vt_byte_offset(3), None);
         assert!(HostCtrlLayout::new(0).is_none());
+    }
+
+    #[test]
+    fn fresh_header_min_remote_depends_on_remotes() {
+        let layout = HostCtrlLayout::new(1).unwrap();
+        assert_eq!(layout.fresh_header(false).min_remote_vt_ns, u64::MAX);
+        assert_eq!(layout.fresh_header(true).min_remote_vt_ns, 0);
     }
 
     #[test]
