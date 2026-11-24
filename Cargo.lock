@@ -214,6 +214,7 @@ name = "contract"
 version = "0.1.0"
 dependencies = [
  "iceoryx2",
+ "iceoryx2-bb-system-types",
  "memmap2",
  "serde",
  "serde_json",
@@ -1515,6 +1516,9 @@ name = "sim-node"
 version = "0.1.0"
 dependencies = [
  "contract",
+ "iceoryx2",
+ "log",
+ "tempfile",
 ]
 
 [[package]]

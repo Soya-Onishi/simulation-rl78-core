@@ -7,16 +7,22 @@
 pub mod command2node;
 pub mod endpoint;
 pub mod id;
+pub mod ipc;
 pub mod names;
 pub mod orchestrator2command;
 pub mod probe;
 pub mod shm;
 
+pub use command2node::rr::{
+    NodeCommandClient, NodeCommandServer, NodeCommandService, NodeRequestError,
+    create_node_command_server, open_node_command_service,
+};
 pub use command2node::{
     INSPECT_CAP, MAX_NODE_PROBE_IDS, NodeCommand, NodeCommandError, NodeCommandResult,
 };
 pub use endpoint::{EndpointDatagram, EndpointPayload, EndpointWire};
 pub use id::{ClusterId, HashedId, Hexable, ParseClusterIdError};
+pub use ipc::{IpcError, create_iox_node, create_signal_iox_node, isolated_config};
 pub use names::{
     PROBE_SERVICE_SUFFIX, node_command_rr_path, node_endpoint_rx_path, probe_service_path,
 };
