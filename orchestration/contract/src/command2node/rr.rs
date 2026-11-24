@@ -171,7 +171,6 @@ mod tests {
     enum Serve {
         ReplySuccess,
         Drop,
-        HoldThenDrop(Duration),
     }
 
     fn serve_one(
@@ -193,10 +192,6 @@ mod tests {
             match serve {
                 Serve::ReplySuccess => request.send_copy(NodeCommandResult::Success).unwrap(),
                 Serve::Drop => drop(request),
-                Serve::HoldThenDrop(hold) => {
-                    thread::sleep(hold);
-                    drop(request);
-                }
             }
         })
     }
@@ -246,16 +241,26 @@ mod tests {
     fn request_times_out_while_server_holds_request() {
         let cluster = unique_cluster(4);
         let (_dir, cfg, _node, client) = client(cluster);
-        let server = serve_one(
-            cfg,
-            cluster,
-            Duration::ZERO,
-            Serve::HoldThenDrop(Duration::from_millis(500)),
-        );
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let server = thread::spawn(move || {
+            let node = create_iox_node(&cfg, "rr-test-server").unwrap();
+            let server = create_node_command_server(&node, cluster, KEY).unwrap();
+            ready_tx.send(()).unwrap();
+            let _held = loop {
+                if let Some(request) = server.receive().unwrap() {
+                    break request;
+                }
+                thread::sleep(POLL_INTERVAL);
+            };
+            let _ = release_rx.recv();
+        });
+        ready_rx.recv().unwrap();
         assert_eq!(
-            client.request(NodeCommand::Start, Duration::from_millis(200)),
+            client.request(NodeCommand::Start, Duration::from_millis(20)),
             Err(NodeRequestError::Timeout)
         );
+        release_tx.send(()).unwrap();
         server.join().unwrap();
     }
 

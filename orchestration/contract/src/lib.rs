@@ -1,6 +1,6 @@
 //! Shared contracts for the orchestration split (#141 / #139).
 //!
-//! Runtime loops live in `sim-command` / future `sim-node` / `sim-orchestrator`
+//! Runtime loops live in `sim-command` / `sim-node` / future `sim-orchestrator`
 //! crates. This crate defines layouts, names, and message shapes so
 //! implementations share one protocol (no throwaway bridges).
 
