@@ -247,13 +247,17 @@ mod tests {
             let node = create_iox_node(&cfg, "rr-test-server").unwrap();
             let server = create_node_command_server(&node, cluster, KEY).unwrap();
             ready_tx.send(()).unwrap();
-            let _held = loop {
-                if let Some(request) = server.receive().unwrap() {
-                    break request;
+            // The request may already be skipped as abandoned if this thread
+            // is descheduled past the client timeout, so also watch `release`.
+            let mut held = None;
+            loop {
+                if held.is_none() {
+                    held = server.receive().unwrap();
                 }
-                thread::sleep(POLL_INTERVAL);
-            };
-            let _ = release_rx.recv();
+                if release_rx.recv_timeout(POLL_INTERVAL).is_ok() {
+                    break;
+                }
+            }
         });
         ready_rx.recv().unwrap();
         assert_eq!(
