@@ -1,12 +1,8 @@
-//! Host control shared-memory layout (min remote VT, board VT, stop generation).
+//! `host_ctrl` bytes-in-memory layout.
 //!
-//! Replaces the legacy `vt_clock` file (arbiter ceiling + board VT). Layout is
-//! versioned and `repr(C)` with explicit padding. Mapping (mmap) lives in
-//! runtime crates; this module is the bytes-in-memory contract on little-endian
-//! hosts (the only supported target class for this project).
-//!
-//! Same-host stop sync uses this SHM only. Endpoint iceoryx payloads on the
-//! same host must not carry a stop mark (#141).
+//! Versioned and `repr(C)` with explicit padding, on little-endian hosts (the
+//! only supported target class for this project). The file mapping itself is
+//! in [`super::mapping`].
 
 #[cfg(not(target_endian = "little"))]
 compile_error!("contract host_ctrl requires little-endian targets");
@@ -102,11 +98,7 @@ impl HostCtrlLayout {
             version: HOST_CTRL_VERSION,
             board_count: self.board_count,
             pad0: 0,
-            min_remote_vt_ns: if has_remote_hosts {
-                0
-            } else {
-                u64::MAX
-            },
+            min_remote_vt_ns: if has_remote_hosts { 0 } else { u64::MAX },
             stop_generation: 0,
         }
     }
@@ -138,9 +130,9 @@ fn bump_stop_generation(slot: &AtomicU64) -> u64 {
 
 /// Atomic view of the concurrently updated `u64` slots in a mapped `host_ctrl`.
 ///
-/// Plain [`HostCtrlHeader`] is for create/init and layout docs. Runtime code
-/// that shares the mapping across processes must use this view (or equivalent
-/// `AtomicU64` accesses at the documented offsets).
+/// Plain [`HostCtrlHeader`] is for create/init and layout docs. Code that
+/// shares the mapping across processes obtains this view from
+/// [`super::HostCtrl::atoms`].
 pub struct HostCtrlAtoms<'a> {
     pub min_remote_vt_ns: &'a AtomicU64,
     pub stop_generation: &'a AtomicU64,
@@ -156,7 +148,7 @@ impl<'a> HostCtrlAtoms<'a> {
     /// - The header at `base` must already contain a matching `board_count`.
     /// - No concurrent non-atomic writers to these slots.
     #[must_use]
-    pub unsafe fn from_mapping(base: *mut u8, layout: HostCtrlLayout) -> Self {
+    pub(crate) unsafe fn from_mapping(base: *mut u8, layout: HostCtrlLayout) -> Self {
         debug_assert_eq!(base.align_offset(8), 0);
         // SAFETY: caller guarantees alignment, size, and exclusive atomic protocol.
         let min_remote_vt = unsafe {

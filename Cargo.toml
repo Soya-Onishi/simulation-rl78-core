@@ -10,7 +10,6 @@ members = [
     "sim-kernel",
     "sim-cluster",
     "orchestration/contract",
-    "orchestration/host-ctrl",
     "orchestration/sim-command",
     "orchestration/sim-node",
 ]

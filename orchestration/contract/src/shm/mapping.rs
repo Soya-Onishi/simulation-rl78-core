@@ -1,18 +1,18 @@
 //! Mapped `{iox_root}/host_ctrl` shared memory for Command and Node (#147 / #151).
 //!
-//! Layout bytes live in [`contract::shm`]. This crate owns create/open/mmap and
-//! safe accessors over [`contract::HostCtrlAtoms`].
+//! create/open/mmap and safe accessors over [`HostCtrlAtoms`].
 
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use contract::{
+use memmap2::{MmapMut, MmapOptions};
+
+use super::layout::{
     HOST_CTRL_FILE, HOST_CTRL_MAGIC, HOST_CTRL_VERSION, HostCtrlAtoms, HostCtrlHeader,
     HostCtrlLayout,
 };
-use memmap2::{MmapMut, MmapOptions};
 
 /// Absolute path of the `host_ctrl` mapping for a cluster root.
 #[must_use]
@@ -57,11 +57,7 @@ impl HostCtrl {
     ///
     /// `has_remote_hosts` sets the initial [`HostCtrlHeader::min_remote_vt_ns`]
     /// (`u64::MAX` with no remotes, `0` when remotes exist).
-    pub fn create(
-        iox_root: &Path,
-        board_count: u32,
-        has_remote_hosts: bool,
-    ) -> io::Result<Self> {
+    pub fn create(iox_root: &Path, board_count: u32, has_remote_hosts: bool) -> io::Result<Self> {
         let layout = HostCtrlLayout::new(board_count).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -172,7 +168,7 @@ impl HostCtrl {
         Ok(())
     }
 
-    /// Saturating bump of `stop_generation` ([`STOP_GEN_SATURATED`] at the top).
+    /// Saturating bump of `stop_generation` ([`super::STOP_GEN_SATURATED`] at the top).
     pub fn bump_stop(&self) -> u64 {
         self.atoms().bump_stop()
     }
@@ -245,7 +241,7 @@ impl HostCtrl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use contract::STOP_GEN_SATURATED;
+    use crate::shm::STOP_GEN_SATURATED;
 
     #[test]
     fn create_open_round_trip() {

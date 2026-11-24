@@ -214,9 +214,11 @@ name = "contract"
 version = "0.1.0"
 dependencies = [
  "iceoryx2",
+ "memmap2",
  "serde",
  "serde_json",
  "sim-kernel",
+ "tempfile",
 ]
 
 [[package]]
@@ -440,15 +442,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
-name = "host-ctrl"
-version = "0.1.0"
-dependencies = [
- "contract",
- "memmap2",
- "tempfile",
-]
 
 [[package]]
 name = "http"
@@ -1499,7 +1492,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "contract",
- "host-ctrl",
  "tokio",
  "tower",
 ]
@@ -1523,7 +1515,6 @@ name = "sim-node"
 version = "0.1.0"
 dependencies = [
  "contract",
- "host-ctrl",
 ]
 
 [[package]]
