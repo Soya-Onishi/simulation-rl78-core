@@ -4,6 +4,7 @@
 //! `sim-cluster` action IPC). REST / JSON uses
 //! [`crate::orchestrator2command::NodeCommandDto`].
 
+pub mod launch;
 pub mod rr;
 
 use iceoryx2::prelude::ZeroCopySend;

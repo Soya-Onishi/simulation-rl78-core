@@ -153,19 +153,11 @@ impl NodeCommandClient {
 mod tests {
     use super::*;
     use crate::ipc::{create_iox_node, isolated_config};
+    use crate::test_support::{node_command_client, unique_cluster};
     use iceoryx2::config::Config;
     use tempfile::TempDir;
 
     const KEY: HashedId<u64> = HashedId::new(3);
-
-    /// Service shared memory is keyed by name only; keep concurrent tests apart.
-    fn unique_cluster(test: u32) -> ClusterId {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        ClusterId::new(std::process::id() ^ (test << 24), nanos)
-    }
 
     /// What the test server does with the first request it receives.
     enum Serve {
@@ -199,14 +191,13 @@ mod tests {
     fn client(cluster: ClusterId) -> (TempDir, Config, IoxNode, NodeCommandClient) {
         let dir = tempfile::tempdir().unwrap();
         let cfg = isolated_config(dir.path()).unwrap();
-        let node = create_iox_node(&cfg, "rr-test-client").unwrap();
-        let client = NodeCommandClient::create(&node, cluster, KEY).unwrap();
+        let (node, client) = node_command_client(dir.path(), cluster, KEY);
         (dir, cfg, node, client)
     }
 
     #[test]
     fn request_without_server_reports_no_server() {
-        let (_dir, _cfg, _node, client) = client(unique_cluster(1));
+        let (_dir, _cfg, _node, client) = client(unique_cluster());
         assert_eq!(
             client.request(NodeCommand::Start, Duration::from_millis(20)),
             Err(NodeRequestError::NoServer)
@@ -215,7 +206,7 @@ mod tests {
 
     #[test]
     fn request_round_trips_through_server() {
-        let cluster = unique_cluster(2);
+        let cluster = unique_cluster();
         let (_dir, cfg, _node, client) = client(cluster);
         let server = serve_one(cfg, cluster, Duration::ZERO, Serve::ReplySuccess);
         assert_eq!(
@@ -227,7 +218,7 @@ mod tests {
 
     #[test]
     fn request_waits_for_late_server() {
-        let cluster = unique_cluster(3);
+        let cluster = unique_cluster();
         let (_dir, cfg, _node, client) = client(cluster);
         let server = serve_one(cfg, cluster, Duration::from_millis(30), Serve::ReplySuccess);
         assert_eq!(
@@ -239,7 +230,7 @@ mod tests {
 
     #[test]
     fn request_times_out_while_server_holds_request() {
-        let cluster = unique_cluster(4);
+        let cluster = unique_cluster();
         let (_dir, cfg, _node, client) = client(cluster);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
@@ -270,7 +261,7 @@ mod tests {
 
     #[test]
     fn request_reports_dropped_request_as_disconnected() {
-        let cluster = unique_cluster(5);
+        let cluster = unique_cluster();
         let (_dir, cfg, _node, client) = client(cluster);
         let server = serve_one(cfg, cluster, Duration::ZERO, Serve::Drop);
         assert_eq!(

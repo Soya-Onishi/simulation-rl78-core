@@ -13,5 +13,5 @@ mod probe;
 mod runtime;
 mod simulation;
 
-pub use runtime::{NodeConfig, NodeRuntime, NodeRuntimeError};
+pub use runtime::{NodeRuntime, NodeRuntimeError};
 pub use simulation::SimState;

@@ -11,4 +11,5 @@ contract = { path = "../contract" }
 log = "0.4"
 
 [dev-dependencies]
+contract = { path = "../contract", features = ["test-support"] }
 tempfile = "3"

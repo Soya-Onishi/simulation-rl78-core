@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Shared contracts for Orchestrator / Command / Node (issue #141 / #139)"
 publish = false
 
+[features]
+test-support = []
+
 [dependencies]
 iceoryx2 = "0.9.3"
 iceoryx2-bb-system-types = "0.9.3"

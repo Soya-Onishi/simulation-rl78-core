@@ -11,28 +11,16 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
 
-use contract::{ClusterId, HashedId, HostCtrl, IpcError, NodeCommand, NodeCommandResult};
+use contract::{HostCtrl, IpcError, NodeCommand, NodeCommandResult, NodeConfig};
 
 use crate::ipc::ipc_loop;
 use crate::probe::probe_loop;
 use crate::simulation::{SimState, simulation_loop};
-
-/// Identity and shared-memory location of one Node process.
-#[derive(Clone, Debug)]
-pub struct NodeConfig {
-    /// iceoryx `root_path` and `host_ctrl` directory for the cluster on this host.
-    pub iox_root: PathBuf,
-    pub cluster: ClusterId,
-    pub node_key: HashedId<u64>,
-    /// Board count of this host's `host_ctrl` mapping.
-    pub board_count: u32,
-}
 
 #[derive(Debug)]
 pub enum NodeRuntimeError {

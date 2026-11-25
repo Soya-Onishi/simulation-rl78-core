@@ -6,11 +6,11 @@ use std::thread;
 use std::time::Duration;
 
 use contract::{
-    IpcError, NodeCommand, NodeCommandError, NodeCommandResult, create_iox_node,
+    IpcError, NodeCommand, NodeCommandError, NodeCommandResult, NodeConfig, create_iox_node,
     create_node_command_server, isolated_config,
 };
 
-use crate::runtime::{NodeConfig, NodeRuntimeError, Routed};
+use crate::runtime::{NodeRuntimeError, Routed};
 
 /// Sleep when the RR server has no pending request.
 const IDLE_SLEEP: Duration = Duration::from_millis(1);

@@ -12,7 +12,10 @@ pub mod names;
 pub mod orchestrator2command;
 pub mod probe;
 pub mod shm;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
+pub use command2node::launch::{NodeArgsError, NodeConfig};
 pub use command2node::rr::{
     NodeCommandClient, NodeCommandServer, NodeCommandService, NodeRequestError,
     create_node_command_server, open_node_command_service,
