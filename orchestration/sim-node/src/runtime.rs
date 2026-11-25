@@ -156,3 +156,57 @@ impl Drop for ShutdownOnExit {
         self.0.store(true, Ordering::Release);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn empty_runtime() -> NodeRuntime {
+        NodeRuntime {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(AtomicU8::new(SimState::Stopped as u8)),
+            threads: Vec::new(),
+        }
+    }
+
+    fn wait_until_stopped(runtime: &NodeRuntime) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.is_running() {
+            assert!(Instant::now() < deadline, "runtime kept running");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn panicking_thread_stops_runtime_and_reports_panic() {
+        let mut runtime = empty_runtime();
+        let flag = runtime.shutdown.clone();
+        runtime
+            .spawn_thread("waits-for-shutdown", move || {
+                while !flag.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(())
+            })
+            .unwrap();
+        runtime
+            .spawn_thread("panics", || panic!("simulated thread failure"))
+            .unwrap();
+
+        wait_until_stopped(&runtime);
+        assert!(matches!(
+            runtime.shutdown(),
+            Err(NodeRuntimeError::Thread(message)) if message == "thread panicked"
+        ));
+    }
+
+    #[test]
+    fn returning_thread_stops_runtime() {
+        let mut runtime = empty_runtime();
+        runtime.spawn_thread("returns", || Ok(())).unwrap();
+        wait_until_stopped(&runtime);
+        assert!(runtime.shutdown().is_ok());
+    }
+}

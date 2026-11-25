@@ -61,10 +61,12 @@ impl NodeConfig {
                 NodeArgsError(format!("missing value for {}", flag.to_string_lossy()))
             })?;
             match flag.to_str() {
-                Some("--iox-root") => iox_root = Some(PathBuf::from(value)),
-                Some("--cluster") => cluster = Some(parse(&flag, &value)?),
-                Some("--node-key") => node_key = Some(parse(&flag, &value)?),
-                Some("--board-count") => board_count = Some(parse(&flag, &value)?),
+                Some("--iox-root") => set_once(&mut iox_root, &flag, PathBuf::from(value))?,
+                Some("--cluster") => set_once(&mut cluster, &flag, parse(&flag, &value)?)?,
+                Some("--node-key") => set_once(&mut node_key, &flag, parse(&flag, &value)?)?,
+                Some("--board-count") => {
+                    set_once(&mut board_count, &flag, parse(&flag, &value)?)?;
+                }
                 _ => {
                     return Err(NodeArgsError(format!(
                         "unknown argument {}",
@@ -90,6 +92,16 @@ fn parse<T: FromStr>(flag: &OsStr, value: &OsStr) -> Result<T, NodeArgsError> {
             value.to_string_lossy()
         ))
     })
+}
+
+fn set_once<T>(slot: &mut Option<T>, flag: &OsStr, value: T) -> Result<(), NodeArgsError> {
+    if slot.replace(value).is_some() {
+        return Err(NodeArgsError(format!(
+            "duplicate {}",
+            flag.to_string_lossy()
+        )));
+    }
+    Ok(())
 }
 
 fn missing(flag: &str) -> NodeArgsError {
@@ -134,6 +146,16 @@ mod tests {
         assert_eq!(
             NodeConfig::from_args(args(&["--iox-root"])),
             Err(NodeArgsError("missing value for --iox-root".into()))
+        );
+    }
+
+    #[test]
+    fn duplicate_flag_is_rejected() {
+        let mut list = config().to_args();
+        list.extend(args(&["--board-count", "1"]));
+        assert_eq!(
+            NodeConfig::from_args(list),
+            Err(NodeArgsError("duplicate --board-count".into()))
         );
     }
 
