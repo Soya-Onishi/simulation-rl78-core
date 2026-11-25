@@ -8,6 +8,7 @@
 #[cfg(not(panic = "unwind"))]
 compile_error!("sim-node requires panic = \"unwind\"");
 
+mod ipc;
 mod probe;
 mod runtime;
 mod simulation;

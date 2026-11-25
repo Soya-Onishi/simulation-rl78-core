@@ -1,8 +1,35 @@
-//! Probe thread subscription set (#147 Phase 2: hold only, no publish).
+//! Probe thread loop and subscription set (#147 Phase 2: hold only, no publish).
 
 use std::collections::BTreeSet;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::Duration;
 
-use contract::{HashedId, MAX_NODE_PROBE_IDS, NodeCommandError, NodeCommandResult};
+use contract::{HashedId, MAX_NODE_PROBE_IDS, NodeCommand, NodeCommandError, NodeCommandResult};
+
+use crate::runtime::Routed;
+
+/// Probe thread period.
+const PROBE_PERIOD: Duration = Duration::from_millis(100);
+
+/// Serve `ProbeSubscribe` until `rx` disconnects.
+pub(crate) fn probe_loop(rx: &Receiver<Routed>) {
+    let mut subscriptions = ProbeSubscriptions::default();
+    loop {
+        match rx.recv_timeout(PROBE_PERIOD) {
+            Ok(Routed { command, reply }) => {
+                let result = match command {
+                    NodeCommand::ProbeSubscribe { count, probe_ids } => {
+                        subscriptions.subscribe(&probe_ids[..usize::from(count)])
+                    }
+                    _ => NodeCommandResult::Error(NodeCommandError::ImplFault),
+                };
+                let _ = reply.send(result);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct ProbeSubscriptions {

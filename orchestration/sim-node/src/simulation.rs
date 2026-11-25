@@ -1,9 +1,41 @@
-//! Simulation thread state machine (#147 Phase 2 table).
+//! Simulation thread loop and state machine (#147 Phase 2 table).
 //!
 //! Guest / plant `poll` and the dataplane are not wired yet (Phase 3); only
 //! the run state and the `host_ctrl` emergency stop are modelled.
 
-use contract::{NodeCommand, NodeCommandError, NodeCommandResult};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::Duration;
+
+use contract::{HostCtrl, NodeCommand, NodeCommandError, NodeCommandResult};
+
+use crate::runtime::Routed;
+
+/// `stop_generation` poll period.
+const STOP_POLL_PERIOD: Duration = Duration::from_millis(1);
+
+/// Apply routed commands and watch `stop_generation` until `rx` disconnects.
+pub(crate) fn simulation_loop(host_ctrl: &HostCtrl, rx: &Receiver<Routed>, state: &AtomicU8) {
+    let mut sim = Simulation::new(host_ctrl.stop_generation());
+    loop {
+        let received = rx.recv_timeout(STOP_POLL_PERIOD);
+        // Consume bumps made before this command so a Start sent after an
+        // emergency stop is not undone by that older stop.
+        if sim.observe_stop_generation(host_ctrl.stop_generation()) {
+            state.store(sim.state() as u8, Ordering::Release);
+            log::info!("emergency stop: host_ctrl stop_generation advanced");
+        }
+        match received {
+            Ok(Routed { command, reply }) => {
+                let result = sim.apply(command);
+                state.store(sim.state() as u8, Ordering::Release);
+                let _ = reply.send(result);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
 
 /// Simulation run state as seen by Command.
 #[repr(u8)]
