@@ -24,5 +24,5 @@ until it can be removed.
 ## Phase 2 progress
 
 - **2-a (#151)**: `sim-node` crate + `contract::shm::mapping` (`HostCtrl`) (create/open/min_remote_vt/board_vt/bump_stop).
-- **2-b (#153)**: Node 3 threads + Command ↔ Node RR (`contract::command2node::rr`). Start / Stop / Reset state machine, `ProbeSubscribe` set (cap 32), `host_ctrl` emergency stop (each `stop_generation` bump stops once). `sim-node --iox-root --cluster --node-key --board-count` exits cleanly on SIGINT / SIGTERM.
+- **2-b (#153)**: Node 3 threads + Command ↔ Node RR (`contract::command2node::rr`). Start / Stop / Reset state machine, `ProbeSubscribe` set (cap 32), `host_ctrl` emergency stop (each `stop_generation` bump stops once). `sim-node --iox-root --cluster --node-key --board-count` exits cleanly on `NodeCommand::Shutdown` (Command-internal, not on REST) or when its parent (Command) process exits; signals are not handled.
 - **2-c**: Command 4 threads, REST dispatch, node registration table, Build dummy process.

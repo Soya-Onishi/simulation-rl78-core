@@ -23,6 +23,8 @@ pub const MAX_NODE_PROBE_IDS: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, ZeroCopySend)]
 pub enum NodeCommand {
+    /// Terminate the Node process after replying. Command-internal; not on REST.
+    Shutdown,
     Start,
     Stop,
     Reset,

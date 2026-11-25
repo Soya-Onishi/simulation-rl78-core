@@ -4,9 +4,10 @@
 //! over an mpsc channel with a one-shot reply channel: `ProbeSubscribe` to the
 //! Probe thread, everything else to the Simulation thread.
 //!
-//! Shutdown: only the IPC thread watches the shutdown flag. When it exits it
-//! drops both senders, so the Simulation and Probe threads end on disconnect
-//! after any in-flight request has been answered.
+//! Shutdown: only the IPC thread watches the shutdown flag, and it also exits
+//! after answering [`NodeCommand::Shutdown`]. When it exits it drops both
+//! senders, so the Simulation and Probe threads end on disconnect after any
+//! in-flight request has been answered.
 
 use std::fmt;
 use std::io;
@@ -208,9 +209,17 @@ fn ipc_loop(
             thread::sleep(IPC_IDLE_SLEEP);
             continue;
         };
-        let result = route(*request.payload(), sim_tx, probe_tx);
+        let command = *request.payload();
+        let result = match command {
+            NodeCommand::Shutdown => NodeCommandResult::Success,
+            _ => route(command, sim_tx, probe_tx),
+        };
         if let Err(e) = request.send_copy(result) {
             log::warn!("node command response dropped: {e:?}");
+        }
+        if command == NodeCommand::Shutdown {
+            log::info!("shutdown requested by Command");
+            break;
         }
     }
     Ok(())

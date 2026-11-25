@@ -1,20 +1,24 @@
-//! `sim-node` process: runs [`NodeRuntime`] until SIGINT / SIGTERM or a fatal
-//! thread error, then shuts the threads down so iceoryx ports are released.
+//! `sim-node` process: runs [`NodeRuntime`] until Command sends
+//! `NodeCommand::Shutdown`, the parent (Command) process exits, or a thread
+//! fails, then shuts the threads down so iceoryx ports are released.
 
+use std::os::unix::process::parent_id;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::thread;
 use std::time::Duration;
 
-use contract::{create_signal_iox_node, isolated_config};
 use sim_node::{NodeConfig, NodeRuntime};
 
 const USAGE: &str =
     "usage: sim-node --iox-root <dir> --cluster <id-nano> --node-key <hex16> --board-count <n>";
 
-/// Main thread poll period for termination signals and thread exit.
+/// Main thread poll period for parent exit and thread exit.
 const MAIN_POLL: Duration = Duration::from_millis(50);
 
 fn main() -> ExitCode {
+    // Must be the spawning Command: a parent that already exited is not detected.
+    let parent = parent_id();
     let config = match parse_args(std::env::args().skip(1)) {
         Ok(config) => config,
         Err(e) => {
@@ -22,7 +26,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(config) {
+    match run(config, parent) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("sim-node: {e}");
@@ -31,13 +35,15 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(config: NodeConfig) -> Result<(), String> {
-    // Before spawning, so SIGTERM is already captured once the RR server is up.
-    let signals = isolated_config(&config.iox_root)
-        .and_then(|cfg| create_signal_iox_node(&cfg, &format!("sim-node-{}-main", config.node_key)))
-        .map_err(|e| e.to_string())?;
+fn run(config: NodeConfig, parent: u32) -> Result<(), String> {
     let runtime = NodeRuntime::spawn(config).map_err(|e| e.to_string())?;
-    while runtime.is_running() && signals.wait(MAIN_POLL).is_ok() {}
+    while runtime.is_running() {
+        if parent_id() != parent {
+            eprintln!("sim-node: parent process {parent} exited; shutting down");
+            break;
+        }
+        thread::sleep(MAIN_POLL);
+    }
     runtime.shutdown().map_err(|e| e.to_string())
 }
 

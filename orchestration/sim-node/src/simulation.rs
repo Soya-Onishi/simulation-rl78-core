@@ -58,7 +58,7 @@ impl Simulation {
             | NodeCommand::GdbStepSync { .. }
             | NodeCommand::Inspect { .. }
             | NodeCommand::Action { .. } => NodeCommandResult::Error(NodeCommandError::Unavailable),
-            NodeCommand::ProbeSubscribe { .. } => {
+            NodeCommand::Shutdown | NodeCommand::ProbeSubscribe { .. } => {
                 NodeCommandResult::Error(NodeCommandError::ImplFault)
             }
         }

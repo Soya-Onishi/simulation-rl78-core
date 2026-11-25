@@ -7,7 +7,6 @@
 
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
 
 use iceoryx2::config::Config;
 use iceoryx2::prelude::*;
@@ -56,33 +55,15 @@ pub fn isolated_config(iox_root: &Path) -> Result<Config, IpcError> {
     Ok(cfg)
 }
 
-/// Create an iceoryx node with signal handling disabled (the process owns its lifecycle).
+/// Create an iceoryx node with signal handling disabled: processes are
+/// stopped by [`crate::NodeCommand::Shutdown`], not by signals.
 pub fn create_iox_node(config: &Config, name: &str) -> Result<IoxNode, IpcError> {
-    build_iox_node(config, name, SignalHandlingMode::Disabled)
-}
-
-/// Create an iceoryx node whose [`Node::wait`] fails once SIGINT / SIGTERM
-/// was received. The process-wide handlers are installed before returning.
-pub fn create_signal_iox_node(config: &Config, name: &str) -> Result<IoxNode, IpcError> {
-    let node = build_iox_node(config, name, SignalHandlingMode::HandleTerminationRequests)?;
-    // iceoryx installs the handlers on first use; until then SIGTERM still
-    // has its default (fatal) action.
-    node.wait(Duration::ZERO)
-        .map_err(|e| IpcError::new(format!("iceoryx node {name}: {e}")))?;
-    Ok(node)
-}
-
-fn build_iox_node(
-    config: &Config,
-    name: &str,
-    signals: SignalHandlingMode,
-) -> Result<IoxNode, IpcError> {
     let node_name =
         NodeName::new(name).map_err(|e| IpcError::new(format!("node name {name}: {e:?}")))?;
     NodeBuilder::new()
         .name(&node_name)
         .config(config)
-        .signal_handling_mode(signals)
+        .signal_handling_mode(SignalHandlingMode::Disabled)
         .create::<ipc::Service>()
         .map_err(|e| IpcError::new(format!("iceoryx node {name}: {e:?}")))
 }
