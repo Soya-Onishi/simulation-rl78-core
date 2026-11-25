@@ -1,6 +1,17 @@
-//! Node process runtime skeleton (#141 / #147 / #151).
+//! Node process runtime (#141 / #147 / #153).
 //!
-//! Phase 2-a ships crate placement and re-exports the `host_ctrl` mapping the
-//! Node opens. IPC / Probe / Simulation threads land in later Phase 2 slices.
+//! [`NodeRuntime`] runs the IPC / Probe / Simulation threads. Phase 2 wires the
+//! control plane only: Start / Stop / Reset over the Command ↔ Node RR service
+//! and the `host_ctrl` emergency stop. Guest / plant execution lands in Phase 3.
 
-pub use contract::{HostCtrl, host_ctrl_path};
+// A panicking thread must unwind so its `ShutdownOnExit` guard stops the rest.
+#[cfg(not(panic = "unwind"))]
+compile_error!("sim-node requires panic = \"unwind\"");
+
+mod ipc;
+mod probe;
+mod runtime;
+mod simulation;
+
+pub use runtime::{NodeRuntime, NodeRuntimeError};
+pub use simulation::SimState;

@@ -4,6 +4,9 @@
 //! `sim-cluster` action IPC). REST / JSON uses
 //! [`crate::orchestrator2command::NodeCommandDto`].
 
+pub mod launch;
+pub mod rr;
+
 use iceoryx2::prelude::ZeroCopySend;
 use sim_kernel::MAX_ACTION_PARAMS;
 
@@ -21,6 +24,8 @@ pub const MAX_NODE_PROBE_IDS: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, ZeroCopySend)]
 pub enum NodeCommand {
+    /// Terminate the Node process after replying. Command-internal; not on REST.
+    Shutdown,
     Start,
     Stop,
     Reset,
