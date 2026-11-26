@@ -16,6 +16,7 @@ pub mod shm;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod threads;
+pub mod topology;
 
 pub use command2node::launch::{NodeArgsError, NodeConfig};
 pub use command2node::rr::{
@@ -27,7 +28,7 @@ pub use command2node::{
 };
 pub use endpoint::{EndpointDatagram, EndpointPayload, EndpointWire};
 pub use id::{ClusterId, HashedId, Hexable, ParseClusterIdError};
-pub use ipc::{IoxNode, IpcError, create_iox_node, isolated_config};
+pub use ipc::{IoxNode, IpcError, create_iox_node, isolated_config, remove_dead_nodes};
 pub use names::{
     PROBE_SERVICE_SUFFIX, node_command_rr_path, node_endpoint_rx_path, probe_service_path,
 };
@@ -35,9 +36,9 @@ pub use node2orchestrator::{NodeLogLevel, NodeLogRecord};
 pub use orchestrator2command::{
     API_PREFIX, CommandHostStatus, NodeCommandBody, NodeCommandDto, NodeCommandDtoError,
     NodeCommandErrorDto, NodeCommandResultDto, NodeProcessStatus, OrchestratorReply,
-    ProbeInterestBody, RestErrorBody, RestErrorCode, StartBody, build_ensure, build_restart,
-    build_status, build_terminate, node_command, probe_interest, reset, sessions, start, status,
-    stop,
+    ProbeInterestBody, RestErrorBody, RestErrorCode, SessionsBody, StartBody, build_ensure,
+    build_restart, build_status, build_terminate, node_command, probe_interest, reset, sessions,
+    start, status, stop,
 };
 pub use probe::{DigitalLiveValue, DigitalProbeData, ProbeLiveSample, ProbeLogRecord};
 pub use shm::{
@@ -45,3 +46,4 @@ pub use shm::{
     HostCtrlLayout, HostCtrlLease, STOP_GEN_SATURATED, host_ctrl_path,
 };
 pub use threads::{ThreadGroup, ThreadPanicked};
+pub use topology::{LogicalTopology, TopologyError, node_key};

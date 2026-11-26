@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use iceoryx2::config::Config;
 use iceoryx2::prelude::*;
@@ -53,6 +54,33 @@ pub fn isolated_config(iox_root: &Path) -> Result<Config, IpcError> {
     let mut cfg = Config::default();
     cfg.global.set_root_path(&iox_path);
     Ok(cfg)
+}
+
+/// Wait for another process already cleaning the same dead node.
+const DEAD_NODE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Remove the resources of iceoryx nodes under `config` whose process died
+/// without releasing them (e.g. a SIGKILLed Node).
+///
+/// Returns how many nodes remain: alive, or not identifiable as dead.
+pub fn remove_dead_nodes(config: &Config) -> Result<usize, IpcError> {
+    let mut dead = Vec::new();
+    let mut remaining = 0;
+    Node::<ipc::Service>::list(config, |state| {
+        match state {
+            NodeState::Dead(view) => dead.push(view),
+            NodeState::Alive(_) | NodeState::Inaccessible(_) | NodeState::Undefined(_) => {
+                remaining += 1;
+            }
+        }
+        CallbackProgression::Continue
+    })
+    .map_err(|e| IpcError::new(format!("list iceoryx nodes: {e:?}")))?;
+    for view in dead {
+        view.blocking_remove_stale_resources(DEAD_NODE_CLEANUP_TIMEOUT)
+            .map_err(|e| IpcError::new(format!("remove dead iceoryx node: {e:?}")))?;
+    }
+    Ok(remaining)
 }
 
 /// Create an iceoryx node with signal handling disabled: processes are

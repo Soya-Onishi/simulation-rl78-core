@@ -15,5 +15,6 @@ pub use reply::{
     OrchestratorReply,
 };
 pub use request::{
-    NodeCommandBody, NodeCommandDto, NodeCommandDtoError, ProbeInterestBody, StartBody,
+    NodeCommandBody, NodeCommandDto, NodeCommandDtoError, ProbeInterestBody, SessionsBody,
+    StartBody,
 };

@@ -2,10 +2,52 @@
 //!
 //! Resource ids (`cluster_id`, `node_key`) are path params — see [`super::paths`].
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
-use crate::id::HashedId;
 use crate::command2node::NodeCommand;
+use crate::id::HashedId;
+use crate::topology::{LogicalTopology, TopologyError};
+
+/// `POST` [`super::paths::sessions`] body.
+///
+/// The Orchestrator sends the whole topology to every Command host and lists
+/// in `nodes` the boards (by [`crate::topology::node_key`]) this host launches.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionsBody {
+    pub topology: LogicalTopology,
+    pub nodes: Vec<HashedId<u64>>,
+}
+
+impl SessionsBody {
+    /// Valid topology, and `nodes` is a non-empty set of its boards.
+    pub fn validate(&self) -> Result<(), TopologyError> {
+        self.topology.validate()?;
+        let boards = self.topology.boards_by_key()?;
+        if self.nodes.is_empty() {
+            return Err(TopologyError("nodes must not be empty".into()));
+        }
+        let mut seen = HashSet::new();
+        for node in &self.nodes {
+            if !boards.contains_key(node) {
+                return Err(TopologyError(format!(
+                    "node {node} is not a topology board"
+                )));
+            }
+            if !seen.insert(node) {
+                return Err(TopologyError(format!("duplicate node {node}")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Some topology board runs on another host.
+    #[must_use]
+    pub fn has_remote_hosts(&self) -> bool {
+        self.nodes.len() < self.topology.board_count()
+    }
+}
 
 /// `POST` [`super::paths::start`] body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +142,55 @@ pub struct ProbeInterestBody {
 mod tests {
     use super::*;
     use crate::command2node::MAX_NODE_PROBE_IDS;
+
+    fn sessions_body(nodes: &[&str]) -> SessionsBody {
+        let topology = serde_json::from_value(serde_json::json!({
+            "boards": [
+                {"id": "a", "kind": "rl78", "endpoints": []},
+                {"id": "b", "kind": "rl78", "endpoints": []},
+            ],
+            "edges": [],
+            "margin_ns": 1,
+        }))
+        .unwrap();
+        SessionsBody {
+            topology,
+            nodes: nodes
+                .iter()
+                .map(|id| crate::topology::node_key(id))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn sessions_body_nodes_must_be_unique_topology_boards() {
+        assert_eq!(sessions_body(&["a"]).validate(), Ok(()));
+        assert!(sessions_body(&["a"]).has_remote_hosts());
+        assert!(!sessions_body(&["a", "b"]).has_remote_hosts());
+        for (nodes, expected) in [
+            (&[][..], "nodes must not be empty"),
+            (&["c"][..], "is not a topology board"),
+            (&["a", "a"][..], "duplicate node"),
+        ] {
+            let message = sessions_body(nodes).validate().unwrap_err().0;
+            assert!(
+                message.contains(expected),
+                "{expected:?} not in {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_body_rejects_invalid_topology() {
+        let mut body = sessions_body(&["a"]);
+        body.topology.boards[1].id = "a".into();
+        assert!(
+            body.validate()
+                .unwrap_err()
+                .0
+                .contains("duplicate board id")
+        );
+    }
 
     #[test]
     fn start_body_omits_none_until_ns() {
