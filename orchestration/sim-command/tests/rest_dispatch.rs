@@ -259,14 +259,18 @@ async fn shutdown_terminates_nodes_and_removes_session_dirs() {
 }
 
 #[test]
-fn spawn_removes_stale_session_dirs() {
+fn spawn_removes_stale_session_dirs_only() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir);
     let stale = config.work_dir.join("1-2");
-    std::fs::create_dir_all(&stale).unwrap();
-    std::fs::write(stale.join("host_ctrl"), b"stale").unwrap();
+    let unrelated = config.work_dir.join("not-a-session");
+    for dir in [&stale, &unrelated] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("host_ctrl"), b"stale").unwrap();
+    }
 
     let host = CommandHost::spawn(config).unwrap();
     assert!(!stale.exists());
+    assert!(unrelated.join("host_ctrl").exists());
     host.shutdown().unwrap();
 }

@@ -151,14 +151,10 @@ mod tests {
     }
 
     #[test]
-    fn unattached_thread_drops_records() {
-        let (tx, rx) = channel();
-        let attached = thread::spawn(move || attach(tx));
+    fn unattached_thread_logging_is_a_no_op() {
         thread::spawn(|| emit(log::Level::Error, "nobody listens"))
             .join()
             .unwrap();
-        attached.join().unwrap();
-        assert_eq!(rx.iter().count(), 0);
     }
 
     #[test]

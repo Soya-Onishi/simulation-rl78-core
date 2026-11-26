@@ -154,11 +154,16 @@ impl CommandHost {
     }
 }
 
+/// Only directories named like [`CommandConfig::session_root`] are touched.
 fn remove_stale_sessions(work_dir: &Path) -> Result<(), CommandHostError> {
     std::fs::create_dir_all(work_dir).map_err(CommandHostError::Io)?;
     for entry in std::fs::read_dir(work_dir).map_err(CommandHostError::Io)? {
         let entry = entry.map_err(CommandHostError::Io)?;
-        if entry.file_type().map_err(CommandHostError::Io)?.is_dir() {
+        let is_session = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.parse::<ClusterId>().is_ok());
+        if is_session && entry.file_type().map_err(CommandHostError::Io)?.is_dir() {
             remove_session_dir(&entry.path())?;
         }
     }

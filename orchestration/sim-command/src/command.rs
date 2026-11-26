@@ -133,7 +133,6 @@ enum RunState {
 struct Session {
     cluster: ClusterId,
     iox_root: PathBuf,
-    board_count: u32,
     /// Boards this host launches (from [`SessionsBody::nodes`]).
     nodes: HashSet<HashedId<u64>>,
     /// Registration table: Nodes whose `build_ensure` succeeded.
@@ -177,7 +176,6 @@ impl CommandState<'_> {
             Session {
                 cluster,
                 iox_root: iox_root.clone(),
-                board_count,
                 nodes: body.nodes.iter().copied().collect(),
                 clients: HashMap::new(),
                 run: RunState::Idle,
@@ -317,7 +315,7 @@ impl Session {
             iox_root: self.iox_root.clone(),
             cluster: self.cluster,
             node_key,
-            board_count: self.board_count,
+            board_count: self.host_ctrl.board_count(),
         }
     }
 
