@@ -20,8 +20,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 
-# sim-node relies on unwinding: a panicking thread must run its drop guards so
-# the remaining threads shut down and `JoinHandle::join` reports the panic.
+# contract::ThreadGroup (sim-node / sim-command) relies on unwinding: a panicking
+# thread must run its drop guards so the remaining threads shut down and
+# `JoinHandle::join` reports the panic.
 [profile.dev]
 panic = "unwind"
 

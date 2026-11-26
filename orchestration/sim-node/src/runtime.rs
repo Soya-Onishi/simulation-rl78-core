@@ -14,11 +14,13 @@
 use std::fmt;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::thread::{self, JoinHandle};
 
-use contract::{HostCtrl, IpcError, NodeCommand, NodeCommandResult, NodeConfig, NodeLogRecord};
+use contract::{
+    HostCtrl, IpcError, NodeCommand, NodeCommandResult, NodeConfig, NodeLogRecord, ThreadGroup,
+    ThreadPanicked,
+};
 
 use crate::ipc::ipc_loop;
 use crate::logger::{self, DummyTcpStream, log_loop};
@@ -44,6 +46,12 @@ impl fmt::Display for NodeRuntimeError {
 
 impl std::error::Error for NodeRuntimeError {}
 
+impl From<ThreadPanicked> for NodeRuntimeError {
+    fn from(value: ThreadPanicked) -> Self {
+        Self::Thread(value.to_string())
+    }
+}
+
 /// A command forwarded by the IPC thread with its one-shot reply channel.
 pub(crate) struct Routed {
     pub(crate) command: NodeCommand,
@@ -52,9 +60,8 @@ pub(crate) struct Routed {
 
 /// Running IPC / Probe / Simulation / log threads. Dropping shuts them down.
 pub struct NodeRuntime {
-    shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
-    threads: Vec<JoinHandle<Result<(), NodeRuntimeError>>>,
+    threads: ThreadGroup<NodeRuntimeError>,
 }
 
 impl NodeRuntime {
@@ -65,9 +72,8 @@ impl NodeRuntime {
             .map_err(NodeRuntimeError::HostCtrl)?;
         logger::install();
         let mut runtime = Self {
-            shutdown: Arc::new(AtomicBool::new(false)),
             state: Arc::new(AtomicU8::new(SimState::Stopped as u8)),
-            threads: Vec::with_capacity(4),
+            threads: ThreadGroup::new(),
         };
         // Declared after `runtime`: an early return drops `log_tx` first, so
         // the log thread can end while `runtime`'s drop joins it.
@@ -89,7 +95,7 @@ impl NodeRuntime {
             probe_loop(&probe_rx);
             Ok(())
         })?;
-        let shutdown = runtime.shutdown.clone();
+        let shutdown = runtime.threads.shutdown_flag();
         runtime.spawn_logged_thread("sim-node-ipc", &log_tx, move || {
             ipc_loop(&config, &sim_tx, &probe_tx, &shutdown, &ready_tx)
         })?;
@@ -113,13 +119,12 @@ impl NodeRuntime {
     /// `false` once any thread has exited (shutdown or a fatal IPC error).
     #[must_use]
     pub fn is_running(&self) -> bool {
-        !self.shutdown.load(Ordering::Acquire)
+        self.threads.is_running()
     }
 
     /// Stop every thread and return the first thread error.
     pub fn shutdown(mut self) -> Result<(), NodeRuntimeError> {
-        self.shutdown.store(true, Ordering::Release);
-        self.join_threads()
+        self.threads.shutdown()
     }
 
     fn spawn_thread(
@@ -127,16 +132,9 @@ impl NodeRuntime {
         name: &str,
         body: impl FnOnce() -> Result<(), NodeRuntimeError> + Send + 'static,
     ) -> Result<(), NodeRuntimeError> {
-        let on_exit = ShutdownOnExit(self.shutdown.clone());
-        let handle = thread::Builder::new()
-            .name(name.into())
-            .spawn(move || {
-                let _on_exit = on_exit;
-                body()
-            })
-            .map_err(|e| NodeRuntimeError::Thread(format!("spawn {name}: {e}")))?;
-        self.threads.push(handle);
-        Ok(())
+        self.threads
+            .spawn(name, body)
+            .map_err(|e| NodeRuntimeError::Thread(format!("spawn {name}: {e}")))
     }
 
     /// [`Self::spawn_thread`] whose `log` records go to the log thread.
@@ -151,88 +149,5 @@ impl NodeRuntime {
             logger::attach(log_tx);
             body()
         })
-    }
-
-    fn join_threads(&mut self) -> Result<(), NodeRuntimeError> {
-        let mut first = Ok(());
-        for handle in self.threads.drain(..) {
-            let result = handle
-                .join()
-                .unwrap_or_else(|_| Err(NodeRuntimeError::Thread("thread panicked".into())));
-            if first.is_ok() {
-                first = result;
-            }
-        }
-        first
-    }
-}
-
-impl Drop for NodeRuntime {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        let _ = self.join_threads();
-    }
-}
-
-/// Raises the shutdown flag when a thread exits, including by panic.
-struct ShutdownOnExit(Arc<AtomicBool>);
-
-impl Drop for ShutdownOnExit {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::*;
-
-    fn empty_runtime() -> NodeRuntime {
-        NodeRuntime {
-            shutdown: Arc::new(AtomicBool::new(false)),
-            state: Arc::new(AtomicU8::new(SimState::Stopped as u8)),
-            threads: Vec::new(),
-        }
-    }
-
-    fn wait_until_stopped(runtime: &NodeRuntime) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while runtime.is_running() {
-            assert!(Instant::now() < deadline, "runtime kept running");
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    #[test]
-    fn panicking_thread_stops_runtime_and_reports_panic() {
-        let mut runtime = empty_runtime();
-        let flag = runtime.shutdown.clone();
-        runtime
-            .spawn_thread("waits-for-shutdown", move || {
-                while !flag.load(Ordering::Acquire) {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Ok(())
-            })
-            .unwrap();
-        runtime
-            .spawn_thread("panics", || panic!("simulated thread failure"))
-            .unwrap();
-
-        wait_until_stopped(&runtime);
-        assert!(matches!(
-            runtime.shutdown(),
-            Err(NodeRuntimeError::Thread(message)) if message == "thread panicked"
-        ));
-    }
-
-    #[test]
-    fn returning_thread_stops_runtime() {
-        let mut runtime = empty_runtime();
-        runtime.spawn_thread("returns", || Ok(())).unwrap();
-        wait_until_stopped(&runtime);
-        assert!(runtime.shutdown().is_ok());
     }
 }

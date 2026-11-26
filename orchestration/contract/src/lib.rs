@@ -15,6 +15,7 @@ pub mod probe;
 pub mod shm;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod threads;
 
 pub use command2node::launch::{NodeArgsError, NodeConfig};
 pub use command2node::rr::{
@@ -43,3 +44,4 @@ pub use shm::{
     HOST_CTRL_FILE, HOST_CTRL_MAGIC, HOST_CTRL_VERSION, HostCtrl, HostCtrlAtoms, HostCtrlHeader,
     HostCtrlLayout, HostCtrlLease, STOP_GEN_SATURATED, host_ctrl_path,
 };
+pub use threads::{ThreadGroup, ThreadPanicked};

@@ -6,10 +6,6 @@
 //! Start / Stop / Reset over the Command ↔ Node RR service and the `host_ctrl`
 //! emergency stop. Guest / plant execution lands in Phase 3.
 
-// A panicking thread must unwind so its `ShutdownOnExit` guard stops the rest.
-#[cfg(not(panic = "unwind"))]
-compile_error!("sim-node requires panic = \"unwind\"");
-
 mod ipc;
 mod logger;
 mod probe;
