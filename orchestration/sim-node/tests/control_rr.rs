@@ -183,6 +183,9 @@ fn runtime_thread_logs_reach_the_log_stream() {
     install_logger();
     let log = SharedLog::default();
     let f = Fixture::with_log_stream(log.clone());
+    assert_eq!(f.request(NodeCommand::Start), NodeCommandResult::Success);
+    f.host_ctrl.bump_stop();
+    f.wait_for_state(SimState::Stopped);
     assert_eq!(f.request(NodeCommand::Shutdown), NodeCommandResult::Success);
     f.runtime.shutdown().unwrap();
 
@@ -191,12 +194,18 @@ fn runtime_thread_logs_reach_the_log_stream() {
         .split_inclusive(|&b| b == b'\n')
         .map(|line| NodeLogRecord::from_line(line).unwrap())
         .collect();
-    assert!(
-        records
-            .iter()
-            .any(|r| r.message == "shutdown requested by Command"),
-        "{records:?}"
-    );
+    for (thread, message) in [
+        (
+            "simulation",
+            "emergency stop: host_ctrl stop_generation advanced",
+        ),
+        ("ipc", "shutdown requested by Command"),
+    ] {
+        assert!(
+            records.iter().any(|r| r.message == message),
+            "no {thread} thread record {message:?} in {records:?}"
+        );
+    }
 }
 
 #[test]

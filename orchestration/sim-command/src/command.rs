@@ -211,7 +211,8 @@ impl CommandState<'_> {
                 session.run = RunState::Idle;
                 let command = match op {
                     SessionOp::Stop => NodeCommand::Stop,
-                    _ => NodeCommand::Reset,
+                    SessionOp::Reset => NodeCommand::Reset,
+                    SessionOp::Start | SessionOp::Status => unreachable!(),
                 };
                 session.broadcast(command, timeout)?;
             }

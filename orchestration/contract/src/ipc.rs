@@ -57,7 +57,8 @@ pub fn isolated_config(iox_root: &Path) -> Result<Config, IpcError> {
     Ok(cfg)
 }
 
-/// Wait for another process already cleaning the same dead node.
+/// Deadline of [`remove_dead_nodes`], including retries while another process
+/// cleans the same dead nodes concurrently.
 const DEAD_NODE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const DEAD_NODE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -68,7 +69,8 @@ const DEAD_NODE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 pub fn remove_dead_nodes(config: &Config) -> Result<usize, IpcError> {
     let deadline = Instant::now() + DEAD_NODE_CLEANUP_TIMEOUT;
     loop {
-        match remove_dead_nodes_once(config) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match remove_dead_nodes_once(config, remaining) {
             // Another process (e.g. a starting Node) cleaning or opening the
             // same services concurrently can fail a pass transiently.
             Err(_) if Instant::now() < deadline => thread::sleep(DEAD_NODE_RETRY_INTERVAL),
@@ -77,7 +79,7 @@ pub fn remove_dead_nodes(config: &Config) -> Result<usize, IpcError> {
     }
 }
 
-fn remove_dead_nodes_once(config: &Config) -> Result<usize, IpcError> {
+fn remove_dead_nodes_once(config: &Config, timeout: Duration) -> Result<usize, IpcError> {
     let mut dead = Vec::new();
     let mut remaining = 0;
     Node::<ipc::Service>::list(config, |state| {
@@ -91,7 +93,7 @@ fn remove_dead_nodes_once(config: &Config) -> Result<usize, IpcError> {
     })
     .map_err(|e| IpcError::new(format!("list iceoryx nodes: {e:?}")))?;
     for view in dead {
-        view.blocking_remove_stale_resources(DEAD_NODE_CLEANUP_TIMEOUT)
+        view.blocking_remove_stale_resources(timeout)
             .map_err(|e| IpcError::new(format!("remove dead iceoryx node: {e:?}")))?;
     }
     Ok(remaining)
