@@ -26,8 +26,9 @@ pub(crate) fn attach(sender: SyncSender<NodeLogRecord>) {
     THREAD_SENDER.with(|slot| *slot.borrow_mut() = Some(sender));
 }
 
-/// Install the process-wide `log` front end unless another logger is installed.
-pub(crate) fn install() {
+/// Install the process-wide `log` front end that feeds [`crate::NodeRuntime`]'s
+/// log thread. Does nothing if another logger is already installed.
+pub fn install_logger() {
     if log::set_logger(&NodeLogger).is_ok() {
         log::set_max_level(log::LevelFilter::Info);
     }
@@ -91,7 +92,7 @@ pub(crate) fn log_loop(records: &Receiver<NodeLogRecord>, mut stream: impl Write
 }
 
 /// Stand-in for the TCP stream to the Orchestrator host: discards every byte.
-pub(crate) struct DummyTcpStream;
+pub struct DummyTcpStream;
 
 impl Write for DummyTcpStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -151,10 +152,14 @@ mod tests {
     }
 
     #[test]
-    fn unattached_thread_logging_is_a_no_op() {
+    fn unattached_thread_does_not_reach_other_threads_channels() {
+        let (tx, rx) = channel();
+        let attached = thread::spawn(move || attach(tx));
         thread::spawn(|| emit(log::Level::Error, "nobody listens"))
             .join()
             .unwrap();
+        attached.join().unwrap();
+        assert_eq!(rx.iter().count(), 0);
     }
 
     #[test]

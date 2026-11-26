@@ -12,7 +12,7 @@
 //! have exited and dropped their log senders.
 
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -23,7 +23,7 @@ use contract::{
 };
 
 use crate::ipc::ipc_loop;
-use crate::logger::{self, DummyTcpStream, log_loop};
+use crate::logger::{self, log_loop};
 use crate::probe::probe_loop;
 use crate::simulation::{SimState, simulation_loop};
 
@@ -66,11 +66,13 @@ pub struct NodeRuntime {
 
 impl NodeRuntime {
     /// Open `host_ctrl`, start the four threads, and return once the RR
-    /// server exists.
-    pub fn spawn(config: NodeConfig) -> Result<Self, NodeRuntimeError> {
+    /// server exists. The log thread writes JSON lines to `log_stream`.
+    pub fn spawn(
+        config: NodeConfig,
+        log_stream: impl Write + Send + 'static,
+    ) -> Result<Self, NodeRuntimeError> {
         let host_ctrl = HostCtrl::open(&config.iox_root, config.board_count)
             .map_err(NodeRuntimeError::HostCtrl)?;
-        logger::install();
         let mut runtime = Self {
             state: Arc::new(AtomicU8::new(SimState::Stopped as u8)),
             threads: ThreadGroup::new(),
@@ -83,7 +85,7 @@ impl NodeRuntime {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 
         runtime.spawn_thread("sim-node-log", move || {
-            log_loop(&log_rx, DummyTcpStream);
+            log_loop(&log_rx, log_stream);
             Ok(())
         })?;
         let state = runtime.state.clone();

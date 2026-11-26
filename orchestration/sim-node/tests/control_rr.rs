@@ -1,14 +1,17 @@
 //! Command ↔ Node control RR against a running [`NodeRuntime`] (#153).
 
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use contract::test_support::{node_command_client, unique_cluster};
 use contract::{
     HashedId, HostCtrl, IoxNode, MAX_NODE_PROBE_IDS, NodeCommand, NodeCommandClient,
-    NodeCommandDto, NodeCommandError, NodeCommandResult, NodeConfig, NodeRequestError,
+    NodeCommandDto, NodeCommandError, NodeCommandResult, NodeConfig, NodeLogRecord,
+    NodeRequestError,
 };
-use sim_node::{NodeRuntime, SimState};
+use sim_node::{DummyTcpStream, NodeRuntime, SimState, install_logger};
 use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -24,15 +27,22 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_log_stream(DummyTcpStream)
+    }
+
+    fn with_log_stream(log_stream: impl Write + Send + 'static) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let host_ctrl = HostCtrl::create(dir.path(), 1, false).unwrap();
         let cluster = unique_cluster();
-        let runtime = NodeRuntime::spawn(NodeConfig {
-            iox_root: dir.path().to_path_buf(),
-            cluster,
-            node_key: NODE_KEY,
-            board_count: 1,
-        })
+        let runtime = NodeRuntime::spawn(
+            NodeConfig {
+                iox_root: dir.path().to_path_buf(),
+                cluster,
+                node_key: NODE_KEY,
+                board_count: 1,
+            },
+            log_stream,
+        )
         .unwrap();
         let (iox, client) = node_command_client(dir.path(), cluster, NODE_KEY);
         Self {
@@ -151,6 +161,41 @@ fn malformed_counts_are_bad_param() {
     assert_eq!(
         f.request(command),
         NodeCommandResult::Error(NodeCommandError::BadParam)
+    );
+}
+
+#[derive(Clone, Default)]
+struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedLog {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn runtime_thread_logs_reach_the_log_stream() {
+    install_logger();
+    let log = SharedLog::default();
+    let f = Fixture::with_log_stream(log.clone());
+    assert_eq!(f.request(NodeCommand::Shutdown), NodeCommandResult::Success);
+    f.runtime.shutdown().unwrap();
+
+    let bytes = log.0.lock().unwrap();
+    let records: Vec<_> = bytes
+        .split_inclusive(|&b| b == b'\n')
+        .map(|line| NodeLogRecord::from_line(line).unwrap())
+        .collect();
+    assert!(
+        records
+            .iter()
+            .any(|r| r.message == "shutdown requested by Command"),
+        "{records:?}"
     );
 }
 

@@ -18,6 +18,9 @@ use crate::endpoint::endpoint_loop;
 use crate::probe::probe_loop;
 use crate::router::{CommandHandle, command_router};
 
+/// REST requests waiting for the Command thread; more are rejected with 503.
+const COMMAND_QUEUE_CAP: usize = 64;
+
 /// Command host settings.
 #[derive(Clone, Debug)]
 pub struct CommandConfig {
@@ -80,7 +83,7 @@ impl From<ThreadPanicked> for CommandHostError {
 /// Running Command / Build / Probe / Endpoint threads. Dropping shuts them
 /// down; the Command thread first terminates every Node it launched.
 pub struct CommandHost {
-    requests: mpsc::Sender<CommandRequest>,
+    requests: mpsc::SyncSender<CommandRequest>,
     threads: ThreadGroup<CommandHostError>,
 }
 
@@ -92,7 +95,7 @@ impl CommandHost {
         let mut threads = ThreadGroup::new();
         // Declared after `threads`: an early return drops the senders first,
         // so the threads already spawned can end while `threads` joins them.
-        let (requests_tx, requests_rx) = mpsc::channel();
+        let (requests_tx, requests_rx) = mpsc::sync_channel(COMMAND_QUEUE_CAP);
         let (build_tx, build_rx) = mpsc::channel();
         let (endpoint_tx, endpoint_rx) = mpsc::channel();
         let spawn_error =
@@ -155,6 +158,7 @@ impl CommandHost {
 }
 
 /// Only directories named like [`CommandConfig::session_root`] are touched.
+/// A session that cannot be removed is reported on stderr and left in place.
 fn remove_stale_sessions(work_dir: &Path) -> Result<(), CommandHostError> {
     std::fs::create_dir_all(work_dir).map_err(CommandHostError::Io)?;
     for entry in std::fs::read_dir(work_dir).map_err(CommandHostError::Io)? {
@@ -163,8 +167,11 @@ fn remove_stale_sessions(work_dir: &Path) -> Result<(), CommandHostError> {
             .file_name()
             .to_str()
             .is_some_and(|name| name.parse::<ClusterId>().is_ok());
-        if is_session && entry.file_type().map_err(CommandHostError::Io)?.is_dir() {
-            remove_session_dir(&entry.path())?;
+        if is_session && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let path = entry.path();
+            if let Err(e) = remove_session_dir(&path) {
+                eprintln!("sim-command: keeping stale session {}: {e}", path.display());
+            }
         }
     }
     Ok(())

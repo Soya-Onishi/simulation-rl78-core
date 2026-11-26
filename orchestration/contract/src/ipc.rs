@@ -7,7 +7,8 @@
 
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use iceoryx2::config::Config;
 use iceoryx2::prelude::*;
@@ -58,12 +59,25 @@ pub fn isolated_config(iox_root: &Path) -> Result<Config, IpcError> {
 
 /// Wait for another process already cleaning the same dead node.
 const DEAD_NODE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+const DEAD_NODE_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Remove the resources of iceoryx nodes under `config` whose process died
 /// without releasing them (e.g. a SIGKILLed Node).
 ///
 /// Returns how many nodes remain: alive, or not identifiable as dead.
 pub fn remove_dead_nodes(config: &Config) -> Result<usize, IpcError> {
+    let deadline = Instant::now() + DEAD_NODE_CLEANUP_TIMEOUT;
+    loop {
+        match remove_dead_nodes_once(config) {
+            // Another process (e.g. a starting Node) cleaning or opening the
+            // same services concurrently can fail a pass transiently.
+            Err(_) if Instant::now() < deadline => thread::sleep(DEAD_NODE_RETRY_INTERVAL),
+            result => return result,
+        }
+    }
+}
+
+fn remove_dead_nodes_once(config: &Config) -> Result<usize, IpcError> {
     let mut dead = Vec::new();
     let mut remaining = 0;
     Node::<ipc::Service>::list(config, |state| {

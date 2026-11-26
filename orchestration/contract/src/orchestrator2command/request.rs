@@ -3,12 +3,13 @@
 //! Resource ids (`cluster_id`, `node_key`) are path params — see [`super::paths`].
 
 use std::collections::HashSet;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::command2node::NodeCommand;
 use crate::id::HashedId;
-use crate::topology::{LogicalTopology, TopologyError};
+use crate::topology::{LogicalTopology, TopologyError, node_key};
 
 /// `POST` [`super::paths::sessions`] body.
 ///
@@ -24,13 +25,18 @@ impl SessionsBody {
     /// Valid topology, and `nodes` is a non-empty set of its boards.
     pub fn validate(&self) -> Result<(), TopologyError> {
         self.topology.validate()?;
-        let boards = self.topology.boards_by_key()?;
         if self.nodes.is_empty() {
             return Err(TopologyError("nodes must not be empty".into()));
         }
+        let boards: HashSet<_> = self
+            .topology
+            .boards
+            .iter()
+            .map(|board| node_key(&board.id))
+            .collect();
         let mut seen = HashSet::new();
         for node in &self.nodes {
-            if !boards.contains_key(node) {
+            if !boards.contains(node) {
                 return Err(TopologyError(format!(
                     "node {node} is not a topology board"
                 )));
@@ -42,7 +48,7 @@ impl SessionsBody {
         Ok(())
     }
 
-    /// Some topology board runs on another host.
+    /// Some topology board runs on another host. Meaningful only after [`Self::validate`].
     #[must_use]
     pub fn has_remote_hosts(&self) -> bool {
         self.nodes.len() < self.topology.board_count()
@@ -89,6 +95,18 @@ pub enum NodeCommandDtoError {
     TooManyParams,
     TooManyProbes,
 }
+
+impl fmt::Display for NodeCommandDtoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InspectTooLarge => "inspect payload is too large",
+            Self::TooManyParams => "too many action params",
+            Self::TooManyProbes => "too many probe ids",
+        })
+    }
+}
+
+impl std::error::Error for NodeCommandDtoError {}
 
 impl NodeCommandDto {
     /// Pack into the iceoryx RR sample.

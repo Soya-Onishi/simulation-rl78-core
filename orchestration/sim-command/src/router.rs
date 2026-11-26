@@ -5,10 +5,11 @@
 //! Clients use the matching `url(...)` helpers. Handlers parse the request and
 //! forward it to the Command thread; they hold no state of their own.
 
-use std::sync::mpsc;
+use std::sync::mpsc::{self, TrySendError};
 
 use axum::Router;
-use axum::extract::{Json, Path, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, Json, Path, Request, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use contract::{
@@ -24,27 +25,29 @@ use crate::command::{CommandError, CommandOp, CommandRequest, NodeOp, NodeRef, S
 type ApiError = (StatusCode, Json<RestErrorBody>);
 type ApiResult = Result<(StatusCode, Json<OrchestratorReply>), ApiError>;
 
-/// Router state: the Command thread's request queue.
+/// Router state: the Command thread's bounded request queue.
 #[derive(Clone)]
-pub(crate) struct CommandHandle(mpsc::Sender<CommandRequest>);
+pub(crate) struct CommandHandle(mpsc::SyncSender<CommandRequest>);
 
 impl CommandHandle {
-    pub(crate) fn new(requests: mpsc::Sender<CommandRequest>) -> Self {
+    pub(crate) fn new(requests: mpsc::SyncSender<CommandRequest>) -> Self {
         Self(requests)
     }
 
     async fn dispatch(&self, op: CommandOp) -> ApiResult {
-        let stopped = || {
-            api_error(&CommandError::new(
-                RestErrorCode::Unavailable,
-                "command thread stopped",
-            ))
-        };
+        let unavailable =
+            |message| api_error(&CommandError::new(RestErrorCode::Unavailable, message));
         let (reply, reply_rx) = oneshot::channel();
         self.0
-            .send(CommandRequest { op, reply })
-            .map_err(|_| stopped())?;
-        match reply_rx.await.map_err(|_| stopped())? {
+            .try_send(CommandRequest { op, reply })
+            .map_err(|e| match e {
+                TrySendError::Full(_) => unavailable("command queue full"),
+                TrySendError::Disconnected(_) => unavailable("command thread stopped"),
+            })?;
+        match reply_rx
+            .await
+            .map_err(|_| unavailable("command thread stopped"))?
+        {
             Ok(reply) => Ok((StatusCode::OK, Json(reply))),
             Err(e) => Err(api_error(&e)),
         }
@@ -92,6 +95,24 @@ fn bad_request(message: impl Into<String>) -> ApiError {
     api_error(&CommandError::new(RestErrorCode::BadRequest, message))
 }
 
+/// [`Json`] whose rejections are 400 [`RestErrorBody`] like every other error.
+struct ApiJson<T>(T);
+
+impl<T, S> FromRequest<S> for ApiJson<T>
+where
+    Json<T>: FromRequest<S, Rejection = JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(req, state)
+            .await
+            .map_err(|e| bad_request(e.body_text()))?;
+        Ok(Self(value))
+    }
+}
+
 fn parse_cluster_id(raw: &str) -> Result<ClusterId, ApiError> {
     raw.parse()
         .map_err(|_| bad_request(format!("invalid cluster_id path segment: {raw}")))
@@ -108,7 +129,7 @@ fn parse_node(cluster_id: &str, node_key: &str) -> Result<NodeRef, ApiError> {
 
 async fn post_sessions(
     State(handle): State<CommandHandle>,
-    Json(body): Json<SessionsBody>,
+    ApiJson(body): ApiJson<SessionsBody>,
 ) -> ApiResult {
     let (_, reply) = handle.dispatch(CommandOp::CreateSession(body)).await?;
     Ok((StatusCode::CREATED, reply))
@@ -131,7 +152,7 @@ async fn node_op(
 async fn post_start(
     State(handle): State<CommandHandle>,
     Path(cluster_id): Path<String>,
-    Json(body): Json<StartBody>,
+    ApiJson(body): ApiJson<StartBody>,
 ) -> ApiResult {
     if body.until_ns.is_some() {
         return Err(bad_request("until_ns is not supported until Phase 3"));
@@ -163,19 +184,19 @@ async fn get_status(
 async fn post_node_command(
     State(handle): State<CommandHandle>,
     Path(ids): Path<(String, String)>,
-    Json(body): Json<NodeCommandBody>,
+    ApiJson(body): ApiJson<NodeCommandBody>,
 ) -> ApiResult {
     let command = body
         .command
         .to_wire()
-        .map_err(|e| bad_request(format!("node command: {e:?}")))?;
+        .map_err(|e| bad_request(format!("node command: {e}")))?;
     node_op(&handle, ids, NodeOp::Command(command)).await
 }
 
 async fn post_probe_interest(
     State(handle): State<CommandHandle>,
     Path(ids): Path<(String, String)>,
-    Json(body): Json<ProbeInterestBody>,
+    ApiJson(body): ApiJson<ProbeInterestBody>,
 ) -> ApiResult {
     let command = NodeCommand::probe_subscribe(&body.probe_ids)
         .ok_or_else(|| bad_request("probe_interest: too many probe ids"))?;

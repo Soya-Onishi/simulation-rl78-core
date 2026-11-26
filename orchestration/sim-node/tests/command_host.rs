@@ -3,7 +3,7 @@
 
 use std::path::Path;
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::http::StatusCode;
@@ -23,9 +23,10 @@ const B: &str = "board-b";
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Host {
-    dir: TempDir,
     host: CommandHost,
     router: Router,
+    // Last: dropping `host` still cleans up session directories inside it.
+    dir: TempDir,
 }
 
 impl Host {
@@ -174,6 +175,32 @@ async fn terminate_and_restart_act_on_the_node_process() {
         StatusCode::NOT_FOUND,
         "terminated node must leave the registration table"
     );
+}
+
+#[tokio::test]
+async fn restart_recovers_a_killed_node() {
+    let h = Host::spawn();
+    let cluster = create_session(&h.router, &[A], &[A]).await;
+    let pid = h.ensure(cluster, A).await;
+    let killed = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let deadline = Instant::now() + TIMEOUT;
+    while h.build_status(cluster, A).await["lifecycle"] == "running" {
+        assert!(
+            Instant::now() < deadline,
+            "killed sim-node {pid} still running"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    h.post(&build_restart::url(cluster, node_key(A)), None)
+        .await;
+    h.post(&start::url(cluster), Some(json!({}))).await;
+    assert_eq!(h.state(cluster).await, "running");
+    h.host.shutdown().unwrap();
 }
 
 struct KillOnDrop(Child);

@@ -12,6 +12,7 @@ use contract::{
     ClusterId, CommandHostStatus, HashedId, HostCtrl, HostCtrlLease, IoxNode, NodeCommand,
     NodeCommandClient, NodeCommandResult, NodeConfig, NodeProcessStatus, NodeRequestError,
     OrchestratorReply, RestErrorCode, SessionsBody, create_iox_node, isolated_config,
+    remove_dead_nodes,
 };
 use tokio::sync::oneshot;
 
@@ -165,25 +166,11 @@ impl CommandState<'_> {
             }
         };
         let iox_root = self.config.session_root(cluster);
-        let host_ctrl = HostCtrl::create(&iox_root, board_count, body.has_remote_hosts())
-            .map_err(|e| CommandError::internal(format!("host_ctrl: {e}")))?;
-        let lease = HostCtrlLease::new(&iox_root);
-        let iox = isolated_config(&iox_root)
-            .and_then(|cfg| create_iox_node(&cfg, "sim-command"))
-            .map_err(|e| CommandError::internal(e.to_string()))?;
-        self.sessions.insert(
-            cluster,
-            Session {
-                cluster,
-                iox_root: iox_root.clone(),
-                nodes: body.nodes.iter().copied().collect(),
-                clients: HashMap::new(),
-                run: RunState::Idle,
-                iox,
-                host_ctrl,
-                _host_ctrl_lease: lease,
-            },
-        );
+        let session =
+            Session::open(cluster, iox_root.clone(), body, board_count).inspect_err(|_| {
+                let _ = remove_session_dir(&iox_root);
+            })?;
+        self.sessions.insert(cluster, session);
         let _ = self
             .endpoint
             .send(EndpointEvent::SessionOpened { cluster, iox_root });
@@ -219,13 +206,14 @@ impl CommandState<'_> {
                 session.broadcast(NodeCommand::Start, timeout)?;
                 session.run = RunState::Running { stop_generation };
             }
-            SessionOp::Stop => {
-                session.broadcast(NodeCommand::Stop, timeout)?;
+            SessionOp::Stop | SessionOp::Reset => {
+                // Idle even if some Node fails: the others have already stopped.
                 session.run = RunState::Idle;
-            }
-            SessionOp::Reset => {
-                session.broadcast(NodeCommand::Reset, timeout)?;
-                session.run = RunState::Idle;
+                let command = match op {
+                    SessionOp::Stop => NodeCommand::Stop,
+                    _ => NodeCommand::Reset,
+                };
+                session.broadcast(command, timeout)?;
             }
         }
         Ok(OrchestratorReply::Ack)
@@ -264,12 +252,12 @@ impl CommandState<'_> {
                 session.register(node.node_key)?;
             }
             NodeOp::BuildRestart => {
-                session.shutdown_node(node.node_key, &call(BuildOp::Status(node))?, timeout);
+                session.shutdown_node(node.node_key, build, timeout);
                 call(BuildOp::Restart(session.node_config(node.node_key)))?;
                 session.register(node.node_key)?;
             }
             NodeOp::BuildTerminate => {
-                session.shutdown_node(node.node_key, &call(BuildOp::Status(node))?, timeout);
+                session.shutdown_node(node.node_key, build, timeout);
                 session.clients.remove(&node.node_key);
                 call(BuildOp::Terminate(node))?;
             }
@@ -298,6 +286,30 @@ impl CommandState<'_> {
 }
 
 impl Session {
+    fn open(
+        cluster: ClusterId,
+        iox_root: PathBuf,
+        body: &SessionsBody,
+        board_count: u32,
+    ) -> Result<Self, CommandError> {
+        let host_ctrl = HostCtrl::create(&iox_root, board_count, body.has_remote_hosts())
+            .map_err(|e| CommandError::internal(format!("host_ctrl: {e}")))?;
+        let lease = HostCtrlLease::new(&iox_root);
+        let iox = isolated_config(&iox_root)
+            .and_then(|cfg| create_iox_node(&cfg, "sim-command"))
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+        Ok(Self {
+            cluster,
+            iox_root,
+            nodes: body.nodes.iter().copied().collect(),
+            clients: HashMap::new(),
+            run: RunState::Idle,
+            iox,
+            host_ctrl,
+            _host_ctrl_lease: lease,
+        })
+    }
+
     /// Running until a Stop / Reset or a `host_ctrl` emergency stop.
     fn status(&self) -> CommandHostStatus {
         match self.run {
@@ -319,7 +331,13 @@ impl Session {
         }
     }
 
+    /// Add `node_key` to the registration table after Build (re)launched it.
     fn register(&mut self, node_key: HashedId<u64>) -> Result<(), CommandError> {
+        // A killed predecessor's server port stays registered until dead nodes
+        // are removed, and the client would send to it instead of the new Node.
+        isolated_config(&self.iox_root)
+            .and_then(|config| remove_dead_nodes(&config))
+            .map_err(|e| CommandError::internal(e.to_string()))?;
         if !self.clients.contains_key(&node_key) {
             let client = NodeCommandClient::create(&self.iox, self.cluster, node_key)
                 .map_err(|e| CommandError::internal(e.to_string()))?;
@@ -346,16 +364,21 @@ impl Session {
         first
     }
 
-    /// Ask a running, registered Node to exit; Build then waits for it.
-    fn shutdown_node(
-        &self,
-        node_key: HashedId<u64>,
-        process: &NodeProcessStatus,
-        timeout: Duration,
-    ) {
-        if let (Some(client), NodeProcessStatus::Running { .. }) =
-            (self.clients.get(&node_key), process)
-        {
+    /// Ask a registered Node to exit unless Build reports it is not running;
+    /// Build then waits for it.
+    fn shutdown_node(&self, node_key: HashedId<u64>, build: &BuildClient, timeout: Duration) {
+        let Some(client) = self.clients.get(&node_key) else {
+            return;
+        };
+        let node = NodeRef {
+            cluster: self.cluster,
+            node_key,
+        };
+        // Still ask when the Build thread is gone: the Node may outlive it.
+        let running = build.call(BuildOp::Status(node)).map_or(true, |process| {
+            matches!(process, NodeProcessStatus::Running { .. })
+        });
+        if running {
             let _ = client.request(NodeCommand::Shutdown, timeout);
         }
     }
@@ -363,15 +386,12 @@ impl Session {
     fn close(self, build: &BuildClient, timeout: Duration) -> Result<(), CommandHostError> {
         let mut first = Ok(());
         for &node_key in &self.nodes {
+            self.shutdown_node(node_key, build, timeout);
             let node = NodeRef {
                 cluster: self.cluster,
                 node_key,
             };
-            let result = build.call(BuildOp::Status(node)).and_then(|process| {
-                self.shutdown_node(node_key, &process, timeout);
-                build.call(BuildOp::Terminate(node))
-            });
-            if let (Err(e), Ok(())) = (result, &first) {
+            if let (Err(e), Ok(())) = (build.call(BuildOp::Terminate(node)), &first) {
                 first = Err(CommandHostError::Io(e));
             }
         }

@@ -26,8 +26,9 @@ until it can be removed.
 - **2-a (#151)**: `sim-node` crate + `contract::shm::mapping` (`HostCtrl`) (create/open/min_remote_vt/board_vt/bump_stop).
 - **2-b (#153)**: Node 3 threads + Command ↔ Node RR (`contract::command2node::rr`). Start / Stop / Reset state machine, `ProbeSubscribe` set (cap 32), `host_ctrl` emergency stop (each `stop_generation` bump stops once). `sim-node` (arguments built by `NodeConfig::to_args`) exits cleanly on `NodeCommand::Shutdown` (Command-internal, not on REST) or when its parent (Command) process exits; signals are not handled.
 - **2-c (#155)**: `CommandHost` runs the Command / Build / Probe / Endpoint threads and answers every REST route through the Command thread (none returns 501).
-  - `POST /sessions` carries the topology and the `node_key`s this host launches; `host_ctrl` is sized by the topology board count.
+  - `POST /sessions` carries the topology and the `node_key`s this host launches; `host_ctrl` is sized by the topology board count. There is no session delete route yet: sessions live until the Command host shuts down.
+  - Malformed JSON bodies are 400 `RestErrorBody` like every other error; a full Command queue is 503.
   - `build_ensure` launches `sim-node` in its own process group and registers its RR client. `node_command` / `probe_interest` to an unregistered node is 404.
-  - terminate / restart send `Shutdown`, then kill after a timeout. On spawn, session directories left by an earlier run are removed after cleaning their dead iceoryx nodes.
+  - terminate / restart send `Shutdown`, then kill after a timeout. ensure / restart clean the session's dead iceoryx nodes before any request, so a killed Node's server port does not shadow its successor. On spawn, session directories left by an earlier run are removed after cleaning their dead iceoryx nodes.
   - `status` is `running` from a successful Start until Stop / Reset or a `host_ctrl` `stop_generation` bump.
   - Node threads send `log` records over mpsc to a log thread that writes one JSON line per record (`NodeLogRecord`) to the Orchestrator host stream, a discarding dummy until the TCP link exists.

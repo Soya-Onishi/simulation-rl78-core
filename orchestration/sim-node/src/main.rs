@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use contract::NodeConfig;
-use sim_node::NodeRuntime;
+use sim_node::{DummyTcpStream, NodeRuntime, install_logger};
 
 /// Main thread poll period for parent exit and thread exit.
 const MAIN_POLL: Duration = Duration::from_millis(50);
@@ -33,7 +33,8 @@ fn main() -> ExitCode {
 }
 
 fn run(config: NodeConfig, parent: u32) -> Result<(), String> {
-    let runtime = NodeRuntime::spawn(config).map_err(|e| e.to_string())?;
+    install_logger();
+    let runtime = NodeRuntime::spawn(config, DummyTcpStream).map_err(|e| e.to_string())?;
     while runtime.is_running() {
         if parent_id() != parent {
             eprintln!("sim-node: parent process {parent} exited; shutting down");

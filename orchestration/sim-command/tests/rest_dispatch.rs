@@ -19,9 +19,10 @@ use sim_command::{CommandConfig, CommandHost};
 use tempfile::TempDir;
 
 struct Host {
-    dir: TempDir,
     host: CommandHost,
     router: Router,
+    // Last: dropping `host` still cleans up session directories inside it.
+    dir: TempDir,
 }
 
 fn dummy_node(dir: &Path) -> std::path::PathBuf {
@@ -82,14 +83,30 @@ async fn session_body_is_validated() {
             .contains("not a topology board")
     );
 
-    let (code, _) = call(
+    let (code, reply) = call(
         &h.router,
         "POST",
         sessions::ROUTE,
         Some(json!({"nodes": []})),
     )
     .await;
-    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&reply), "bad_request", "{reply}");
+}
+
+#[tokio::test]
+async fn undecodable_node_command_is_bad_request() {
+    let h = host();
+    let cluster = create_session(&h.router, &[A], &[A]).await;
+    let (code, reply) = call(
+        &h.router,
+        "POST",
+        &node_command::url(cluster, node_key(A)),
+        Some(json!({"command": {"type": "bogus"}})),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&reply), "bad_request", "{reply}");
 }
 
 #[tokio::test]
@@ -164,7 +181,12 @@ async fn too_many_probe_ids_are_bad_request() {
     )
     .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
-    assert!(reply["message"].as_str().unwrap().contains("TooManyProbes"));
+    assert!(
+        reply["message"]
+            .as_str()
+            .unwrap()
+            .contains("too many probe ids")
+    );
 
     let body = json!({"probe_ids": ids});
     let (code, _) = call(
