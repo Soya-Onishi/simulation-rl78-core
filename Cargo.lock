@@ -1493,6 +1493,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "contract",
+ "serde_json",
+ "sim-command",
+ "tempfile",
  "tokio",
  "tower",
 ]
@@ -1515,9 +1518,13 @@ dependencies = [
 name = "sim-node"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "contract",
  "log",
+ "serde_json",
+ "sim-command",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

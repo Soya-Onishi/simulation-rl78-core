@@ -6,10 +6,17 @@ rust-version.workspace = true
 description = "Command host runtime (Orchestrator REST façade; Build/Probe/Endpoint threads)"
 publish = false
 
+[features]
+test-support = ["dep:serde_json", "dep:tower"]
+
 [dependencies]
 axum = "0.8"
 contract = { path = "../contract" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = { version = "1", optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+tower = { version = "0.5", features = ["util"], optional = true }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
+contract = { path = "../contract", features = ["test-support"] }
+sim-command = { path = ".", features = ["test-support"] }
+tempfile = "3"

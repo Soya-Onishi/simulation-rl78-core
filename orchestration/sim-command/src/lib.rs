@@ -1,11 +1,17 @@
-//! Command host runtime skeleton (#141 / #139).
+//! Command host runtime (#141 / #139 / #147).
 //!
-//! Owns the Orchestrator-facing axum router. Handlers are stubs until the
-//! four Command threads (command / build / probe / endpoint) are wired.
-//!
-//! Phase 2-a: the `host_ctrl` mapping ([`contract::HostCtrl`]) is available for
-//! session create; thread wiring is a later Phase 2 slice.
+//! [`CommandHost`] runs the Command / Build / Probe / Endpoint threads and
+//! serves the Orchestrator-facing REST API ([`CommandHost::router`]). Handlers
+//! forward each request to the Command thread, which owns the sessions, the
+//! node registration table, and the Command → Node RR clients.
 
-pub mod router;
+mod build;
+mod command;
+mod endpoint;
+mod host;
+mod probe;
+mod router;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
-pub use router::command_router;
+pub use host::{CommandConfig, CommandHost, CommandHostError};
