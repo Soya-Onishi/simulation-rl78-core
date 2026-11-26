@@ -9,6 +9,7 @@ pub mod endpoint;
 pub mod id;
 pub mod ipc;
 pub mod names;
+pub mod node2orchestrator;
 pub mod orchestrator2command;
 pub mod probe;
 pub mod shm;
@@ -29,6 +30,7 @@ pub use ipc::{IoxNode, IpcError, create_iox_node, isolated_config};
 pub use names::{
     PROBE_SERVICE_SUFFIX, node_command_rr_path, node_endpoint_rx_path, probe_service_path,
 };
+pub use node2orchestrator::{NodeLogLevel, NodeLogRecord};
 pub use orchestrator2command::{
     API_PREFIX, CommandHostStatus, NodeCommandBody, NodeCommandDto, NodeCommandDtoError,
     NodeCommandErrorDto, NodeCommandResultDto, NodeProcessStatus, OrchestratorReply,

@@ -1,13 +1,15 @@
-//! Node process runtime: IPC / Probe / Simulation threads (#147 / #153).
+//! Node process runtime: IPC / Probe / Simulation / log threads (#147 / #153).
 //!
 //! The IPC thread owns the Command ↔ Node RR server and forwards each request
 //! over an mpsc channel with a one-shot reply channel: `ProbeSubscribe` to the
-//! Probe thread, everything else to the Simulation thread.
+//! Probe thread, everything else to the Simulation thread. Those three threads
+//! send their `log` records to the log thread (see [`crate::logger`]).
 //!
 //! Shutdown: only the IPC thread watches the shutdown flag, and it also exits
 //! after answering [`NodeCommand::Shutdown`]. When it exits it drops both
 //! senders, so the Simulation and Probe threads end on disconnect after any
-//! in-flight request has been answered.
+//! in-flight request has been answered. The log thread ends once all three
+//! have exited and dropped their log senders.
 
 use std::fmt;
 use std::io;
@@ -16,9 +18,10 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
 
-use contract::{HostCtrl, IpcError, NodeCommand, NodeCommandResult, NodeConfig};
+use contract::{HostCtrl, IpcError, NodeCommand, NodeCommandResult, NodeConfig, NodeLogRecord};
 
 use crate::ipc::ipc_loop;
+use crate::logger::{self, DummyTcpStream, log_loop};
 use crate::probe::probe_loop;
 use crate::simulation::{SimState, simulation_loop};
 
@@ -47,7 +50,7 @@ pub(crate) struct Routed {
     pub(crate) reply: SyncSender<NodeCommandResult>,
 }
 
-/// Running IPC / Probe / Simulation threads. Dropping shuts them down.
+/// Running IPC / Probe / Simulation / log threads. Dropping shuts them down.
 pub struct NodeRuntime {
     shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
@@ -55,33 +58,42 @@ pub struct NodeRuntime {
 }
 
 impl NodeRuntime {
-    /// Open `host_ctrl`, start the three threads, and return once the RR
+    /// Open `host_ctrl`, start the four threads, and return once the RR
     /// server exists.
     pub fn spawn(config: NodeConfig) -> Result<Self, NodeRuntimeError> {
         let host_ctrl = HostCtrl::open(&config.iox_root, config.board_count)
             .map_err(NodeRuntimeError::HostCtrl)?;
+        logger::install();
         let mut runtime = Self {
             shutdown: Arc::new(AtomicBool::new(false)),
             state: Arc::new(AtomicU8::new(SimState::Stopped as u8)),
-            threads: Vec::with_capacity(3),
+            threads: Vec::with_capacity(4),
         };
+        // Declared after `runtime`: an early return drops `log_tx` first, so
+        // the log thread can end while `runtime`'s drop joins it.
+        let (log_tx, log_rx) = logger::channel();
         let (sim_tx, sim_rx) = mpsc::channel();
         let (probe_tx, probe_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
 
+        runtime.spawn_thread("sim-node-log", move || {
+            log_loop(&log_rx, DummyTcpStream);
+            Ok(())
+        })?;
         let state = runtime.state.clone();
-        runtime.spawn_thread("sim-node-simulation", move || {
+        runtime.spawn_logged_thread("sim-node-simulation", &log_tx, move || {
             simulation_loop(&host_ctrl, &sim_rx, &state);
             Ok(())
         })?;
-        runtime.spawn_thread("sim-node-probe", move || {
+        runtime.spawn_logged_thread("sim-node-probe", &log_tx, move || {
             probe_loop(&probe_rx);
             Ok(())
         })?;
         let shutdown = runtime.shutdown.clone();
-        runtime.spawn_thread("sim-node-ipc", move || {
+        runtime.spawn_logged_thread("sim-node-ipc", &log_tx, move || {
             ipc_loop(&config, &sim_tx, &probe_tx, &shutdown, &ready_tx)
         })?;
+        drop(log_tx);
 
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(runtime),
@@ -125,6 +137,20 @@ impl NodeRuntime {
             .map_err(|e| NodeRuntimeError::Thread(format!("spawn {name}: {e}")))?;
         self.threads.push(handle);
         Ok(())
+    }
+
+    /// [`Self::spawn_thread`] whose `log` records go to the log thread.
+    fn spawn_logged_thread(
+        &mut self,
+        name: &str,
+        log_tx: &SyncSender<NodeLogRecord>,
+        body: impl FnOnce() -> Result<(), NodeRuntimeError> + Send + 'static,
+    ) -> Result<(), NodeRuntimeError> {
+        let log_tx = log_tx.clone();
+        self.spawn_thread(name, move || {
+            logger::attach(log_tx);
+            body()
+        })
     }
 
     fn join_threads(&mut self) -> Result<(), NodeRuntimeError> {
